@@ -1,0 +1,33 @@
+# ==============================================================================
+# AI DJ — MY CUSTOM SONG LIST & PARTY PLAYLIST
+# ==============================================================================
+# Add any song you want the AI DJ to know about and play!
+# 
+# FORMAT:
+# - Write one song per line.
+# - You can write Song Names (e.g., "Sidhu Moose Wala - 295")
+# - Or paste YouTube / YouTube Music links (e.g., "https://www.youtube.com/watch?v=kJQP7kiw5Fk")
+# - Lines starting with '#' are comments and ignored.
+# ==============================================================================
+
+# --- Punjabi & Bhangra Bangers ---
+Sidhu Moose Wala - 295
+Diljit Dosanjh - Lover
+AP Dhillon - Brown Munde
+Shubh - Baller
+Karan Aujla - Softly
+Mankirt Aulakh - Badnam
+
+# --- Bollywood & Desi Party Hits ---
+Badshah - Kar Gayi Chull
+Guru Randhawa - High Rated Gabru
+Mika Singh - Subha Hone Na De
+Yo Yo Honey Singh - Dope Shope
+
+# --- Global Dance & Pop Anthems ---
+https://www.youtube.com/watch?v=kJQP7kiw5Fk
+The Weeknd - Blinding Lights
+Dua Lipa - Levitating
+David Guetta - Titanium
+
+Karan Aujla - Tauba Tauba

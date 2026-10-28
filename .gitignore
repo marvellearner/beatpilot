@@ -1,0 +1,18 @@
+# Dependencies & build output
+node_modules/
+dist/
+
+# Local binaries (yt-dlp.exe is ~23 MB and not used by the code)
+bin/
+
+# Personal listening history, recreated automatically at runtime
+data/play_history.json
+
+# Environment & editor files
+.env
+.env.*
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
