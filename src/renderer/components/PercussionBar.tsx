@@ -8,6 +8,7 @@ interface PercussionBarProps {
   autoPilotActive?: boolean;
   onToggleAutoPilot?: () => void;
   onTogglePlay: () => void;
+  onResync?: () => void;
 }
 
 export const PercussionBar: React.FC<PercussionBarProps> = ({
@@ -16,6 +17,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
   autoPilotActive = true,
   onToggleAutoPilot,
   onTogglePlay,
+  onResync,
 }) => {
   const state = percussionDeck.getState();
 
@@ -60,6 +62,17 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
 
         {/* Master Transport, Auto-Pilot Toggle & Quick Mute */}
         <div id="percussion-bar-transport" className="flex items-center gap-3">
+          {onResync && (
+            <button
+              onClick={onResync}
+              className="text-xs font-mono font-bold px-3 py-2 rounded-xl border bg-purple-500/20 border-purple-500/40 text-purple-200 hover:bg-purple-500/30 flex items-center gap-1.5 transition-all shadow-sm"
+              title="Snap live rhythm enhancer to song tempo and downbeat phase using AI"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-purple-300 animate-pulse" />
+              <span>AI SYNC</span>
+            </button>
+          )}
+
           {onToggleAutoPilot && (
             <button
               onClick={onToggleAutoPilot}
@@ -114,7 +127,16 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
         <div id="percussion-bar-advisor-reason" className="bg-black/40 px-3.5 py-1.5 rounded-xl border border-white/5 font-mono text-[11px] text-rose-300 mt-2.5 flex items-center gap-2">
           <Bot className="w-4 h-4 text-rose-400 shrink-0" />
           <span className="font-bold text-white">AI Drum Decision:</span>
-          <span className="truncate">{decisionReason}</span>
+          <span className="truncate flex-1">{decisionReason}</span>
+          {onResync && (
+            <button
+              onClick={onResync}
+              className="px-2 py-0.5 text-[10px] font-sans font-bold bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 border border-purple-400/30 rounded shrink-0 transition-colors"
+              title="Re-run AI rhythmic analysis and snap phase lock"
+            >
+              Sync Now
+            </button>
+          )}
         </div>
       )}
 

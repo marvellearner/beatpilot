@@ -89,6 +89,9 @@ export const App: React.FC = () => {
         case 'CMD_PERCUSSION_MUTE':
           engine.percussionDeck.toggleMute();
           break;
+        case 'CMD_RESYNC_PERCUSSION':
+          engine.resyncPercussionToActiveDeck();
+          break;
         case 'CMD_ADD_QUEUE':
           engine.acquireTrack(action.query, false);
           break;
@@ -146,6 +149,11 @@ export const App: React.FC = () => {
         case 'CMD_PLAY_STARTER_SONG':
           engine.playStarterSong(action.songId);
           break;
+        case 'CMD_TOGGLE_FAVORITE': {
+          const curTrack = action.song || (engine.activeDeck === 'A' ? engine.deckA : engine.deckB).getPlaybackState().track;
+          if (curTrack) engine.toggleFavorite(curTrack);
+          break;
+        }
       }
     },
     [engine]
@@ -460,6 +468,7 @@ export const App: React.FC = () => {
               autoPilotActive={engine.autoPercussionEnabled}
               onToggleAutoPilot={() => engine.toggleAutoPercussion()}
               onTogglePlay={() => engine.togglePercussion()}
+              onResync={() => engine.resyncPercussionToActiveDeck()}
             />
           </section>
 
@@ -536,22 +545,29 @@ export const App: React.FC = () => {
                 </div>
 
                 <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                  <span
-                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
-                      item.status === 'ready'
-                        ? 'bg-emerald-500/20 text-emerald-300 font-bold'
-                        : item.status === 'failed'
-                        ? 'bg-red-500/20 text-red-300'
-                        : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                    }`}
-                  >
-                    {item.status.toUpperCase()}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    {item.isDiskCached && (
+                      <span className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold">
+                        DISK
+                      </span>
+                    )}
+                    <span
+                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                        item.status === 'ready'
+                          ? 'bg-emerald-500/20 text-emerald-300 font-bold'
+                          : item.status === 'failed'
+                          ? 'bg-red-500/20 text-red-300'
+                          : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                      }`}
+                    >
+                      {item.status.toUpperCase()}
+                    </span>
+                  </div>
 
                   <button
                     onClick={() => engine.mixQueuedTrack(item.id)}
-                    disabled={!item.audioBuffer || engine.isTransitioning}
-                    title={item.audioBuffer ? 'Mix into this song now' : 'Still loading'}
+                    disabled={item.status !== 'ready' || engine.isTransitioning}
+                    title={item.status === 'ready' ? 'Mix into this song now' : 'Still loading'}
                     className="flex items-center gap-1 text-[10px] font-bold text-cyan-400 hover:text-cyan-300 bg-white/5 hover:bg-white/10 px-2 py-1 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                   >
                     <Zap className="w-3 h-3" />
@@ -584,9 +600,25 @@ export const App: React.FC = () => {
             ))}
           </div>
 
-          <div className="hidden sm:flex items-center gap-1.5 text-purple-400 font-bold text-[11px]">
+          <div
+            className={`hidden sm:flex items-center gap-1.5 font-bold text-[11px] ${
+              engine.aiProvider === 'gemini'
+                ? 'text-cyan-400'
+                : engine.aiStatus === 'online'
+                ? 'text-purple-400'
+                : 'text-slate-500'
+            }`}
+          >
             <Sparkles className={`w-3.5 h-3.5 ${isAiThinking ? 'animate-spin' : 'animate-pulse'}`} />
-            <span>Qwen 2.5 3B Assistant</span>
+            <span>
+              {engine.aiProvider === 'ollama'
+                ? 'Qwen 2.5 3B (Local Primary)'
+                : engine.aiProvider === 'gemini'
+                ? `Gemini ${engine.aiModelName ? engine.aiModelName.replace(/^gemini-/, '') : 'Flash'} (Cloud Backup)`
+                : engine.aiStatus === 'online'
+                ? 'Qwen 2.5 3B (Local)'
+                : 'AI DJ (Offline Heuristics)'}
+            </span>
           </div>
         </div>
 
@@ -600,7 +632,7 @@ export const App: React.FC = () => {
               disabled={isAiThinking}
               placeholder={
                 isAiThinking
-                  ? 'Ollama is generating mixing plan...'
+                  ? 'AI DJ is generating mixing plan...'
                   : "Ask AI DJ (e.g. 'Mix into Deck B with Punjabi Dhol and kill Deck A bass')..."
               }
               className="flex-1 bg-black/50 border border-white/15 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 font-mono disabled:opacity-50"
@@ -642,7 +674,20 @@ export const App: React.FC = () => {
             </div>
 
             {aiResult && !isAiThinking && (
-              <span className="text-[9px] font-mono text-purple-300 bg-purple-500/20 px-1 rounded shrink-0">
+              <span
+                className={`text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 font-semibold ${
+                  aiResult.source === 'gemini_flash'
+                    ? 'text-cyan-300 bg-cyan-500/20 border border-cyan-500/30'
+                    : aiResult.source === 'ollama_qwen'
+                    ? 'text-purple-300 bg-purple-500/20 border border-purple-500/30'
+                    : 'text-amber-300 bg-amber-500/20 border border-amber-500/30'
+                }`}
+              >
+                {aiResult.source === 'gemini_flash'
+                  ? '⚡ Gemini '
+                  : aiResult.source === 'ollama_qwen'
+                  ? '🦙 Qwen '
+                  : '⚙️ Heuristic '}
                 {aiResult.latencyMs}ms
               </span>
             )}

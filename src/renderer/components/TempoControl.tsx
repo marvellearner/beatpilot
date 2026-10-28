@@ -12,7 +12,7 @@ interface TempoControlProps {
   compact?: boolean;
 }
 
-const SPEED_PRESETS = [0.9, 1.0, 1.1, 1.2];
+const SPEED_PRESETS = [0.5, 0.9, 1.0, 1.1, 1.2];
 
 /**
  * Pro-style tempo section for the on-air song: original vs current BPM, an "Original" toggle,
@@ -44,43 +44,45 @@ export const TempoControl: React.FC<TempoControlProps> = ({
   };
 
   return (
-    <div id="tempo-control" className="flex flex-col gap-2 bg-black/30 border border-white/10 rounded-xl p-2.5">
+    <div id="tempo-control" className="flex flex-col gap-2.5 bg-black/40 border border-white/10 rounded-xl p-2.5 w-full">
       {/* Readout: original and current BPM side by side, plus the Original toggle */}
-      <div id="tempo-control-readout" className="flex items-center gap-2">
-        <div className="flex items-center gap-1.5 shrink-0">
-          <Gauge className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-[11px] font-extrabold text-white tracking-wide">TEMPO</span>
-        </div>
+      <div id="tempo-control-readout" className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Gauge className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="text-[11px] font-extrabold text-white tracking-wide">TEMPO</span>
+          </div>
 
-        <div id="tempo-control-original-bpm" className="flex flex-col items-center px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 min-w-[64px]">
-          <span className="text-[9px] uppercase tracking-wider text-slate-400">Original</span>
-          <span className="text-xs font-mono font-bold text-slate-200">{tempo ? tempo.naturalBpm.toFixed(1) : '—'}</span>
-        </div>
+          <div id="tempo-control-original-bpm" className="flex flex-col items-center px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 min-w-[54px] sm:min-w-[64px]">
+            <span className="text-[9px] uppercase tracking-wider text-slate-400">Original</span>
+            <span className="text-xs font-mono font-bold text-slate-200">{tempo ? tempo.naturalBpm.toFixed(1) : '—'}</span>
+          </div>
 
-        <div
-          id="tempo-control-current-bpm"
-          className={`flex flex-col items-center px-2 py-0.5 rounded-lg border min-w-[64px] ${
-            Math.abs(pct) > 0.05 ? 'bg-cyan-500/10 border-cyan-500/30' : 'bg-white/5 border-white/10'
-          }`}
-        >
-          <span className="text-[9px] uppercase tracking-wider text-slate-400">Current</span>
-          <span className="text-xs font-mono font-bold text-white">{tempo ? tempo.currentBpm.toFixed(1) : '—'}</span>
-        </div>
+          <div
+            id="tempo-control-current-bpm"
+            className={`flex flex-col items-center px-2 py-0.5 rounded-lg border min-w-[54px] sm:min-w-[64px] ${
+              Math.abs(pct) > 0.05 ? 'bg-cyan-500/10 border-cyan-500/30' : 'bg-white/5 border-white/10'
+            }`}
+          >
+            <span className="text-[9px] uppercase tracking-wider text-slate-400">Current</span>
+            <span className="text-xs font-mono font-bold text-white">{tempo ? tempo.currentBpm.toFixed(1) : '—'}</span>
+          </div>
 
-        {tempo && (
-          <span className={`text-[10px] font-mono ${pct > 0.05 ? 'text-emerald-300' : pct < -0.05 ? 'text-rose-300' : 'text-slate-500'}`}>
-            {ratio.toFixed(2)}x
-            {!compact && ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`}
-          </span>
-        )}
-        {tempo?.busy && <span className="text-[10px] text-amber-300 animate-pulse">tuning…</span>}
+          {tempo && (
+            <span className={`text-[10px] font-mono font-bold ${pct > 0.05 ? 'text-emerald-300' : pct < -0.05 ? 'text-rose-300' : 'text-slate-500'}`}>
+              {ratio.toFixed(2)}x
+              {!compact && ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`}
+            </span>
+          )}
+          {tempo?.busy && <span className="text-[10px] text-amber-300 animate-pulse font-bold">tuning…</span>}
+        </div>
 
         <button
           id="tempo-control-original-toggle"
           onClick={onTogglePlayOriginal}
           disabled={disabled}
           aria-pressed={tempo?.playOriginal ?? false}
-          className={`ml-auto px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-30 ${
+          className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-30 shrink-0 ${
             tempo?.playOriginal
               ? 'bg-amber-500/20 border-amber-400 text-amber-200'
               : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
@@ -96,7 +98,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
         <button
           onClick={() => nudge(-1)}
           disabled={disabled}
-          className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 disabled:opacity-30"
+          className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 disabled:opacity-30 active:scale-95 transition-all"
           title="Slow down by 1 BPM"
           aria-label="Slow down by 1 BPM"
         >
@@ -107,9 +109,9 @@ export const TempoControl: React.FC<TempoControlProps> = ({
             key={preset}
             onClick={() => onSetTempo(preset)}
             disabled={disabled}
-            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all disabled:opacity-30 ${
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all disabled:opacity-30 active:scale-95 ${
               Math.abs(ratio - preset) < 0.005
-                ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200'
+                ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200 shadow-sm'
                 : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
             }`}
           >
@@ -119,18 +121,18 @@ export const TempoControl: React.FC<TempoControlProps> = ({
         <button
           onClick={() => nudge(1)}
           disabled={disabled}
-          className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 disabled:opacity-30"
+          className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 disabled:opacity-30 active:scale-95 transition-all"
           title="Speed up by 1 BPM"
           aria-label="Speed up by 1 BPM"
         >
           <Plus className="w-3 h-3" />
         </button>
 
-        <form onSubmit={submitBpm} className="flex items-center gap-1">
+        <form onSubmit={submitBpm} className="flex items-center gap-1 ml-auto">
           <input
             type="number"
             inputMode="decimal"
-            min={40}
+            min={30}
             max={220}
             step={0.1}
             value={bpmInput}
@@ -143,7 +145,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
           <button
             type="submit"
             disabled={disabled || !bpmInput}
-            className="px-2 py-1 rounded-lg text-[11px] font-bold bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-30"
+            className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-30 active:scale-95 transition-all"
           >
             Set
           </button>
@@ -154,7 +156,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
       <div id="tempo-control-locks" className="flex flex-wrap items-center gap-1.5">
         <button
           onClick={onToggleKeyLock}
-          className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border transition-all ${
+          className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all active:scale-95 ${
             tempo?.keyLock ?? true
               ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
               : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
@@ -171,7 +173,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
         <button
           onClick={onToggleSetLock}
           disabled={disabled}
-          className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-30 ${
+          className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-30 active:scale-95 ${
             tempo?.setLocked
               ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
               : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'

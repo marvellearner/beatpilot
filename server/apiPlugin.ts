@@ -37,7 +37,126 @@ let ollamaWarmed = false;
 const ROOT_DIR = process.cwd();
 const MY_SONGS_FILE = path.join(ROOT_DIR, 'my_songs.txt');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+
+// Downloaded song audio (compressed, as YouTube sends it; ~4 MB per song), one file per video id
+const AUDIO_CACHE_DIR = path.join(ROOT_DIR, 'cache', 'audio');
+const AUDIO_CACHE_MAX_BYTES = 2 * 1024 ** 3; // ~500 songs; least recently played go first
+
+function cachedAudioPath(videoId: string): string {
+  return path.join(AUDIO_CACHE_DIR, `${videoId}.audio`);
+}
+
+let pruning = false;
+/** Keeps the audio cache under its size limit by deleting the least recently played songs. */
+async function pruneAudioCache() {
+  if (pruning) return;
+  pruning = true;
+  try {
+    const names = (await fs.promises.readdir(AUDIO_CACHE_DIR)).filter((n) => n.endsWith('.audio'));
+    const files = await Promise.all(
+      names.map(async (n) => {
+        const full = path.join(AUDIO_CACHE_DIR, n);
+        const s = await fs.promises.stat(full);
+        return { full, size: s.size, used: s.mtimeMs };
+      })
+    );
+    let total = files.reduce((sum, f) => sum + f.size, 0);
+    if (total <= AUDIO_CACHE_MAX_BYTES) return;
+    // Trim to 90% so this doesn't run after every single new song
+    for (const f of files.sort((a, b) => a.used - b.used)) {
+      if (total <= AUDIO_CACHE_MAX_BYTES * 0.9) break;
+      await fs.promises.unlink(f.full).catch(() => {});
+      total -= f.size;
+    }
+  } catch (err) {
+    console.warn('Audio cache cleanup failed:', err);
+  } finally {
+    pruning = false;
+  }
+}
 const PLAY_HISTORY_FILE = path.join(DATA_DIR, 'play_history.json');
+const FAVORITES_FILE = path.join(DATA_DIR, 'favorites.json');
+
+interface GeminiConfig {
+  apiKey: string;
+  model: string;
+}
+
+/** Detects Gemini API key from process.env or .env file */
+function getGeminiConfig(): GeminiConfig | null {
+  let apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  let model = (process.env.GEMINI_MODEL || '').trim() || 'gemini-3.5-flash-lite';
+
+  const envPath = path.join(ROOT_DIR, '.env');
+  if (fs.existsSync(envPath)) {
+    try {
+      const content = fs.readFileSync(envPath, 'utf-8');
+      const keyMatch = content.match(/^\s*GEMINI_API_KEY\s*=\s*([^\r\n#]+)/m);
+      if (keyMatch) {
+        apiKey = keyMatch[1].trim().replace(/^['"]|['"]$/g, '');
+      }
+      const modelMatch = content.match(/^\s*GEMINI_MODEL\s*=\s*([^\r\n#]+)/m);
+      if (modelMatch) {
+        model = modelMatch[1].trim().replace(/^['"]|['"]$/g, '');
+      }
+    } catch {
+      // ignore read error
+    }
+  }
+
+  if (!apiKey || apiKey.startsWith('YOUR_GEMINI')) return null;
+  return { apiKey, model };
+}
+
+/** One JSON-mode completion from Google Gemini API (cloud backup, ~300ms latency). */
+async function geminiGenerate(prompt: string, maxTokens: number, timeoutMs: number): Promise<string> {
+  const cfg = getGeminiConfig();
+  if (!cfg) throw new Error('GEMINI_API_KEY not configured');
+
+  const modelsToTry = [cfg.model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash'].filter(
+    (m, i, arr) => arr.indexOf(m) === i
+  );
+
+  let lastError: Error | null = null;
+  for (const model of modelsToTry) {
+    try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: maxTokens,
+            responseMimeType: 'application/json',
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        if (resp.status === 404 && model !== modelsToTry[modelsToTry.length - 1]) {
+          continue;
+        }
+        throw new Error(`Gemini (${model}) HTTP ${resp.status}: ${errorText.slice(0, 200)}`);
+      }
+
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        throw new Error('Gemini returned empty response candidate');
+      }
+      return text;
+    } catch (err: unknown) {
+      lastError = err as Error;
+      if ((err as Error)?.name === 'AbortError') throw err;
+    }
+  }
+
+  throw lastError || new Error('Gemini generation failed');
+}
 
 interface SearchResult {
   title: string;
@@ -203,8 +322,9 @@ export function aiDjApiPlugin(): Plugin {
             }
 
             // Otherwise, perform title search using yt-search
+            const limit = Math.min(10, Math.max(1, Number(url.searchParams.get('limit')) || 6));
             const searchResults = await ytSearch(query);
-            const videos: SearchResult[] = (searchResults.videos || []).slice(0, 5).map((v: { title: string; url: string; author: { name: string }; seconds: number; thumbnail: string; timestamp: string }) => ({
+            const videos: SearchResult[] = (searchResults.videos || []).slice(0, limit).map((v: { title: string; url: string; author: { name: string }; seconds: number; thumbnail: string; timestamp: string }) => ({
               title: v.title,
               url: v.url,
               author: v.author?.name || 'Unknown Artist',
@@ -230,6 +350,35 @@ export function aiDjApiPlugin(): Plugin {
           return;
         }
 
+        // 1b. Inspect disk audio cache status (cache/audio)
+        if (url.pathname === '/api/cache/status') {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            await fs.promises.mkdir(AUDIO_CACHE_DIR, { recursive: true });
+            const names = (await fs.promises.readdir(AUDIO_CACHE_DIR)).filter((n) => n.endsWith('.audio'));
+            const files = await Promise.all(
+              names.map(async (n) => {
+                const s = await fs.promises.stat(path.join(AUDIO_CACHE_DIR, n));
+                return { videoId: n.replace(/\.audio$/, ''), size: s.size, mtime: s.mtimeMs };
+              })
+            );
+            const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+            res.end(
+              JSON.stringify({
+                cacheDir: 'cache/audio',
+                count: files.length,
+                totalBytes,
+                totalMb: Math.round((totalBytes / (1024 * 1024)) * 10) / 10,
+                maxMb: Math.round(AUDIO_CACHE_MAX_BYTES / (1024 * 1024)),
+              })
+            );
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: 'Failed to inspect cache', details: String(err) }));
+          }
+          return;
+        }
+
         // 2. Stream Audio Bytes
         if (url.pathname === '/api/stream') {
           const videoId = extractYouTubeVideoId(url.searchParams.get('url') || '');
@@ -244,17 +393,65 @@ export function aiDjApiPlugin(): Plugin {
             res.setHeader('Accept-Ranges', 'bytes');
             res.setHeader('Cache-Control', 'no-cache');
 
+            // Already on disk: serve it (instant, works offline) and mark it recently used
+            const cachedFile = cachedAudioPath(videoId);
+            const cached = await fs.promises.stat(cachedFile).catch(() => null);
+            if (cached?.isFile()) {
+              const now = new Date();
+              fs.promises.utimes(cachedFile, now, now).catch(() => {});
+              res.setHeader('Content-Length', String(cached.size));
+              res.setHeader('X-Audio-Cache', 'hit');
+              fs.createReadStream(cachedFile).pipe(res);
+              return;
+            }
+            res.setHeader('X-Audio-Cache', 'miss');
+
             // Download audio stream using ytdl
             const stream = ytdl.download(canonicalYouTubeUrl(videoId), {
               filter: { hasAudio: true, hasVideo: false },
               quality: 'highestaudio',
             });
 
+            // Save a copy while streaming. It is written under a temporary name and only
+            // renamed into the cache once complete, so a broken download is never kept.
+            await fs.promises.mkdir(AUDIO_CACHE_DIR, { recursive: true });
+            const partFile = `${cachedFile}.${process.pid}-${Date.now()}.part`;
+            const file = fs.createWriteStream(partFile);
+            let downloaded = false;
+            let failed = false;
+            const discardPart = () => {
+              file.destroy();
+              fs.promises.unlink(partFile).catch(() => {});
+            };
+            stream.on('end', () => {
+              downloaded = !failed;
+            });
+            file.on('finish', () => {
+              if (!downloaded) return discardPart();
+              fs.promises
+                .rename(partFile, cachedFile)
+                .then(() => pruneAudioCache())
+                .catch(() => discardPart());
+            });
+            file.on('error', (err) => {
+              console.warn('Could not save audio to the cache:', err);
+              failed = true;
+              discardPart();
+            });
+
             // Stop downloading if the browser goes away (tab closed, page reloaded)
-            res.on('close', () => stream.destroy());
+            res.on('close', () => {
+              if (!downloaded) {
+                failed = true;
+                stream.destroy();
+                discardPart();
+              }
+            });
 
             stream.on('error', (streamErr) => {
               console.error('Audio stream error:', streamErr);
+              failed = true;
+              discardPart();
               if (!res.headersSent) {
                 res.statusCode = 500;
                 res.end(JSON.stringify({ error: 'Stream error', details: String(streamErr) }));
@@ -262,6 +459,7 @@ export function aiDjApiPlugin(): Plugin {
             });
 
             stream.pipe(res);
+            stream.pipe(file);
           } catch (err: unknown) {
             console.error('Stream setup error:', err);
             if (!res.headersSent) {
@@ -289,24 +487,32 @@ export function aiDjApiPlugin(): Plugin {
               try {
                 const searchRes = await ytSearch(q);
                 if (searchRes.videos && searchRes.videos.length > 0) {
-                  const v = searchRes.videos[0];
-                  return {
+                  return searchRes.videos.slice(0, 2).map((v) => ({
                     title: v.title,
                     url: v.url,
                     author: v.author?.name || 'Artist',
                     duration: v.seconds || 180,
                     thumbnail: v.thumbnail || '',
                     timestamp: v.timestamp || '',
-                  };
+                  }));
                 }
               } catch {
-                return null;
+                return [];
               }
-              return null;
+              return [];
             });
 
             const settled = await Promise.all(searchPromises);
-            const recommendations: SearchResult[] = settled.filter((r): r is SearchResult => r !== null);
+            const rawRecommendations = settled.flat();
+            const seen = new Set<string>();
+            const recommendations: SearchResult[] = [];
+            for (const r of rawRecommendations) {
+              const key = (r.url || r.title).toLowerCase();
+              if (!seen.has(key)) {
+                seen.add(key);
+                recommendations.push(r);
+              }
+            }
 
             res.end(JSON.stringify({ recommendations }));
           } catch (err) {
@@ -317,16 +523,17 @@ export function aiDjApiPlugin(): Plugin {
           return;
         }
 
-        // 3b. Local LLM (Ollama) proxy: status, and JSON completions for the AI DJ.
-        // Going through the server avoids browser CORS limits and works from any device.
+        // 3b. AI Brain Proxy: Local Ollama (1st preference) with Google Gemini Cloud (2nd preference backup).
+        // Going through the server avoids browser CORS limits, keeps secrets server-side, and works from any device.
         if (url.pathname === '/api/llm/health') {
           res.setHeader('Content-Type', 'application/json');
+          const geminiCfg = getGeminiConfig();
+          let ollamaOnline = false;
           try {
-            const tags = await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(2000) })).json();
-            const hasModel = (tags.models || []).some((m: { name: string }) => m.name.startsWith(OLLAMA_MODEL));
-            if (hasModel && !ollamaWarmed) {
+            const tags = await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })).json();
+            ollamaOnline = (tags.models || []).some((m: { name: string }) => m.name.startsWith(OLLAMA_MODEL));
+            if (ollamaOnline && !ollamaWarmed) {
               ollamaWarmed = true;
-              // Load the model into RAM now so the first DJ decision isn't a 12 s cold start
               fetch(`${OLLAMA_URL}/api/generate`, {
                 method: 'POST',
                 body: JSON.stringify({ model: OLLAMA_MODEL, keep_alive: OLLAMA_KEEP_ALIVE }),
@@ -334,11 +541,34 @@ export function aiDjApiPlugin(): Plugin {
                 ollamaWarmed = false;
               });
             }
-            res.end(JSON.stringify({ online: hasModel, model: hasModel ? OLLAMA_MODEL : null }));
           } catch {
-            ollamaWarmed = false;
-            res.end(JSON.stringify({ online: false, model: null }));
+            ollamaOnline = false;
           }
+
+          const hasAny = Boolean(ollamaOnline || geminiCfg);
+          // 1st preference: Local Ollama. 2nd preference: Google Gemini cloud backup.
+          const activeProvider = ollamaOnline ? 'ollama' : geminiCfg ? 'gemini' : 'none';
+          const activeModel = ollamaOnline ? OLLAMA_MODEL : geminiCfg ? geminiCfg.model : null;
+
+          res.end(
+            JSON.stringify({
+              online: hasAny,
+              provider: activeProvider,
+              model: activeModel,
+              preference: {
+                primary: 'ollama',
+                secondary: 'gemini',
+              },
+              gemini: {
+                configured: Boolean(geminiCfg),
+                model: geminiCfg?.model || null,
+              },
+              ollama: {
+                online: ollamaOnline,
+                model: ollamaOnline ? OLLAMA_MODEL : null,
+              },
+            })
+          );
           return;
         }
 
@@ -349,11 +579,55 @@ export function aiDjApiPlugin(): Plugin {
             const maxTokens = Math.min(400, Math.max(16, Number(body?.maxTokens) || 150));
             const timeoutMs = Math.min(60_000, Math.max(2000, Number(body?.timeoutMs) || 20_000));
             const started = Date.now();
-            const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, timeoutMs);
-            res.end(JSON.stringify({ response, latencyMs: Date.now() - started }));
+            const geminiCfg = getGeminiConfig();
+
+            // 1. First preference: Local Ollama (Qwen 2.5 3B)
+            try {
+              // If Gemini is available as backup, cap Ollama at 12s so it fails over quickly instead of hanging
+              const ollamaTimeout = geminiCfg ? Math.min(12_000, timeoutMs) : timeoutMs;
+              const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, ollamaTimeout);
+              res.end(
+                JSON.stringify({
+                  response,
+                  latencyMs: Date.now() - started,
+                  provider: 'ollama',
+                  model: OLLAMA_MODEL,
+                })
+              );
+              return;
+            } catch (ollamaErr) {
+              console.warn(
+                'Ollama (1st preference) failed or offline, falling back to 2nd preference (Gemini):',
+                (ollamaErr as Error)?.message || ollamaErr
+              );
+            }
+
+            // 2. Second preference: Google Gemini Cloud (~300ms latency backup)
+            if (geminiCfg) {
+              try {
+                const geminiTimeout = Math.min(10_000, timeoutMs);
+                const response = await geminiGenerate(String(body?.prompt ?? ''), maxTokens, geminiTimeout);
+                res.end(
+                  JSON.stringify({
+                    response,
+                    latencyMs: Date.now() - started,
+                    provider: 'gemini',
+                    model: geminiCfg.model,
+                  })
+                );
+                return;
+              } catch (geminiErr) {
+                console.warn(
+                  'Gemini (2nd preference) also failed:',
+                  (geminiErr as Error)?.message || geminiErr
+                );
+              }
+            }
+
+            throw new Error('Both Ollama (1st preference) and Gemini (2nd preference) failed or were unavailable');
           } catch (err) {
             res.statusCode = 503;
-            res.end(JSON.stringify({ error: 'Local LLM unavailable', details: String(err) }));
+            res.end(JSON.stringify({ error: 'LLM unavailable (Ollama & Gemini both failed)', details: String(err) }));
           }
           return;
         }
@@ -473,6 +747,94 @@ export function aiDjApiPlugin(): Plugin {
           }
         }
 
+        // 6. User Favorites (GET /api/favorites & POST /api/favorites/toggle)
+        if (url.pathname === '/api/favorites' || url.pathname === '/api/favorites/toggle') {
+          res.setHeader('Content-Type', 'application/json');
+
+          if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+          }
+          if (!fs.existsSync(FAVORITES_FILE)) {
+            fs.writeFileSync(FAVORITES_FILE, JSON.stringify([], null, 2), 'utf-8');
+          }
+
+          if (req.method === 'GET') {
+            try {
+              const rawData = fs.readFileSync(FAVORITES_FILE, 'utf-8');
+              const favorites = JSON.parse(rawData || '[]');
+              if (Array.isArray(favorites)) {
+                favorites.sort((a: any, b: any) => (b.addedAt || 0) - (a.addedAt || 0));
+              }
+              res.end(JSON.stringify({ favorites: Array.isArray(favorites) ? favorites : [] }));
+            } catch (err) {
+              console.error('Error reading favorites:', err);
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to read favorites', favorites: [] }));
+            }
+            return;
+          }
+
+          if (req.method === 'POST') {
+            try {
+              const body = await parseJsonBody(req);
+              const song = body?.song;
+              if (!song || (!song.id && !song.title && !song.url)) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'Invalid song object' }));
+                return;
+              }
+
+              let favorites: any[] = [];
+              try {
+                const rawData = fs.readFileSync(FAVORITES_FILE, 'utf-8');
+                favorites = JSON.parse(rawData || '[]');
+                if (!Array.isArray(favorites)) favorites = [];
+              } catch {
+                favorites = [];
+              }
+
+              const normTitle = (song.title || '').trim().toLowerCase();
+              const existingIdx = favorites.findIndex(
+                (f: any) =>
+                  (song.id && f.id === song.id) ||
+                  (song.url && f.url && f.url === song.url) ||
+                  (normTitle && f.title && f.title.trim().toLowerCase() === normTitle)
+              );
+
+              let isFavorite = false;
+              if (existingIdx !== -1) {
+                // If it already exists, toggle off (remove)
+                favorites.splice(existingIdx, 1);
+                isFavorite = false;
+              } else {
+                // Add to favorites (newest first)
+                const newFavorite = {
+                  id: song.id || `fav_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                  title: (song.title || 'Unknown Track').trim(),
+                  artist: (song.artist || 'Unknown Artist').trim(),
+                  url: song.url,
+                  thumbnail: song.thumbnail,
+                  duration: song.duration ? Math.round(song.duration) : undefined,
+                  bpm: song.bpm ? Math.round(song.bpm) : undefined,
+                  highlightTime: song.highlightTime,
+                  addedAt: Date.now(),
+                };
+                favorites.unshift(newFavorite);
+                isFavorite = true;
+              }
+
+              // Persist locally to data/favorites.json
+              fs.writeFileSync(FAVORITES_FILE, JSON.stringify(favorites, null, 2), 'utf-8');
+              res.end(JSON.stringify({ success: true, isFavorite, favorites }));
+            } catch (err) {
+              console.error('Error updating favorites:', err);
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to update favorites' }));
+            }
+            return;
+          }
+        }
+
         // 6. User Custom Song List (GET /api/my-songs & POST /api/my-songs)
         if (url.pathname === '/api/my-songs') {
           res.setHeader('Content-Type', 'application/json');
@@ -568,6 +930,65 @@ const MOOD_PROMPTS: Record<string, string> = {
 };
 
 const MOOD_FALLBACK_SONGS: Record<string, string[]> = {
+  party: [
+    'Sidhu Moose Wala 295',
+    'Diljit Dosanjh Lover',
+    'AP Dhillon Brown Munde',
+    'Shubh Baller',
+    'Karan Aujla Softly',
+    'Mankirt Aulakh Badnam',
+    'Badshah Kar Gayi Chull',
+    'Guru Randhawa High Rated Gabru',
+    'Mika Singh Subha Hone Na De',
+    'Yo Yo Honey Singh Dope Shope',
+    'Karan Aujla Tauba Tauba',
+    'Diljit Dosanjh GOAT',
+    'Sidhu Moose Wala Same Beef',
+    'Shubh Cheques',
+    'Yo Yo Honey Singh Blue Eyes',
+    'Simmba Aankh Marey',
+    'War Jai Jai Shivshankar',
+    'Diljit Dosanjh Born to Shine',
+    'Badshah Kala Chashma',
+    'Arijit Singh Ghungroo Party Mix',
+    'Guru Randhawa Lahore',
+    'Fisher Losing It',
+    'Calvin Harris One Kiss',
+    'David Guetta Titanium',
+    'Tiësto The Business',
+    'Mau P Drugs From Amsterdam',
+    'Swedish House Mafia Moth To A Flame',
+    'Acraze Do It To It',
+    'Peggy Gou Nanana',
+    'The Weeknd Blinding Lights',
+  ],
+  normal: [
+    'Diljit Dosanjh Lover',
+    'Sidhu Moose Wala 295',
+    'AP Dhillon Brown Munde',
+    'Karan Aujla Softly',
+    'Shubh Cheques',
+    'Badshah Kar Gayi Chull',
+    'Guru Randhawa High Rated Gabru',
+    'Yo Yo Honey Singh Blue Eyes',
+    'Mika Singh Subha Hone Na De',
+    'Mankirt Aulakh Badnam',
+    'Arijit Singh Ghungroo',
+    'Diljit Dosanjh GOAT',
+    'Shubh Baller',
+    'Karan Aujla Tauba Tauba',
+    'War Jai Jai Shivshankar',
+    'Simmba Aankh Marey',
+    'Badshah Kala Chashma',
+    'Yo Yo Honey Singh Dope Shope',
+    'The Weeknd Blinding Lights',
+    'Dua Lipa Levitating',
+    'David Guetta Titanium',
+    'Calvin Harris One Kiss',
+    'Fisher Losing It',
+    'Tiësto The Business',
+    'AP Dhillon Excuses',
+  ],
   chill: [
     'Prateek Kuhad Kasoor',
     'AP Dhillon Excuses',
@@ -581,6 +1002,19 @@ const MOOD_FALLBACK_SONGS: Record<string, string[]> = {
     'Prateek Kuhad cold/mess',
     'Anuv Jain Alag Aasmaan',
     'Bayaan Din Dhalay',
+    'Lifafa Nikamma',
+    'When Chai Met Toast When We Feel Young',
+    'Mohit Chauhan Phir Se Ud Chala',
+    'Atif Aslam Aadat Acoustic',
+    'Arijit Singh Safar',
+    'Armaan Malik Ghar Se Nikalte Hi',
+    'The Local Train Aaoge Tum Kabhi',
+    'Anuv Jain Husn',
+    'Mitraz Akhiyaan',
+    'Prateek Kuhad Kho Gaye Hum Kahan',
+    'Lucky Ali Safarnama',
+    'Strings Duur',
+    'Silk Route Dooba Dooba',
   ],
   romantic: [
     'Arijit Singh Tum Hi Ho',
@@ -595,6 +1029,19 @@ const MOOD_FALLBACK_SONGS: Record<string, string[]> = {
     'Arijit Singh Hawayein',
     'Pritam Shayad',
     'Armaan Malik Bol Do Na Zara',
+    'Arijit Singh Raabta',
+    'Atif Aslam Pehli Dafa',
+    'Mohit Chauhan Pee Loon',
+    'Rahat Fateh Ali Khan O Re Piya',
+    'Sonu Nigam Abhi Mujh Mein Kahin',
+    'Arijit Singh Mast Magan',
+    'Shreya Ghoshal Saibo',
+    'Kailash Kher Teri Deewani',
+    'KK Aankhon Mein Teri',
+    'Atif Aslam Tu Jaane Na',
+    'Arijit Singh Enna Sona',
+    'Pritam Subhanallah',
+    'Darshan Raval Chogada',
   ],
   bhangra: [
     'Diljit Dosanjh Lover',
@@ -609,6 +1056,22 @@ const MOOD_FALLBACK_SONGS: Record<string, string[]> = {
     'Shubh Baller',
     'Guru Randhawa High Rated Gabru',
     'Badshah Jugnu',
+    'Diljit Dosanjh Born to Shine',
+    'Sidhu Moose Wala So High',
+    'Karan Aujla Chitta Kurta',
+    'Shubh No Love',
+    'AP Dhillon With You',
+    'Mickey Singh Phone',
+    'Imran Khan Amplifier',
+    'Panjabi MC Mundian To Bach Ke',
+    'Daler Mehndi Bolo Tara Rara',
+    'Bally Sagoo Gur Nalon Ishq Mitha',
+    'Surjit Bindrakhia Tera Yaar Bolda',
+    'Jazzy B Dil Luteya',
+    'Yo Yo Honey Singh Angreji Beat',
+    'Garry Sandhu Illegal Weapon',
+    'Amrit Maan Bamb Jatt',
+    'Jordan Sandhu Teeje Week',
   ],
 };
 
@@ -621,15 +1084,15 @@ async function generateRelatedSongQueries(currentTitle: string, artist: string, 
     const prompt = `You are a professional club/party AI DJ.
 CURRENT PLAYING SONG: "${currentTitle}" by "${artist}".
 THE MOOD OF THE PARTY: ${moodDescription}.
-Suggest exactly 10 to 12 songs that fit this mood and are musically, culturally, and energetically compatible to play NEXT in the DJ set.
-Return a STRICT JSON object with key "suggestions" containing an array of 10-12 song titles with artists.
+Suggest exactly 25 to 30 songs that fit this mood and are musically, culturally, and energetically compatible to play NEXT in the DJ set.
+Return a STRICT JSON object with key "suggestions" containing an array of 25-30 song titles with artists.
 Example: { "suggestions": ["Diljit Dosanjh - Lover", "Sidhu Moose Wala - 295", "AP Dhillon - Brown Munde", "Karan Aujla - Softly", "Badshah - Jugnu", "Shubh - Cheques", "Yo Yo Honey Singh - Blue Eyes", "Guru Randhawa - High Rated Gabru", "Mika Singh - Subha Hone Na De", "Arijit Singh - Ghungroo"] }
 Output ONLY valid JSON.`;
 
     // Runs in the background, so give the CPU model time: ~4 s warm, up to ~12 s cold.
-    const parsed = JSON.parse(await ollamaGenerate(prompt, 120, 20_000));
+    const parsed = JSON.parse(await ollamaGenerate(prompt, 200, 20_000));
     if (Array.isArray(parsed.suggestions) && parsed.suggestions.length >= 3) {
-      return parsed.suggestions.slice(0, 12);
+      return parsed.suggestions.slice(0, 30);
     }
   } catch {
     // Fall back to party graph heuristics

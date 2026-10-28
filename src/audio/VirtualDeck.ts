@@ -3,8 +3,8 @@ import { detectBpmFromBuffer } from './BpmDetector';
 import { IntroSkitDetector } from './IntroSkitDetector';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
-// a re-timed buffer instead. Range matches the Tempo control (0.8x – 1.25x).
-export const MIN_PLAYBACK_RATE = 0.8;
+// a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.25x).
+export const MIN_PLAYBACK_RATE = 0.5;
 export const MAX_PLAYBACK_RATE = 1.25;
 const SWAP_FADE_SECONDS = 0.04;
 
@@ -111,13 +111,14 @@ export class VirtualDeck {
     return metadata;
   }
 
-  public loadTrack(metadata: TrackMetadata) {
+  public loadTrack(metadata: TrackMetadata, initialPosition?: number) {
     if (this.isPlaying) {
       this.pause();
     }
     this.track = metadata;
     // Always skip initial conversation/dialogue if any that is without music
-    this.pausedAt = metadata.musicStartTime && metadata.musicStartTime > 0 ? metadata.musicStartTime : 0;
+    const defaultStart = metadata.musicStartTime && metadata.musicStartTime > 0 ? metadata.musicStartTime : 0;
+    this.pausedAt = initialPosition !== undefined ? Math.max(0, Math.min(initialPosition, metadata.duration)) : defaultStart;
     this.startedAt = 0;
     // A new song starts at its natural tempo/pitch
     this.playbackRate = 1.0;

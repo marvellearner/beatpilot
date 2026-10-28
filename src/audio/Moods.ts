@@ -61,7 +61,7 @@ export const MOODS: Mood[] = [
     description: 'Flat sound, standard 8-bar blends',
     eq: FLAT_EQ,
     blendBars: 8,
-    hookCue: true,
+    hookCue: false,
     autoDrums: false,
   },
   {
@@ -71,7 +71,7 @@ export const MOODS: Mood[] = [
     description: 'Whole set locked to a 120–130 BPM dance tempo (key-locked), punchy bass',
     eq: { bass: 4, lowMid: -1, mid: 0, presence: 1.5, treble: 2 },
     blendBars: 8,
-    hookCue: true,
+    hookCue: false,
     autoDrums: false,
     tempoLock: PARTY_TEMPO,
   },
@@ -82,7 +82,7 @@ export const MOODS: Mood[] = [
     description: 'Heavy bass, live dhol on, short punchy mixes',
     eq: { bass: 5, lowMid: 0, mid: 1, presence: 2, treble: 1 },
     blendBars: 4, // Punjabi vocals clash on long overlaps
-    hookCue: true,
+    hookCue: false,
     autoDrums: true,
   },
   {

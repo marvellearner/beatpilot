@@ -5,8 +5,18 @@ import type { AudioEngine } from '../audio/AudioEngine';
 export interface AIResponseResult {
   plan: AICommandPlan;
   latencyMs: number;
-  source: 'ollama_qwen' | 'fallback_heuristic';
+  source: 'gemini_flash' | 'ollama_qwen' | 'fallback_heuristic';
+  provider?: 'gemini' | 'ollama' | 'heuristic';
+  model?: string;
   rawResponse?: string;
+}
+
+export interface AgentHealthStatus {
+  online: boolean;
+  provider?: 'gemini' | 'ollama' | 'none';
+  model?: string | null;
+  gemini?: { configured: boolean; model: string | null };
+  ollama?: { online: boolean; model: string | null };
 }
 
 /** What the AI DJ sees when choosing how to mix: only options that already obey the mixing rules. */
@@ -43,14 +53,44 @@ const NextSongSchema = z.object({
 });
 export type NextSongDecision = z.infer<typeof NextSongSchema>;
 
+export interface PercussionSyncContext {
+  mood: string;
+  track: {
+    title: string;
+    artist: string;
+    bpm: number;
+    effectiveBpm: number;
+    confidence: number;
+    highlightTime?: number;
+    duration?: number;
+    currentTime?: number;
+  };
+}
+
+export const PercussionSyncSchema = z.object({
+  shouldPlay: z.boolean(),
+  patternId: z.enum(['punjabi_dhol', 'bhangra_groove', 'electronic_drums', 'afrobeat', 'none']),
+  intensity: z.coerce.number().min(0.5).max(1.5).default(1.0),
+  volume: z.coerce.number().min(0.3).max(1.0).default(0.85),
+  duckDuringVerse: z.boolean().default(true),
+  reason: z.string().max(250),
+});
+export type AIPercussionSyncDecision = z.infer<typeof PercussionSyncSchema>;
+
 const formatTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
+interface LlmJsonResponse {
+  data: unknown;
+  provider?: 'gemini' | 'ollama';
+  model?: string;
+}
+
 export class OllamaDJAgent {
-  // Proxied by the dev server (server/apiPlugin.ts), which keeps the model warm in RAM
+  // Proxied by the dev server (server/apiPlugin.ts), which handles Gemini & Ollama seamlessly
   private endpoint: string = '/api/llm';
 
-  /** Sends a prompt to the local model and parses its JSON reply; null if unavailable or too slow. */
-  private async askJson(prompt: string, maxTokens: number, timeoutMs: number): Promise<unknown> {
+  /** Sends a prompt to the AI server and parses its JSON reply; null if unavailable or too slow. */
+  private async askJson(prompt: string, maxTokens: number, timeoutMs: number): Promise<LlmJsonResponse | null> {
     try {
       const response = await fetch(this.endpoint, {
         method: 'POST',
@@ -60,20 +100,31 @@ export class OllamaDJAgent {
       });
       if (!response.ok) return null;
       const data = await response.json();
-      return JSON.parse(data.response);
+      return {
+        data: JSON.parse(data.response),
+        provider: data.provider,
+        model: data.model,
+      };
     } catch {
       return null;
     }
   }
 
-  /** Whether Ollama is running with the model installed. */
-  public async checkHealth(): Promise<boolean> {
+  /** Detailed status of Gemini and Ollama backends. */
+  public async getHealth(): Promise<AgentHealthStatus> {
     try {
       const res = await fetch('/api/llm/health', { signal: AbortSignal.timeout(4000) });
-      return res.ok && (await res.json()).online === true;
+      if (!res.ok) return { online: false };
+      return (await res.json()) as AgentHealthStatus;
     } catch {
-      return false;
+      return { online: false };
     }
+  }
+
+  /** Whether any AI brain backend (Gemini or Ollama) is online and ready. */
+  public async checkHealth(): Promise<boolean> {
+    const health = await this.getHealth();
+    return health.online === true;
   }
 
   /**
@@ -89,10 +140,12 @@ ${ctx.exitOptions.map((o, i) => `${i + 1}) in ${Math.round(o.inSeconds)}s at ${f
 WHERE THE NEXT SONG STARTS:
 ${ctx.entryOptions.map((o, i) => `${i + 1}) at ${formatTime(o.at)}: ${o.why}`).join('\n')}
 STYLE: ${ctx.canBlend ? '"blend" (beatmatched overlap of 4, 8 or 16 bars) or "cut" (instant switch on the beat)' : 'tempos are too far apart, so style must be "cut"'}.
-DJ RULES: don't throw away a chorus or hook; prefer mixing out where the current song calms down; land the next song's drop or hook as the mix ends; short mixes for vocal-heavy Desi songs; long smooth blends for chill moods; high energy for parties.
+DJ RULES: never start from the hook because buildup is essential; incoming songs must start from their intro/buildup; don't throw away a chorus or hook on the outgoing song; prefer mixing out where the current song calms down; short mixes for vocal-heavy Desi songs; long smooth blends for chill moods; high energy for parties. In party mood, never decrease the BPM of the original song.
 Reply ONLY with JSON: {"exit": <number>, "entry": <number>, "style": "blend"|"cut", "bars": 4|8|16, "reason": "<max 12 words>"}`;
 
-    const parsed = MixDecisionSchema.safeParse(await this.askJson(prompt, 60, 12_000));
+    const res = await this.askJson(prompt, 60, 12_000);
+    if (!res) return null;
+    const parsed = MixDecisionSchema.safeParse(res.data);
     if (!parsed.success) return null;
     const d = parsed.data;
     if (d.exit > ctx.exitOptions.length || d.entry > ctx.entryOptions.length) return null;
@@ -110,9 +163,55 @@ ${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round
 Consider energy flow, genre and language continuity, and the mood. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
 Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
 
-    const parsed = NextSongSchema.safeParse(await this.askJson(prompt, 40, 12_000));
+    const res = await this.askJson(prompt, 40, 12_000);
+    if (!res) return null;
+    const parsed = NextSongSchema.safeParse(res.data);
     if (!parsed.success || parsed.data.pick > ctx.options.length) return null;
     return parsed.data;
+  }
+
+  /**
+   * Asks the AI DJ (Ollama primary / Gemini backup) to evaluate and synchronize
+   * live percussion enhancement (Deck P) for the active song.
+   */
+  public async syncPercussion(ctx: PercussionSyncContext): Promise<AIPercussionSyncDecision | null> {
+    const prompt = `You are an expert club DJ and live percussionist.
+Analyze this active track on air and decide how to sync live percussion (Deck P) to enhance the party energy.
+
+ACTIVE TRACK:
+- Title: "${ctx.track.title}" by ${ctx.track.artist}
+- Tempo: ${Math.round(ctx.track.effectiveBpm)} BPM (natural: ${Math.round(ctx.track.bpm)} BPM)
+- Beat Confidence: ${Math.round(ctx.track.confidence * 100)}%
+- Mood: ${ctx.mood}
+${ctx.track.highlightTime ? `- Viral Hook / Chorus Drop at: ${Math.round(ctx.track.highlightTime)}s\n` : ''}
+AVAILABLE LIVE PERCUSSION PATTERNS:
+1) "punjabi_dhol" - Authentic Punjabi Dhol Chaap (heavy curved Dagga + sharp Thapi slap, ideal for high-energy Punjabi/Desi/Bollywood club bangers >= 126 BPM)
+2) "bhangra_groove" - Traditional Bhangra Dholak & Chimta (bouncy swing groove, ideal for Bhangra, folk, or medium tempo Desi hits 90-125 BPM)
+3) "electronic_drums" - Club 4-on-the-Floor (punchy 909 kick, snappy 808 clap on 2 & 4, 16th hats, ideal for EDM, house, club dance, techno)
+4) "afrobeat" - Syncopated wooden congas, organic shakers, and deep polyrhythmic bounce (ideal for Afrobeat, Amapiano, Latin, Reggaeton)
+5) "none" - Muted/silent (use when track is acoustic, ballad, ambient, classical, vocal breakdown, or beat confidence is low)
+
+RULES:
+- If acoustic, slow/mellow ballad, or beat confidence < 60%, set shouldPlay: false, patternId: "none".
+- For high-energy Punjabi bangers (Sidhu Moosewala, Diljit, Karan Aujla, AP Dhillon, etc.), lock onto "punjabi_dhol" or "bhangra_groove".
+- For House, EDM, Club Remixes, lock onto "electronic_drums".
+- For Burna Boy, Rema, Wizkid, Amapiano, Latin, lock onto "afrobeat".
+- Set duckDuringVerse: true so drums sit quietly in verses and unleash full punch right when the viral hook drops.
+
+Respond ONLY with valid JSON in this exact schema:
+{
+  "shouldPlay": true,
+  "patternId": "punjabi_dhol",
+  "intensity": 1.0,
+  "volume": 0.85,
+  "duckDuringVerse": true,
+  "reason": "short explanation of the rhythmic sync choice and energy arrangement"
+}`;
+
+    const res = await this.askJson(prompt, 180, 5000);
+    if (!res) return null;
+    const parsed = PercussionSyncSchema.safeParse(res.data);
+    return parsed.success ? parsed.data : null;
   }
 
   /**
@@ -200,22 +299,24 @@ USER INSTRUCTION: "${userInput}"
 Output ONLY the JSON object. Do not include markdown code blocks or explanations outside the JSON.`;
 
     try {
-      // ~150 output tokens at ~7 tokens/s on this CPU: allow up to 30 s before falling back
-      const parsed = await this.askJson(systemPrompt, 160, 30_000);
-      if (parsed === null) throw new Error('Local LLM unavailable or timed out');
+      // Allow up to 30s before falling back to heuristic
+      const res = await this.askJson(systemPrompt, 160, 30_000);
+      if (res === null) throw new Error('AI brain unavailable or timed out');
 
       // Validate with Zod
-      const validatedPlan = AICommandSchema.parse(parsed);
+      const validatedPlan = AICommandSchema.parse(res.data);
       const latencyMs = Math.round(performance.now() - startTime);
 
       return {
         plan: validatedPlan,
         latencyMs,
-        source: 'ollama_qwen',
-        rawResponse: JSON.stringify(parsed),
+        source: res.provider === 'gemini' ? 'gemini_flash' : 'ollama_qwen',
+        provider: res.provider === 'gemini' ? 'gemini' : 'ollama',
+        model: res.model,
+        rawResponse: JSON.stringify(res.data),
       };
     } catch (err) {
-      console.warn('Ollama unavailable or schema error, using deterministic fallback:', err);
+      console.warn('AI LLM unavailable or schema error, using deterministic fallback:', err);
       const fallbackPlan = this.heuristicFallback(userInput, currentContext);
       const latencyMs = Math.round(performance.now() - startTime);
 
@@ -223,6 +324,7 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
         plan: fallbackPlan,
         latencyMs,
         source: 'fallback_heuristic',
+        provider: 'heuristic',
       };
     }
   }

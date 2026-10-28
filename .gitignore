@@ -5,14 +5,19 @@ dist/
 # Local binaries (yt-dlp.exe is ~23 MB and not used by the code)
 bin/
 
-# Personal listening history, recreated automatically at runtime
+# Personal listening history & favorites, recreated automatically at runtime
 data/play_history.json
+data/favorites.json
 
 # Environment & editor files
 .env
 .env.*
+!.env.example
 *.log
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Downloaded song audio (server/apiPlugin.ts audio cache)
+cache/

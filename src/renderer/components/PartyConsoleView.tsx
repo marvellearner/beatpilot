@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AudioEngine } from '../../audio/AudioEngine';
 import { PERCUSSION_PATTERNS } from '../../audio/PercussionDeck';
 import { MoodEqPanel } from './MoodEqPanel';
 import { TempoControl } from './TempoControl';
 import { PreviouslyPlayedPanel, timeAgo } from './PreviouslyPlayedPanel';
 import { VuMeter } from './VuMeter';
+import { SearchResult } from '../../types';
 import {
   Play,
   Pause,
@@ -21,6 +22,7 @@ import {
   Sliders,
   CheckCircle2,
   Star,
+  Heart,
   FileText,
   Edit3,
   Check,
@@ -29,6 +31,8 @@ import {
   Flame,
   Lock,
   Scissors,
+  Loader2,
+  Bot,
 } from 'lucide-react';
 
 interface PartyConsoleViewProps {
@@ -38,12 +42,80 @@ interface PartyConsoleViewProps {
 
 export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSwitchToProMode }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const searchAbortControllerRef = useRef<AbortController | null>(null);
+
   const [isEditingFile, setIsEditingFile] = useState(false);
   const [fileContent, setFileContent] = useState('');
   const [isSavingFile, setIsSavingFile] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isLoadingSongs, setIsLoadingSongs] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [bangersTab, setBangersTab] = useState<'favorites' | 'most_played'>('favorites');
+
+  // Debounced search query listener for opening matching songs dropdown
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setSearchResults([]);
+      setIsSearching(false);
+      setIsDropdownOpen(false);
+      if (searchAbortControllerRef.current) {
+        searchAbortControllerRef.current.abort();
+        searchAbortControllerRef.current = null;
+      }
+      return;
+    }
+
+    setIsDropdownOpen(true);
+    setIsSearching(true);
+
+    if (searchAbortControllerRef.current) {
+      searchAbortControllerRef.current.abort();
+    }
+    const abortCtrl = new AbortController();
+    searchAbortControllerRef.current = abortCtrl;
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=6`, {
+          signal: abortCtrl.signal,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.results)) {
+            setSearchResults(data.results);
+          }
+        }
+      } catch (err: unknown) {
+        if ((err as Error)?.name !== 'AbortError') {
+          console.error('Error fetching search matches:', err);
+        }
+      } finally {
+        if (!abortCtrl.signal.aborted) {
+          setIsSearching(false);
+        }
+      }
+    }, 280);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
+  // Close search dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const activeDeck = engine.activeDeck === 'A' ? engine.deckA : engine.deckB;
   const playbackState = activeDeck.getPlaybackState();
@@ -131,14 +203,28 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     }
   };
 
+  const handleSelectSong = async (song: SearchResult, autoMix: boolean = false) => {
+    setIsDropdownOpen(false);
+    setSearchQuery('');
+    setSearchResults([]);
+    showToast(`${autoMix ? 'Mixing in' : 'Queued'}: "${song.title}"`);
+    await engine.acquireTrack(song.url || `${song.title} ${song.author}`, autoMix, 'back', 'request');
+  };
+
   const handleSearchSubmit = async (e: React.FormEvent, autoMix: boolean = false) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
 
-    // Clear the box right away so the next song can be typed while this one downloads
-    const query = searchQuery;
+    // Use top match if dropdown has results, or user's exact query
+    const topMatch = searchResults[0];
+    const targetQuery = topMatch ? topMatch.url : searchQuery.trim();
+    const displayTitle = topMatch ? topMatch.title : searchQuery.trim();
+
+    setIsDropdownOpen(false);
     setSearchQuery('');
-    await engine.acquireTrack(query, autoMix);
+    setSearchResults([]);
+    showToast(`${autoMix ? 'Mixing in' : 'Queued'}: "${displayTitle}"`);
+    await engine.acquireTrack(targetQuery, autoMix, 'back', 'request');
   };
 
   return (
@@ -201,10 +287,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
         </div>
       </div>
 
-      {/* 3-Column Dashboard Grid: player (6 cols / 50%) | sound controls (3 cols / 25%) | queue & history (3 cols / 25%) */}
-      <div id="party-console-grid" className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
-        {/* Left Column (6 cols): Live Party Player */}
-        <div id="party-console-left-column" className="lg:col-span-6 flex flex-col gap-3">
+      {/* 3-Column Dashboard Grid: player (decreased by 5% to 45%) | sound controls (27.5%) | queue & history (27.5%) */}
+      <div id="party-console-grid" className="grid grid-cols-1 lg:grid-cols-[45%_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-start">
+        {/* Left Column (45% width, decreased by 5% from 50%): Live Party Player */}
+        <div id="party-console-left-column" className="flex flex-col gap-3 min-w-0">
           {/* Now Playing: status header, artwork + track info + VU, stats, waveform, transport, tempo */}
           <div
             id="party-console-now-playing"
@@ -246,7 +332,11 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                   />
                   <div
                     id="party-console-center-label-art"
-                    className="relative w-full h-full rounded-xl overflow-hidden border border-white/10 shadow-2xl bg-gradient-to-br from-slate-800 to-slate-950"
+                    className={`relative w-full h-full rounded-xl overflow-hidden border shadow-2xl bg-gradient-to-br from-slate-800 to-slate-950 group transition-all duration-300 ${
+                      currentTrack && engine.isFavorite(currentTrack)
+                        ? 'border-rose-500/50 ring-2 ring-rose-500/30 shadow-[0_0_25px_rgba(244,63,94,0.35)]'
+                        : 'border-white/10'
+                    }`}
                   >
                     {currentTrack?.thumbnail ? (
                       <img src={currentTrack.thumbnail} alt="" className="w-full h-full object-cover" />
@@ -254,6 +344,31 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                       <div className="w-full h-full flex items-center justify-center">
                         <Disc3 className="w-10 h-10 text-slate-600" />
                       </div>
+                    )}
+
+                    {/* Interactive Heart Button Around Song Image */}
+                    {currentTrack && (
+                      <button
+                        id="party-console-favorite-btn"
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          engine.toggleFavorite(currentTrack);
+                        }}
+                        className={`absolute top-2 right-2 p-2 rounded-full backdrop-blur-md transition-all duration-200 z-20 shadow-xl ${
+                          engine.isFavorite(currentTrack)
+                            ? 'bg-rose-950/85 text-rose-400 border border-rose-500/80 scale-105 hover:scale-115 shadow-[0_0_15px_rgba(244,63,94,0.6)]'
+                            : 'bg-black/60 text-white/70 hover:text-rose-400 hover:bg-black/85 border border-white/20 hover:scale-110'
+                        }`}
+                        title={engine.isFavorite(currentTrack) ? 'Saved in Favourites (Click to remove)' : 'Save song to Favourites'}
+                        aria-label={engine.isFavorite(currentTrack) ? 'Saved in Favourites' : 'Save song to Favourites'}
+                      >
+                        <Heart
+                          className={`w-4 h-4 transition-transform ${
+                            engine.isFavorite(currentTrack) ? 'fill-rose-500 text-rose-500' : ''
+                          }`}
+                        />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -561,8 +676,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           </div>
         </div>
 
-        {/* Middle Column (3 cols): Live Rhythm Enhancer + Mood & Equalizer */}
-        <div id="party-console-middle-column" className="lg:col-span-3 flex flex-col gap-3">
+        {/* Middle Column (27.5% width): Live Rhythm Enhancer + Mood & Equalizer */}
+        <div id="party-console-middle-column" className="flex flex-col gap-3 min-w-0">
           {/* Compact Live Rhythm Enhancer (Deck P - Cherry on Top) */}
           <div id="party-console-rhythm-enhancer" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#14101e]/95 to-[#0c0914]/95 shadow-xl flex flex-col gap-2.5">
             <div className="flex items-center justify-between pb-2 border-b border-white/10">
@@ -610,6 +725,26 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 </button>
               ))}
             </div>
+
+            {/* AI Rhythm Sync Telemetry & Reasoning */}
+            {engine.percussionDecisionReason && (
+              <div
+                id="party-console-drum-reason"
+                className="bg-black/50 px-2.5 py-1.5 rounded-xl border border-white/5 font-mono text-[10px] text-purple-300 flex items-center gap-2 shadow-inner"
+                title={engine.percussionDecisionReason}
+              >
+                <Bot className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                <span className="truncate flex-1">{engine.percussionDecisionReason}</span>
+                <button
+                  id="party-console-drum-resync-mini"
+                  onClick={() => engine.resyncPercussionToActiveDeck()}
+                  className="px-1.5 py-0.5 text-[9px] font-sans font-bold bg-purple-500/20 hover:bg-purple-500/40 text-purple-200 border border-purple-400/30 rounded shrink-0 transition-colors"
+                  title="Re-run AI rhythmic sync and snap downbeat phase lock to current track"
+                >
+                  AI Sync
+                </button>
+              </div>
+            )}
 
             {/* Groove Energy Level & Start/Stop Controls Row */}
             <div id="party-console-drum-controls" className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/5">
@@ -659,6 +794,16 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
               {/* Start/Stop Drums & Auto-Pilot */}
               <div id="party-console-drum-buttons" className="flex items-center gap-1.5">
                 <button
+                  id="party-console-drum-resync"
+                  onClick={() => engine.resyncPercussionToActiveDeck()}
+                  className="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-purple-600/20 hover:bg-purple-600/40 text-purple-200 border border-purple-500/30 transition-all flex items-center gap-1"
+                  title="AI syncs rhythm enhancer pattern, BPM, and downbeat phase to song"
+                >
+                  <Bot className="w-3 h-3 text-purple-400" />
+                  <span>AI Sync</span>
+                </button>
+
+                <button
                   onClick={() => engine.togglePercussion()}
                   className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shadow-sm ${
                     percussion.isPlaying
@@ -695,8 +840,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           />
         </div>
 
-        {/* Right Column (3 cols, decreased by ~10% width): Up Next Party Queue + Previously Played + Most Played Bangers */}
-        <div id="party-console-right-column" className="lg:col-span-3 flex flex-col gap-3">
+        {/* Right Column (27.5% width): Up Next Party Queue + Previously Played + Most Played Bangers */}
+        <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
           {/* Up Next Party Queue & Instant Song Search */}
           <div id="party-console-queue" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl flex flex-col gap-2">
             <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
@@ -706,36 +851,160 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                   UP NEXT QUEUE ({engine.queue.length})
                 </h3>
               </div>
-              <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-400">
-                <Radio className="w-2.5 h-2.5 animate-pulse" />
-                <span>Auto-Mix Ready</span>
+              <div className="flex items-center gap-1.5">
+                {engine.diskCacheCount > 0 && (
+                  <span
+                    className="text-[9px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 rounded flex items-center gap-1"
+                    title={`Audio saved to disk at cache/audio: ${engine.diskCacheCount} songs (~${engine.diskCacheMb} MB)`}
+                  >
+                    💾 {engine.diskCacheCount} on disk
+                  </span>
+                )}
+                <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-400">
+                  <Radio className="w-2.5 h-2.5 animate-pulse" />
+                  <span>Auto-Mix</span>
+                </div>
               </div>
             </div>
 
-            {/* Easy Song Request Input */}
-            <form id="party-console-song-request-form" onSubmit={(e) => handleSearchSubmit(e, false)} className="flex gap-1.5">
-              <div className="relative flex-1">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Song name or YouTube URL..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-2.5 py-1.5 bg-black/50 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={!searchQuery.trim()}
-                className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-3 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0"
-              >
-                <Plus className="w-3 h-3" />
-                <span>Queue</span>
-              </button>
-            </form>
+            {/* Easy Song Request Input with Matching Songs Dropdown */}
+            <div ref={searchContainerRef} className="relative z-30">
+              <form id="party-console-song-request-form" onSubmit={(e) => handleSearchSubmit(e, false)} className="flex gap-1.5">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search song name or YouTube link..."
+                    value={searchQuery}
+                    onFocus={() => {
+                      if (searchQuery.trim().length >= 2) setIsDropdownOpen(true);
+                    }}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-8 pr-12 py-1.5 bg-black/50 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 transition-colors"
+                  />
+                  {isSearching && (
+                    <Loader2 className="w-3.5 h-3.5 absolute right-6 top-1/2 -translate-y-1/2 text-cyan-400 animate-spin" />
+                  )}
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setSearchResults([]);
+                        setIsDropdownOpen(false);
+                      }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white p-0.5 rounded transition-colors"
+                      title="Clear search"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="submit"
+                  disabled={!searchQuery.trim()}
+                  className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-3 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Queue</span>
+                </button>
+              </form>
+
+              {/* Matching Songs Dropdown */}
+              {isDropdownOpen && searchQuery.trim().length >= 2 && (
+                <div
+                  id="party-console-search-dropdown"
+                  className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[360px] overflow-y-auto animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
+                >
+                  <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
+                    <span className="flex items-center gap-1.5 font-bold text-cyan-300">
+                      <Sparkles className="w-3 h-3 text-cyan-400" />
+                      MATCHING SONGS {searchResults.length > 0 ? `(${searchResults.length})` : ''}
+                    </span>
+                    <span className="text-[9px] text-slate-400">Click row or button to add</span>
+                  </div>
+
+                  {isSearching && searchResults.length === 0 ? (
+                    <div className="flex items-center justify-center gap-2 py-7 text-xs text-slate-400">
+                      <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+                      <span>Searching song catalog...</span>
+                    </div>
+                  ) : searchResults.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-slate-400 flex flex-col gap-1">
+                      <span>No direct matches found for &quot;{searchQuery}&quot;</span>
+                      <span className="text-[10px] text-slate-500">Press Enter or click Queue to auto-search & fetch.</span>
+                    </div>
+                  ) : (
+                    searchResults.map((song, idx) => (
+                      <div
+                        id={`party-console-search-item-${idx}`}
+                        key={song.url || idx}
+                        onClick={() => handleSelectSong(song, false)}
+                        className="group/item flex items-center justify-between gap-2.5 p-2 rounded-xl bg-black/30 hover:bg-white/10 border border-white/5 hover:border-cyan-500/40 cursor-pointer transition-all shrink-0"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1 truncate">
+                          <div className="relative w-10 h-10 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
+                            {song.thumbnail ? (
+                              <img src={song.thumbnail} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-slate-900">
+                                <Music className="w-4 h-4 text-slate-400" />
+                              </div>
+                            )}
+                            {song.timestamp && (
+                              <span className="absolute bottom-0.5 right-0.5 text-[8px] font-mono font-bold bg-black/85 px-1 rounded text-white/90">
+                                {song.timestamp}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span
+                              className="text-xs font-bold text-white group-hover/item:text-cyan-300 transition-colors truncate"
+                              title={song.title}
+                            >
+                              {song.title}
+                            </span>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                              <span className="truncate">{song.author}</span>
+                              {song.highlightTime !== undefined && (
+                                <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0" title="Viral hook moment">
+                                  🔥 Hook {formatTime(song.highlightTime)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectSong(song, false)}
+                            className="py-1 px-2.5 bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-black border border-cyan-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                            title="Add to Up Next Queue"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Queue</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectSong(song, true)}
+                            className="py-1 px-2 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                            title="Mix into this song now"
+                          >
+                            <Play className="w-2.5 h-2.5 fill-current" />
+                            <span>Mix</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Scrollable Queue List (Expanded to display 8 songs without scroll) */}
-            <div id="party-console-queue-list" className="flex flex-col gap-1.5 max-h-[320px] overflow-y-auto pr-1">
+            <div id="party-console-queue-list" className="flex flex-col gap-1.5 max-h-[380px] overflow-y-auto pr-1">
               {engine.queue.length === 0 ? (
                 <div id="party-console-queue-empty" className="text-center py-8 text-[11px] text-slate-500 font-medium">
                   Queue empty. AI will auto-curate bangers when track plays!
@@ -748,13 +1017,32 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                   >
                     <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
                       <span className="font-mono text-[9px] text-slate-500 w-3 shrink-0">#{idx + 1}</span>
-                      {item.thumbnail ? (
-                        <img src={item.thumbnail} alt="Thumb" className="w-7 h-7 rounded-lg object-cover shrink-0" />
-                      ) : (
-                        <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center shrink-0">
-                          <Music className="w-3 h-3 text-slate-400" />
-                        </div>
-                      )}
+                      <div className="relative w-7 h-7 rounded-lg overflow-hidden shrink-0 group/qthumb">
+                        {item.thumbnail ? (
+                          <img src={item.thumbnail} alt="Thumb" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-slate-800 flex items-center justify-center">
+                            <Music className="w-3 h-3 text-slate-400" />
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            engine.toggleFavorite(item);
+                          }}
+                          className={`absolute inset-0 flex items-center justify-center bg-black/60 transition-opacity ${
+                            engine.isFavorite(item) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/qthumb:opacity-100'
+                          }`}
+                          title={engine.isFavorite(item) ? 'Saved in Favourites (Click to remove)' : 'Save to Favourites'}
+                        >
+                          <Heart
+                            className={`w-3.5 h-3.5 transition-transform ${
+                              engine.isFavorite(item) ? 'fill-rose-500 text-rose-500 scale-110' : 'text-white hover:text-rose-400'
+                            }`}
+                          />
+                        </button>
+                      </div>
                       <div className="flex flex-col truncate min-w-0 flex-1">
                         <span className="font-bold text-white text-[11px] truncate" title={item.title}>
                           {item.title}
@@ -781,6 +1069,14 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {item.isDiskCached && (
+                        <span
+                          className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold"
+                          title="Audio saved on laptop disk in cache/audio"
+                        >
+                          DISK
+                        </span>
+                      )}
                       <span
                         className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
                           item.status === 'ready'
@@ -822,71 +1118,193 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
             onQueueAgain={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false)}
           />
 
-          {/* Most Played Bangers (Quick Starters) */}
+          {/* Favourites & Most Played Bangers (Quick Starters) */}
           <div id="party-console-most-played" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#131926]/95 to-[#0b0e17]/95 shadow-xl flex flex-col gap-2">
             <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
-              <div className="flex items-center gap-1.5">
-                <div className="p-1 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                  <Star className="w-3.5 h-3.5 fill-current" />
-                </div>
-                <div>
-                  <h3 className="font-extrabold text-xs text-white tracking-wide flex items-center gap-1.5">
-                    <span>MOST PLAYED BANGERS</span>
-                    <span className="text-[9px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded-full border border-amber-500/20">
-                      {engine.mostPlayedSongs.length} Saved
-                    </span>
-                  </h3>
-                </div>
+              {/* Tab Selector */}
+              <div className="flex items-center gap-1 bg-black/40 p-0.5 rounded-xl border border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setBangersTab('favorites')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    bangersTab === 'favorites'
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Heart className={`w-3 h-3 ${engine.favorites.length > 0 ? 'fill-rose-500 text-rose-500' : ''}`} />
+                  <span>Favourites</span>
+                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                    {engine.favorites.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBangersTab('most_played')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    bangersTab === 'most_played'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                  <span>Top Bangers</span>
+                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                    {engine.mostPlayedSongs.length}
+                  </span>
+                </button>
               </div>
-              <span className="text-[10px] text-slate-400">Click to start night</span>
+
+              <span className="text-[10px] text-slate-400 hidden sm:inline">1-Click Play</span>
             </div>
 
-            {/* List of most played starters: 5 visible upfront with smooth scrolling to see the rest */}
-            <div id="party-console-most-played-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
-              {engine.mostPlayedSongs.length === 0 ? (
-                <div id="party-console-most-played-empty" className="text-center py-4 text-[11px] text-slate-500 font-medium">
-                  No play history yet. Play songs to see your top party bangers here!
-                </div>
-              ) : (
-                engine.mostPlayedSongs.map((song) => (
-                  <div id={`party-console-most-played-item-${song.id}`}
-                    key={song.id}
-                    className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-amber-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 relative">
-                        {song.thumbnail ? (
-                          <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-purple-900 to-indigo-900">
-                            <Music className="w-3.5 h-3.5 text-amber-400" />
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition-colors" title={song.title}>
-                          {song.title}
-                        </span>
-                        <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                          <span className="truncate">{song.artist}</span>
-                          <span className="font-mono text-amber-400/90 font-bold shrink-0">
-                            ⭐ {song.playCount}
+            {/* Favourites Tab View */}
+            {bangersTab === 'favorites' ? (
+              <div id="party-console-favorites-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                {engine.favorites.length === 0 ? (
+                  <div id="party-console-favorites-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
+                    <div className="p-2.5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400/80">
+                      <Heart className="w-5 h-5" />
+                    </div>
+                    <p className="text-[11px] font-medium leading-relaxed">
+                      No favourites saved yet.<br />
+                      Click the <span className="text-rose-400 font-bold">❤️ heart</span> on any song image to save it here!
+                    </p>
+                  </div>
+                ) : (
+                  engine.favorites.map((song) => (
+                    <div
+                      id={`party-console-favorite-item-${song.id}`}
+                      key={song.id}
+                      className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-rose-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/favthumb">
+                          {song.thumbnail ? (
+                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-rose-950 to-slate-900">
+                              <Music className="w-3.5 h-3.5 text-rose-400" />
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              engine.toggleFavorite(song);
+                            }}
+                            className="absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity opacity-0 group-hover/favthumb:opacity-100"
+                            title="Remove from Favourites"
+                          >
+                            <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
+                          </button>
+                        </div>
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <span className="text-xs font-bold text-white truncate group-hover:text-rose-300 transition-colors" title={song.title}>
+                            {song.title}
                           </span>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <span className="truncate">{song.artist}</span>
+                            {song.bpm && (
+                              <span className="font-mono text-cyan-300/90 font-bold shrink-0">
+                                {Math.round(song.bpm)} BPM
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <button
-                      onClick={() => engine.playStarterSong(song.id)}
-                      className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
-                    >
-                      <Play className="w-2.5 h-2.5 fill-current" />
-                      <span>Start</span>
-                    </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => engine.acquireTrack(song.url || `${song.title} ${song.artist}`, false)}
+                          className="p-1 hover:bg-white/10 text-slate-400 hover:text-cyan-300 rounded-lg text-[10px] font-bold transition-all"
+                          title="Add to Up Next Queue"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => engine.playStarterSong(song.id)}
+                          className="py-1 px-2.5 bg-gradient-to-r from-rose-500/20 to-orange-500/20 hover:from-rose-500 hover:to-orange-500 text-rose-300 hover:text-black border border-rose-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                          title="Start playing now"
+                        >
+                          <Play className="w-2.5 h-2.5 fill-current" />
+                          <span>Start</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              /* Top Bangers Tab View */
+              <div id="party-console-most-played-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                {engine.mostPlayedSongs.length === 0 ? (
+                  <div id="party-console-most-played-empty" className="text-center py-6 text-[11px] text-slate-500 font-medium">
+                    {engine.rawMostPlayedSongsList.length > 0
+                      ? 'All top bangers are currently queued or already played.'
+                      : 'No play history yet. Play songs to see your top party bangers here!'}
                   </div>
-                ))
-              )}
-            </div>
+                ) : (
+                  engine.mostPlayedSongs.map((song) => (
+                    <div id={`party-console-most-played-item-${song.id}`}
+                      key={song.id}
+                      className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-amber-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/bangerthumb">
+                          {song.thumbnail ? (
+                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-purple-900 to-indigo-900">
+                              <Music className="w-3.5 h-3.5 text-amber-400" />
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              engine.toggleFavorite(song);
+                            }}
+                            className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
+                              engine.isFavorite(song) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/bangerthumb:opacity-100'
+                            }`}
+                            title={engine.isFavorite(song) ? 'Saved in Favourites' : 'Save to Favourites'}
+                          >
+                            <Heart
+                              className={`w-3.5 h-3.5 transition-transform ${
+                                engine.isFavorite(song) ? 'fill-rose-500 text-rose-500' : 'text-white hover:text-rose-400'
+                              }`}
+                            />
+                          </button>
+                        </div>
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <span className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition-colors" title={song.title}>
+                            {song.title}
+                          </span>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <span className="truncate">{song.artist}</span>
+                            <span className="font-mono text-amber-400/90 font-bold shrink-0">
+                              ⭐ {song.playCount}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => engine.playStarterSong(song.id)}
+                        className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
+                      >
+                        <Play className="w-2.5 h-2.5 fill-current" />
+                        <span>Start</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

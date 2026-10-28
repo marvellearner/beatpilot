@@ -154,7 +154,7 @@ export function planMix(params: {
       0.5 * calm -
       0.5 * Math.max(0, vocals - 1) -
       (overHook ? 1.5 : 0) -
-      0.02 * (t - outPosition);
+      0.01 * (t - outPosition); // Scaled for up to 45s lookahead window per MIXING_RULES.md
     const why =
       (sectionChange > 0.3
         ? after < before
@@ -172,40 +172,38 @@ export function planMix(params: {
   const incMean = songMean(inc.profile.full) || 1;
   const incMidMean = songMean(inc.profile.mid) || 1;
   const minEntry = inc.musicStartTime && inc.musicStartTime > 0 ? inc.musicStartTime : 0;
-  const entryLatest = Math.min(120, inc.duration * 0.6, inc.duration - incBlend - 30);
+  // Never start from hook because build up is also important!
+  // Entry point must stay within the intro/build-up (first 4-8 bars of music start)
+  const maxIntroLimit = inc.hookTime ? Math.max(minEntry, inc.hookTime - 20) : minEntry + 16 * incBar;
+  const entryLatest = Math.min(minEntry + 8 * incBar, maxIntroLimit, inc.duration * 0.25);
   const entries = barStarts(inc, minEntry, Math.max(minEntry, entryLatest));
   const entryOptions: MixOption[] = [];
   for (const candidate of entries) {
     const e = candidate.time;
+    // Don't start at or near the hook - the natural musical buildup must be preserved
+    if (inc.hookTime && e >= inc.hookTime - 8) continue;
     const avg = (from: number, to: number) => average(inc.profile.full, inc.profile.rate, from, to);
     const during = avg(e, e + incBlend);
     const afterBlend = avg(e + incBlend, e + incBlend + 2 * incBar);
     const dropAtEnd = Math.max(0, (afterBlend - during) / incMean);
     const calm = Math.max(-1, Math.min(1, 1 - during / incMean));
     const vocals = average(inc.profile.mid, inc.profile.rate, e, e + incBlend) / incMidMean;
-    const hookFit =
-      params.preferIncomingHook && inc.hookTime !== undefined
-        ? Math.exp(-Math.abs(e + incBlend - inc.hookTime) / 4)
-        : 0;
 
     const score =
       phraseBonus(candidate.index) +
       1.5 * dropAtEnd +
       0.5 * calm -
-      0.5 * Math.max(0, vocals - 1) +
-      hookFit -
+      0.5 * Math.max(0, vocals - 1) -
       0.005 * e;
     const why =
-      hookFit > 0.5
-        ? 'timed so its hook lands as the blend ends'
+      calm > 0.2
+        ? 'on a calm intro phrase (allowing build-up)'
         : dropAtEnd > 0.3
-          ? 'timed so its drop lands as the blend ends'
-          : calm > 0.2
-            ? 'on a calm intro phrase'
-            : 'on a phrase start';
+          ? 'on an intro rise'
+          : 'on a phrase start (intro build-up)';
     entryOptions.push({ time: e, why, score });
   }
-  if (entryOptions.length === 0) entryOptions.push({ time: inc.downbeat, why: 'from the first beat', score: 0 });
+  if (entryOptions.length === 0) entryOptions.push({ time: minEntry, why: 'from the music start (full build-up)', score: 0 });
 
   const bestExits = topOptions(exitOptions, 3);
   const bestEntries = topOptions(entryOptions, 3);

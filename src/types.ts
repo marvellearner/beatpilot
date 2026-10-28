@@ -100,6 +100,7 @@ export interface TransitionConfig {
 
 /** A mix that has been planned for a good moment but hasn't started yet. */
 export interface PendingMixInfo {
+  id?: string;
   title: string;
   startsInSeconds: number;
   entryTime: number;
@@ -115,6 +116,7 @@ export interface QueuedTrack {
   thumbnail?: string;
   status: 'queued' | 'downloading' | 'decoding' | 'tuning' | 'ready' | 'failed';
   audioBuffer?: AudioBuffer;
+  isDiskCached?: boolean;
   isAiRecommended?: boolean;
   // Where the song came from: automatic sources ('ai', 'playlist') skip songs played in the
   // last hour; a song the user asked for ('request') is allowed but flagged
@@ -152,6 +154,7 @@ export interface HostSyncState {
   autoPercussionEnabled: boolean;
   autoCueViralHook: boolean;
   mostPlayedSongs?: SongHistoryItem[];
+  favorites?: FavoriteSong[];
   acquisitionStatus: string;
   pendingMix: PendingMixInfo | null;
   recentlyPlayed: PlayLogEntry[]; // newest first
@@ -186,6 +189,29 @@ export interface SongHistoryItem {
   highlightTime?: number;
 }
 
+export interface FavoriteSong {
+  id: string;
+  title: string;
+  artist: string;
+  url?: string;
+  thumbnail?: string;
+  duration?: number;
+  bpm?: number;
+  highlightTime?: number;
+  addedAt: number; // timestamp
+}
+
+export interface SearchResult {
+  title: string;
+  url: string;
+  author: string;
+  duration: number; // in seconds
+  thumbnail: string;
+  timestamp: string;
+  highlightTime?: number;
+  highlightIntensity?: number;
+}
+
 export type MobileAction =
   | { type: 'CMD_PLAY' }
   | { type: 'CMD_PAUSE' }
@@ -198,6 +224,7 @@ export type MobileAction =
   | { type: 'CMD_PERCUSSION_PATTERN'; patternId: string }
   | { type: 'CMD_PERCUSSION_VOLUME'; volume: number }
   | { type: 'CMD_PERCUSSION_MUTE' }
+  | { type: 'CMD_RESYNC_PERCUSSION' }
   | { type: 'CMD_ADD_QUEUE'; query: string }
   | { type: 'CMD_MIX_NOW'; query: string }
   | { type: 'CMD_TOGGLE_AUTOCURATION' }
@@ -216,4 +243,17 @@ export type MobileAction =
   | { type: 'CMD_TOGGLE_SET_TEMPO_LOCK' }
   | { type: 'CMD_TOGGLE_PLAY_ORIGINAL' }
   | { type: 'CMD_LOAD_MY_SONGS' }
-  | { type: 'CMD_PLAY_STARTER_SONG'; songId: string };
+  | { type: 'CMD_PLAY_STARTER_SONG'; songId: string }
+  | {
+      type: 'CMD_TOGGLE_FAVORITE';
+      song?: {
+        id?: string;
+        title?: string;
+        artist?: string;
+        url?: string;
+        thumbnail?: string;
+        duration?: number;
+        bpm?: number;
+        highlightTime?: number;
+      };
+    };

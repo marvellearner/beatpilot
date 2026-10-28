@@ -48,6 +48,16 @@ Loading `qwen2.5:3b` on the GTX 1050 crashed with `0xe06d7363` (CUDA out of memo
 
 > The previous version of this section claimed 28 tokens/s and about 1 s per plan. That was not reproducible; the measured generation speed is about 7 tokens/s.
 
+### 2.5 Cloud Acceleration: Google Gemini (Sub-Second Latency)
+To eliminate the ~4–7 s CPU wait during live sets, BeatPilot supports a **Hybrid Brain**:
+- Create a `.env` file (copied from `.env.example`):
+  ```env
+  GEMINI_API_KEY=your_key_here
+  GEMINI_MODEL=gemini-2.0-flash
+  ```
+- **Performance:** Reduces AI mix planning and DJ command interpretation latency from **~4,000–7,000 ms down to ~300–600 ms**.
+- **Automatic Failover:** If offline, or if the API request fails/times out, BeatPilot automatically falls back to local CPU Ollama (`qwen2.5:3b`), and finally to deterministic heuristic audio mixing rules so the music never stops.
+
 How the app copes with this speed:
 
 - **Warm model:** the dev server keeps the model in RAM (`keep_alive: 30m`) and loads it as soon as the app checks AI status, so the 12 s cold start doesn't hit a mix.
@@ -109,6 +119,12 @@ New-NetFirewallRule -DisplayName "AI-DJ-DevServer" -Direction Inbound -LocalPort
 > *"Start with local files, JSON settings and in-memory playback state. Add SQLite when track search, analysis caching and playlist management become substantial. Don't install or maintain a separate SQL server unless a future requirement genuinely needs one."*
 
 - **Current:** in-memory playback state and queue, `data/play_history.json`, `my_songs.txt`, and decoded PCM held in RAM.
+- **Song audio on disk:** `cache/audio/<videoId>.audio` holds each downloaded song as YouTube sent it (compressed, about 4–5 MB).
+  - It's saved while the song streams, under a temporary `.part` name, and renamed only once complete. An interrupted download is deleted.
+  - Replays and page refreshes load from disk (about 0.03 s vs about 2 s), and cached songs play without internet.
+  - The folder is capped at 2 GB (~500 songs). The least recently played files are deleted first.
+  - It isn't committed to git. Deleting the folder is always safe; songs just download again.
+- **Decoded audio in memory:** only the 8 most recent songs (about 90 MB each) are kept decoded for instant replay. Older ones are re-read from the disk cache.
 - **Future:** embedded file-based SQLite (`better-sqlite3`, `library.db`), added only if the library grows large (around 5,000+ tracks), for search and analysis caching.
 - **Never:** a separate database server such as PostgreSQL, MySQL or Redis. The app must stay runnable with a single `npm run dev`.
 

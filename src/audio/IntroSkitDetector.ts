@@ -227,7 +227,13 @@ export class IntroSkitDetector {
     );
     const at = `${Math.floor(musicStart / 60)}:${String(Math.round(musicStart % 60)).padStart(2, '0')}`;
 
-    if (speechFraction >= 0.35 || mostlySilent) {
+    const hasSpokenPreamble =
+      speechFraction >= 0.20 ||
+      mostlySilent ||
+      (rawStart >= 5 && speechFraction >= 0.10) ||
+      rawStart >= 8;
+
+    if (hasSpokenPreamble) {
       return {
         hasConversationPreamble: true,
         suggestedMusicStart: musicStart,
@@ -235,7 +241,7 @@ export class IntroSkitDetector {
         confidence: Math.min(0.95, 0.6 + speechFraction * 0.4),
         reason: mostlySilent
           ? `Silence before the music; starting at ${at}`
-          : `Talking/dialogue before the music (${Math.round(speechFraction * 100)}% speech); starting at ${at}`,
+          : `Talking/dialogue preamble before the music (${Math.round(speechFraction * 100)}% speech); skipping dialogue to ${at}`,
         speechFraction,
         beatStart: rawStart,
         profile,
