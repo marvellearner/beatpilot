@@ -55,6 +55,9 @@ Avoid playing the same track repeatedly unless requested. Avoid abrupt genre cha
 
 ### Energy management
 
+- **Shape the night as build → dip → climb.** Build energy, dip slightly to let people breathe, then climb again. Staying at peak too long burns the crowd out; dropping too hard empties the floor.
+- **Open low.** The first ~15–20% of a set settles the room and lets you read its starting energy. Don't open with your biggest songs.
+- **Save the biggest anthems for the peak.** Place the most familiar, sing-along tracks where the floor is fullest.
 - Treat energy as a journey, not a permanent maximum.
 - Build anticipation gradually when appropriate.
 - Use familiar high-energy tracks for peaks.
@@ -65,6 +68,26 @@ Avoid playing the same track repeatedly unless requested. Avoid abrupt genre cha
 
 ## 4. Beatmatching and Tempo
 
+**Beatmatching has two parts, and both are required:**
+
+1. **Same tempo:** both tracks run at the same BPM during the overlap.
+2. **Same phase:** their beats land at the same moment. The incoming track starts **"on the one"**, exactly on a beat of the outgoing track.
+
+Matching BPM without matching phase still sounds wrong. The kicks "flam" (double-hit) or "trainwreck" (fall out of step). Even a 20–30 ms offset is audible on kick drums.
+
+**BPM must be precise.** A 1 BPM error drifts an 8-bar blend by about a quarter of a beat, which is a clear flam. Use decimal BPM (e.g. 127.96), not whole numbers.
+
+**Tempo vs pitch.** Changing speed without key lock (time-stretching) also changes pitch:
+
+| Speed change | Effect without key lock |
+| :--- | :--- |
+| ≈ 5.95% | Exactly one semitone (one musical key) |
+| ~2–3% sudden change | Starts to be noticeable to many listeners; many DJs avoid long blends beyond ±2% without key lock |
+| Gradual ramp over many seconds | Much less noticeable than the same change done suddenly |
+| With key lock | Usually fine within about ±6%; artefacts grow beyond that |
+
+**Practical rules:**
+
 - Estimate BPM and beat-grid confidence before attempting precise beatmatching.
 - Align beats and downbeats where musically appropriate.
 - Prefer moderate tempo adjustments that preserve sound quality.
@@ -73,10 +96,31 @@ Avoid playing the same track repeatedly unless requested. Avoid abrupt genre cha
 - Account for half-time and double-time interpretations, such as 70 BPM versus 140 BPM.
 - Do not rely on BPM alone: two tracks with the same BPM can have incompatible rhythmic feels.
 - If reliable beat alignment is unavailable, use a musical transition that does not require precise synchronisation.
+- Prefer moving the **outgoing** track's tempo gradually toward the incoming one during its last phrases (a *tempo ramp*), so the new song can play at or near its natural speed and pitch.
+- After the blend, bring the new song back to its natural tempo gradually, not in one jump.
+
+### Mixing songs with very different tempos
+
+When tempos are too far apart to beatmatch cleanly (e.g. 95 → 128 BPM), don't force a long blend. Use one of these instead:
+
+| Technique | How it works |
+| :--- | :--- |
+| **Cut on the one** | Drop the new track's first beat exactly on a downbeat of the old track, ideally at a phrase end, with little or no overlap. |
+| **Echo out** | Put an echo or delay on the outgoing track, cut it, and let the echo tail carry into the new track. |
+| **Breakdown / drop swap** | Bring the new track in during a beatless breakdown, intro or a cappella, where no beats can clash. |
+| **Tempo ramp** | Gradually speed up or slow down over a build-up, then land the new track's drop at the new tempo. |
+| **Half / double time** | Treat 70 and 140 BPM (or 85 and 170) as compatible. The beats line up every other beat. Double-time is a quick way to lift energy. |
 
 ## 5. Phrase Matching and Song Structure
 
 Musical sections often occur in predictable phrase lengths, but the software must analyse each track rather than blindly assume a fixed structure.
+
+**Counting basics:**
+
+- 4 beats = 1 bar.
+- Phrases are usually 8, 16 or 32 bars, and club music is often built in 16-bar phrases inside 32-bar sections.
+- Changes (a new vocal, a drop, a breakdown) almost always happen at the start of a phrase.
+- Bringing a track in mid-phrase can make even a perfect beatmatch sound wrong. Start the incoming track at the start of a phrase, and time the outgoing track so its phrase ends where the new one begins.
 
 - Prefer transitions at suitable phrase boundaries, such as the end of an intro, verse, chorus, breakdown, or outro.
 - Start the incoming track where its musical content makes sense.
@@ -89,7 +133,17 @@ Musical sections often occur in predictable phrase lengths, but the software mus
 
 ## 6. Harmonic Mixing
 
-When reliable key estimates are available:
+When reliable key estimates are available, use the **Camelot wheel**. Keys are numbered 1–12, and A = minor, B = major.
+
+| Move | Example | Effect |
+| :--- | :--- | :--- |
+| Same key | 8A → 8A | Safest, seamless |
+| ±1 on the wheel | 8A → 9A or 7A | Smooth; a small lift or drop in energy |
+| A ↔ B | 8A → 8B | Mood change between minor and major |
+| +2 | 8A → 10A | "Energy boost"; use sparingly or the set feels forced |
+| +7 | 4A → 11A | Big dramatic jump; not strictly harmonic |
+
+Tools label these moves differently (some call +1 the "energy boost"), so treat the wheel as guidance. Also:
 
 - Prefer compatible keys for long blends, melodic overlaps, and mashups.
 - Consider relative major/minor and other harmonically compatible relationships.
@@ -107,6 +161,21 @@ Use when tempos, grooves, and arrangements are compatible. Blend gradually and m
 
 ### Bass swap
 Reduce the outgoing track's bass as the incoming track's bass becomes prominent. Avoid playing two strong kick/bass lines at full level for too long.
+
+- **The most important EQ rule: never play two basslines at full level at the same time.**
+- Bring the incoming track in with its low EQ cut.
+- Swap the basslines at a phrase change (e.g. on bar 9 or bar 17 of the blend), never mid-phrase.
+- The swap itself can be quick (on one beat) or gradual (over 1–4 bars). Practise both and judge by ear.
+
+### Choosing the transition by situation
+
+| Situation | Transition |
+| :--- | :--- |
+| Same genre, tempos within a few %, beats reliable | Long beatmatched blend (8–16 bars) with a bass swap at a phrase change |
+| Tempos close but vocals clash | Shorter blend: bring the new track in over the old track's instrumental or outro |
+| Tempos far apart, or a genre jump | Cut on the one, echo out, or breakdown swap |
+| Beat detection unreliable (acoustic, live, rubato) | No-blend transition: finish or fade cleanly, start the next on its first beat |
+| Big "moment" (wedding entry, the anthem) | Clean cut or short drop into the most recognisable intro/hook |
 
 ### Phrase transition
 Align the incoming track with a suitable phrase boundary in the outgoing track.
@@ -128,6 +197,8 @@ If blending sounds poor, finish or fade the outgoing track cleanly and start the
 
 ## 8. Frequency, Loudness, and Audio Quality
 
+- **Gain staging first.** Match each track's loudness with its gain/trim control while the EQ is flat, and use the channel fader only for the mix. Never compensate a quiet track by pushing the master.
+- **Stay out of the red.** Keep level meters peaking below the red, and leave headroom on the master. Clipping sounds harsh on a PA and can damage speakers. A limiter is a safety net, not a volume knob.
 - Avoid clipping at track, deck, bus, and output levels.
 - Leave sufficient headroom and use gain staging.
 - Do not assume tracks have equal perceived loudness.
@@ -302,6 +373,97 @@ Implement and verify in this order:
 8. Advanced effects, stem separation, and procedural percussion.
 
 Do not implement every advanced feature at once. Keep the system modular, test each stage, and prefer a small set of reliable musical behaviours over a large number of unreliable effects.
+
+## 19. Desi Party and Wedding Specifics
+
+- **Wide tempo range.** Bhangra and Punjabi songs run anywhere from about 80 to 180 BPM, and Bollywood mixes in slower romantic and faster dance songs. Many neighbouring songs will be too far apart to beatmatch. Plan for clean cuts on the one and use half/double-time, rather than forcing blends.
+- **Not everything blends.** Even at the same BPM, vocal-heavy Punjabi and Bollywood tracks often clash when layered. Prefer short overlaps, or bring the new song in over the old one's instrumental or dhol section.
+- **Dhol is a rhythm layer, not a lead.** A live or virtual dhol anchors the rhythm under the songs. Keep it locked to the beat, keep its sub-bass out of the way of the song's 808 and kick, and duck it under important vocals.
+- **Play to every age group.** Mix current hits with classics older guests know, and gauge which group is on the floor.
+- **Follow the event's phases:**
+
+  | Phase | Music |
+  | :--- | :--- |
+  | Arrival / cocktail | Background energy |
+  | Entries and dances | Exact songs on cue, usually from the start |
+  | Dinner | Lower energy |
+  | Dance floor | Build → dip → climb |
+  | Last song | A memorable closer |
+
+- **Requests are cues, not commands.** Play a request when it fits the floor's energy, and queue it for a better moment when it doesn't.
+
+## 20. Etiquette Checklist for a Decent DJ
+
+- [ ] **No dead air.** Something is always playing; the next track is ready before the current one ends.
+- [ ] **No trainwrecks.** If beats aren't matched, cut cleanly instead of blending.
+- [ ] **No two basslines at once.**
+- [ ] **Out of the red.** Matched levels and headroom.
+- [ ] **No repeats** of the same song in a set unless requested.
+- [ ] **Respect the hook.** Never cut off a chorus, drop or key lyric mid-phrase.
+- [ ] **Effects in moderation.** One tasteful echo-out beats constant filters and sirens.
+- [ ] **Read the room, not the plan.** Adjust to who is dancing. An empty floor at a wedding isn't always the music's fault (speeches, food, photos).
+- [ ] **Look like you're enjoying it.** The crowd takes its cue from the DJ.
+
+## 21. How AI DJ Applies These Rules (current engine)
+
+| Rule | Implementation | Status |
+| :--- | :--- | :--- |
+| Precise BPM | Autocorrelation of a 5 ms onset envelope, refined on the bar peak; BPM to 0.01 (`BpmDetector.ts`) | ✅ |
+| Same phase ("on the one") | Beat grid from the onset histogram peak. The incoming song is scheduled to start exactly on the outgoing song's next beat, from a cue point on its own beat grid. | ✅ |
+| Same tempo, minimal pitch change | Outgoing song is ramped gradually (≤ 8%, 0.4%/s) in the 20 s before an auto-mix. The incoming song gets at most a 4% sudden change, then glides back to normal at 0.4%/s. | ✅ |
+| Half / double time | 0.5×, 1× and 2× interpretations are considered when matching | ✅ |
+| Tempos too far apart | No forced blend: 2 s cut, landing on the beat, at natural pitch | ✅ |
+| Blend length | 8 bars when beatmatched (clamped to 8–20 s) | ✅ |
+| Never two basslines | Bass swap: the outgoing low band ramps out over the first half, the incoming low band ramps in over the second half | ✅ |
+| Unreliable beats → no blend | Beatmatching and on-beat starts need BPM confidence ≥ 0.6 for both songs | ✅ |
+| Dhol locked to the beat | Deck P is re-phased to the on-air song after every mix, seek and play | ✅ |
+| No repeats | Auto-curation skips songs already played this session | ✅ |
+| No dead air | Mixes only into a **ready** song; otherwise the current song keeps playing | ✅ |
+| Headroom | Master limiter at −1.5 dB threshold; per-track loudness matching not yet done | ⚠️ Partial |
+| Mix at the right moment, not immediately | Mix / Next plans the blend: the best **bar** in the next 30 s (phrase starts, a drop into a calmer section, avoiding the hook and vocals) and the best entry in the new song (calm intro, drop landing as the blend ends) (`MixPointPlanner.ts`) | ✅ |
+| Phrase (bar/16-bar) alignment | Bar downbeat estimated from the strongest low-end hits; phrase starts are counted from it. Reliable on songs with a clear accent on "1"; four-on-the-floor songs fall back to the first beat. | ⚠️ Heuristic |
+| Harmonic mixing | Key detection not implemented | ❌ Planned |
+| Key lock (tempo without pitch) | Own WSOLA time-stretch (no third-party licence) in a Web Worker, used by the Party mood to lock the set to one tempo; ±25% max | ✅ Party mood |
+| Danceable party tempo | Party mood locks the set to 120–130 BPM (natural movement ~120 BPM; dance music peaks 125–130 BPM, Moelants 2002/2008) | ✅ |
+| AI DJ judgement | Local Qwen 2.5 3B chooses among rule-abiding mix points, blend vs cut and length, and picks the next song for energy flow; validated, never blocks playback | ✅ |
+| Vocal-aware overlaps | Vocal detection not implemented | ❌ Planned |
+| Echo-out transition | Not implemented; cuts are used instead | ❌ Planned |
+
+## Sources
+
+Research gathered October 2026. These are practitioner sources (DJ schools, DJ software makers, DJ forums), so treat the numeric thresholds as rules of thumb.
+
+- **Tempo, pitch and key lock:**
+  - [DJTechTools — How much pitch change til the key changes?](https://forum.djtechtools.com/t/how-much-pitch-change-til-the-key-changes/47099)
+  - [Mixgraph — Pitch & Tempo](https://www.mixgraph.io/tools/pitch-tempo)
+  - [Mixgraph — Key lock](https://www.mixgraph.io/glossary/key-lock)
+  - [DJTechTools — Tempo adjust with Keylock on](https://forum.djtechtools.com/t/tempo-adjust-with-keylock-on/54201)
+- **Phrasing, EQ and bass swap:**
+  - [Cursa — Bars, Phrasing, and Starting on the One](https://cursa.app/en/page/dj-mixing-foundations-bars-phrasing-and-starting-on-the-one)
+  - [Cursa — EQ Use for Smooth Blends](https://cursa.app/en/page/dj-mixing-foundations-eq-use-for-smooth-blends)
+  - [Violet Recording — How to Phrase Mix](https://violetrecording.com/how-to-phrase-mix/)
+  - [Violet Recording — How to EQ Mix as a DJ](https://violetrecording.com/how-to-eq-mix-as-a-dj/)
+  - [Digital DJ Pool — DJ EQ Mixing for Beginners](https://digitaldjpool.com/blog/dj-eq-mixing-for-beginners/)
+  - [We Are Crossfader — 3 Ways To Mix House Music](https://wearecrossfader.co.uk/blog/3-ways-to-mix-house-music/)
+- **Different tempos:**
+  - [DJ.Studio — DJ tempo change techniques](https://dj.studio/blog/dj-tempo-change-techniques)
+  - [DJ.Studio — Double and half tempo](https://help.dj.studio/en/articles/15359028-double-and-half-tempo)
+  - [DJTechTools — BPM transition trick using loop out](https://djtechtools.com/2015/04/05/bpm-transition-trick-using-loop-out-move/)
+  - [DJTechTools — Mixing between slower/faster songs](https://forum.djtechtools.com/t/mixing-between-slower-faster-songs/9383)
+  - [Point Blank — Mixing different genres & BPM](https://www.pointblankmusicschool.com/blog/essential-dj-tips-for-mixing-different-genres-bpm/)
+- **Harmonic mixing:**
+  - [Mixed In Key — Change energy with the Camelot wheel](https://mixedinkey.com/workflows/change-energy-with-camelot-wheel/)
+  - [Digital DJ Pool — Camelot wheel](https://digitaldjpool.com/blog/harmonic-mixing-camelot-wheel/)
+  - [Signalkey — Camelot wheel](https://www.signalkey.io/tools/camelot-wheel)
+- **Crowd and energy:**
+  - [Elite DJ — How energy builds all night](https://www.elitedj.ca/?p=6047)
+  - [Digital DJ Tips — Reading the crowd at weddings](https://digitaldjtips.com/?p=2567261)
+  - [DJ Will Gill — Playlist curation tips](https://djwillgill.com/playlist-curation-tips-for-aspiring-djs/)
+  - [Violet Recording — How to DJ a party](https://violetrecording.com/how-to-dj-a-party/)
+- **Desi / wedding:**
+  - [Anjali & The Kid — But can you mix?](https://anjaliandthekid.com/but-can-you-mix/)
+  - [South Asian Wedding DJ Guide](https://dev.to/cloudpeaklabs/south-asian-wedding-dj-guide-music-and-culture-for-your-big-day-48g1)
+  - [Mixgraph — BPM guide](https://www.mixgraph.io/learn/bpm-guide)
 
 ## Final Principle
 

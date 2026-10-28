@@ -87,15 +87,22 @@ graph TB
 ## 5. BPM & Downbeat Detection (`src/audio/BpmDetector.ts`)
 
 ```
-PCM → IIR lowpass (160 Hz) → energy envelope → adaptive onset threshold
-    → inter-onset intervals → BPM histogram → plausibility window → BPM + confidence
+PCM → one-pole lowpass (150 Hz) → 5 ms RMS envelope → onset strength (rise in log energy)
+    → autocorrelation over 70–180 BPM periods (× tempo prior) → bar-peak refinement → BPM
+    → onset histogram over one beat → beat-grid phase
 ```
 
-1. **Low-pass** to isolate kicks and dhol strikes: $y[n] = (1-\alpha)y[n-1] + \alpha x[n]$, $\alpha = \frac{2\pi f_c/f_s}{1 + 2\pi f_c/f_s}$.
-2. **Energy** over 1024-sample windows (~23 ms). An onset is a local maximum where $E[k] > M[k] + 1.35\,\sigma[k]$, with mean and standard deviation taken over the last ~1 s (43 blocks).
-3. **IOI histogram:** $\text{BPM} = 60/\Delta t$, kept only within 70–180 BPM and binned per integer BPM, with energy weighting.
-4. **Confidence:** (mass of the peak bin plus adjacent bins) ÷ total histogram mass, giving a value in [0, 1].
-5. **First downbeat** (`firstDownbeatTime`) is also emitted. It is used for percussion phase-locking.
+The analysis covers up to 60 s, starting 20 s in.
+
+1. **Low-pass + envelope:** isolates kicks and dhol strikes. The envelope uses 5 ms hops.
+2. **Onset strength:** half-wave rectified rise in $\log(1 + 100\,E/E_{max})$, lightly smoothed (~15 ms) so beat periods that fall between frames still correlate.
+3. **Tempo:** the beat period maximises $(\text{AC}[\ell] + 0.5\,\text{AC}[2\ell]) \cdot \text{prior}(\text{BPM})$. The prior is log-normal around 120 BPM (σ = 0.9 octave) and resolves half/double-time ambiguity. The period is then refined by parabolic interpolation on the **4-beat (bar) peak**, giving about 0.01 BPM precision. BPM is returned with two decimals.
+4. **Confidence:** $\text{AC}[\text{period}] / \text{AC}[0]$, scaled so a value ≥ 0.3 maps to 1.0. Random hits and noise score about 0.1–0.2.
+5. **Beat phase** (`firstDownbeatTime`): onset strength is folded into a one-beat histogram, and the interpolated peak gives the phase. Using the peak rather than a mean makes it robust to off-beat hits.
+
+On synthetic tests (kick-only and full patterns, 87–140 BPM), BPM came out within 0.01 and phase within 6 ms. 170 BPM is reported as 85 (half-time), which the mixer handles.
+
+**Limitation:** this finds beats, not which beat is "1" of the bar.
 
 ---
 
@@ -157,16 +164,73 @@ Deck P:       PLAYING ───────────────────�
 ```
 
 1. **Analysis first:** every track's BPM, confidence, downbeat and hook are detected once, when it is preloaded or acquired. This happens whether or not auto-drums are on.
-2. **Pitch-safe tempo matching:** deck tempo is changed through `playbackRate`, which also shifts pitch because there is no time-stretch. So:
-   - The incoming rate is $\text{BPM}_A / (\text{BPM}_B \times m)$, with $m \in \{0.5, 1, 2\}$ chosen to give the smallest change.
-   - The engine beatmatches only when both BPM confidences are ≥ 0.6 and the shift is ≤ 6% (about 1 semitone).
-   - Otherwise the incoming song plays at its natural pitch, and the overlap is cut to a 4 s crossfade so unsynced beats don't flam.
+2. **Pitch-safe tempo matching:** deck tempo is changed through `playbackRate`, which also shifts pitch because there is no key lock (5.95% = 1 semitone; sudden jumps are noticeable from about 2–3%). So:
+   - **Pre-mix tempo ramp:** in the 20 s before an auto-mix (42 → 22 s from the end), the *outgoing* song glides at 0.4%/s toward the next song's tempo. It moves by up to 8%, and a gradual ramp is much less noticeable than a jump.
+   - **Incoming match:** the incoming rate is $\text{BPM}_{A,\text{eff}} / (\text{BPM}_B \times m)$, with $m \in \{0.5, 1, 2\}$ chosen to give the smallest change. It is applied only if both confidences are ≥ 0.6 and the remaining shift is ≤ 4%.
+   - Together these beatmatch tempo gaps of up to about 12%. Larger gaps get a **2 s cut on the beat** at natural pitch, with no long flam.
    - The rate is set before the incoming deck starts.
-3. **Pitch return:** after the mix, an engine-set rate glides back to 1.0 at 0.4% per second. A 6% shift returns in about 15 s. Manual pitch fader settings are never touched.
-4. **Bass swap:** the outgoing low band ramps to −24 dB over the first half. The incoming low band ramps from −24 dB to 0 dB over the second half.
-5. **Audio-clock scheduling:** the crossfade (equal-power curve) and the EQ ramps are scheduled as `AudioParam` automation. Mixes therefore finish correctly even when the browser tab is hidden. Moving the crossfader by hand cancels an automatic mix.
-6. **Outro auto-trigger:** when ≤ 14 s remain and a queued track is **ready**, the transition fires. If nothing is ready, the current song keeps playing. **Next** does nothing except show a status message, and a song is never swapped in mid-mix.
-7. **Drums follow the on-air deck:** when the mix ends, Deck P re-syncs its pattern, tempo and phase to the new song.
+3. **On the one:** the incoming deck is *scheduled* (`AudioBufferSourceNode.start(when, offset)`) so its first beat lands exactly on the outgoing song's next beat. Its cue point is on its own beat grid: the hook cue is snapped to that grid, and a start from the beginning uses the first beat.
+4. **Blend length:** 8 bars at the outgoing tempo, clamped to 8–20 s, unless a caller (Pro mixer, AI command) specifies a length.
+5. **Pitch return:** after the mix, an engine-set rate glides back to 1.0 at 0.4% per second. Manual pitch fader settings are never touched.
+6. **Bass swap:** the outgoing low band ramps to −24 dB over the first half. The incoming low band ramps from −24 dB to 0 dB over the second half.
+7. **Audio-clock scheduling:** the crossfade (equal-power curve) and the EQ ramps are scheduled as `AudioParam` automation starting at the beat-aligned start time. Mixes therefore finish correctly even when the browser tab is hidden. Moving the crossfader by hand cancels an automatic mix.
+8. **Outro auto-trigger:** when ≤ 22 s remain on songs longer than 60 s, and a queued track is **ready**, the transition fires. If nothing is ready, the current song keeps playing. **Next** does nothing except show a status message, and a song is never swapped in mid-mix.
+9. **Drums follow the on-air deck:** when the mix ends, Deck P re-syncs its pattern, tempo and phase to the new song.
+
+### 7.3 Party tempo lock with key lock (`TimeStretch.ts`, `timeStretch.worker.ts`)
+
+In the Party mood, the whole set is locked to one **session tempo** in the 120–130 BPM dance range. The research behind that range: people's natural movement tempo is just above 120 BPM (~2 Hz), and dance music clusters at 125–130 BPM.
+
+- **Choosing the tempo:** it's the on-air song's tempo if that is already in range (half/double time counts), otherwise 124 BPM.
+- **Tuning each song:** every ready song is time-stretched to the session tempo with **WSOLA** (Waveform-Similarity Overlap-Add). Grains of 46 ms are overlap-added at 50% with a Hann window, and each grain is nudged by up to ±11.6 ms to the best waveform continuation. This is done offline in a Web Worker and takes about 0.7 s for a 4-minute song. **Tempo changes; pitch doesn't.** The originals are kept, so leaving Party mood restores natural tempos.
+- **Range:** up to ±25% (beyond that WSOLA artefacts grow). AI-recommended songs further away are skipped and replaced. Songs you requested still play, at their natural tempo with a cut.
+- **Test result:** a 100 BPM track tuned to 124.1 BPM kept its 440 Hz tone at 438 Hz, which is within measurement error.
+- **Effect:** every party mix is between identical tempos, so it is beatmatched at 0% speed change.
+
+### 7.3b Tempo control (`TempoControl.tsx`, `AudioEngine.setTempo`)
+
+The on-air song can be played at 0.8x–1.25x. The controls are presets, ±1 BPM, or an exact BPM.
+
+- **Key Lock ON:** the original audio (kept as `originalBuffer` / `original` timing) is re-timed with WSOLA in the worker, taking about 0.7 s. `VirtualDeck.replaceAudio` then swaps it in at the same musical position (natural position ÷ ratio), with a 40 ms crossfade between per-source gain nodes.
+- **What moves with it:** BPM, downbeat, hook and cue times are rescaled. Running drums are re-phased, and a planned mix is re-planned.
+- **Rapid presses:** the latest request wins.
+- **Key Lock OFF (vinyl):** the deck returns to the natural audio and uses `playbackRate`, so pitch follows speed. This rate is marked manual, so the auto-DJ never glides it back.
+- **Whole set at this BPM:** sets `sessionBpm` to the new tempo, so the queue tuner (§7.3) re-times every following song to it. In the Party mood, changing the tempo moves the party set tempo along with it.
+
+### 7.4 AI DJ decisions (`OllamaDJAgent.ts`, local Ollama via `/api/llm`)
+
+The local model makes the creative calls, but only among options that already follow the mixing rules:
+
+1. **Mix decision:** the planner passes its top 3 exit points and top 3 entry points; options scoring far below the best are dropped. The model picks one of each, plus blend vs cut and 4/8/16 bars, with a reason. The reply is validated with Zod; out-of-range picks are rejected, and a "blend" is forced to "cut" when tempos can't be matched.
+2. **Next song:** at the end of a song, with 2–3 songs ready, the model picks the best one for energy flow. It sees the mood, recent songs and guest requests.
+3. **Never blocks:** decisions run in the background (~3–7 s on this CPU). The analysis plan stands until a valid answer arrives, and an answer is ignored if it arrives within 3 s of the planned start.
+4. **Visible:** the reason is shown with 🤖 in the mix banner and status line. The header shows the real Ollama status (checked every minute) instead of a fixed "Ready" label.
+
+### 7.2 Mix-point planning (`src/audio/MixPointPlanner.ts`)
+
+Pressing **Mix / Next** (or an automatic outro mix 45 s before the end) does not mix immediately. The planner first does the following:
+
+- **Profiles:** computes 10 Hz loudness and 300 Hz–3 kHz (vocal-ish) envelopes for both songs, once each.
+- **Exit:** scores every **bar start** in the next 30 s of the outgoing song (or up to its end, for the outro).
+
+  | Factor | Weight |
+  | :--- | :--- |
+  | 8-bar phrase start | +1 |
+  | 4-bar phrase start | +0.5 |
+  | Section change, stepping **down** into a calmer section | ×1.5 |
+  | Section change, stepping up | ×0.6 |
+  | Calm, vocal-light blend window | bonus |
+  | Blend would cover the outgoing hook | −1.5 |
+  | Waiting time | −0.02 per second |
+
+- **Entry:** scores bar starts in the incoming song's first part. It favours phrase starts and a calm, vocal-light intro, timed so the **energy rise (drop) or hook lands as the blend ends**.
+- **The wait:** the mix waits for that bar, ramping the outgoing tempo meanwhile. It holds steady for the last 2.5 s, then the incoming deck is scheduled sample-accurately at the chosen bar and entry point.
+- **Controls:** pressing Next / Mix again (or **Mix now**) skips the wait. **Cancel** returns the song to the queue. Pausing cancels the plan, and seeking re-plans it.
+- **Bar downbeat:** `BpmDetector` estimates which beat is "1" from where the strongest low-end hits fall. When no beat clearly wins, it falls back to the first beat.
+
+On synthetic structured songs, the planner exits at the breakdown or outro boundary and enters 8 bars before the incoming drop.
+
+The DJ rules behind these numbers, with sources, are in [DJ_KNOWLEDGE_AND_MIXING_RULES.md §4 and §21](DJ_KNOWLEDGE_AND_MIXING_RULES.md).
 
 ### 7.1 LLM mixing plans (`src/ai/OllamaDJAgent.ts`, `src/ai/schema.ts`)
 A natural-language request plus the current BPM, bar and key metadata go to Qwen 2.5 3B. The raw JSON reply is validated with Zod. If validation fails, the engine falls back to a standard 8-bar crossfade, so a bad reply never interrupts audio.
@@ -250,7 +314,9 @@ $T_{\text{raw}} = T_{\text{hook}} - 16 \cdot \frac{60}{\text{BPM}}$. If $T_{\tex
 - An **Up Next** queue with song/URL search, the most-played "Start With This" bangers, and the `my_songs.txt` loader and editor.
 - A header switch for **🎛️ Pro Decks**: `DeckView` (waveforms, pitch, EQ kills), `MixerSection` (crossfader) and `PercussionBar`.
 
-### 10.2 iPhone Remote (`src/remote/MobileRemoteView.tsx`)
+### 10.2 iPhone Remote (`src/remote/RemoteClient.tsx` + `MobileRemoteView.tsx`)
+- `?remote=true` loads `RemoteClient`, which has **no audio engine**. It renders the laptop's `SYNC_STATE` and sends `CMD_*` messages. Song requests are downloaded and played by the laptop.
+- "Simulate Mobile View" on the laptop renders the same view against the local engine.
 - Large touch targets (at least 48×48 pt) on a dark high-contrast theme: amber = dhol, cyan = Deck A, violet = Deck B.
 - No `<audio>` tags, so iOS never takes audio focus or reroutes audio.
 - Reconnects automatically after the phone sleeps and receives the latest state immediately.
@@ -295,6 +361,8 @@ interface HostSyncState {
 | `CMD_TOGGLE_AUTOCURATION` | `{}` | Toggle internet auto-curation. |
 | `CMD_MIX_NOW` | `{ query }` | Acquire a track and mix it in immediately. |
 | `CMD_ADD_QUEUE` | `{ query }` | Add a track to the front of the queue. |
+| `CMD_MIX_QUEUED` | `{ itemId }` | Mix into a specific ready song in the queue. |
+| `CMD_REMOVE_QUEUED` | `{ itemId }` | Remove a song from the queue. |
 | `CMD_JUMP_TO_HOOK` | `{ deckId? }` | Jump to the viral hook. |
 | `CMD_TOGGLE_AUTO_CUE_HOOK` | `{}` | Toggle hook auto-cue. |
 | `CMD_LOAD_MY_SONGS` | `{}` | Load `my_songs.txt`. |

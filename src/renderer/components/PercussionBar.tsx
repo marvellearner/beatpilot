@@ -7,6 +7,7 @@ interface PercussionBarProps {
   decisionReason?: string;
   autoPilotActive?: boolean;
   onToggleAutoPilot?: () => void;
+  onTogglePlay: () => void;
 }
 
 export const PercussionBar: React.FC<PercussionBarProps> = ({
@@ -14,11 +15,12 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
   decisionReason,
   autoPilotActive = true,
   onToggleAutoPilot,
+  onTogglePlay,
 }) => {
   const state = percussionDeck.getState();
 
   return (
-    <div
+    <div id="percussion-bar"
       className={`dj-panel rounded-2xl p-5 border transition-all ${
         state.isPlaying
           ? 'border-rose-500/50 glow-deck-p bg-gradient-to-r from-[#171226]/90 via-[#1f132b]/90 to-[#171226]/90'
@@ -26,7 +28,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
       }`}
     >
       {/* Top Banner & Telemetry */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-white/10">
+      <div id="percussion-bar-header" className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-white/10">
         <div className="flex items-center gap-3">
           <div
             className={`p-2.5 rounded-xl ${
@@ -57,7 +59,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
         </div>
 
         {/* Master Transport, Auto-Pilot Toggle & Quick Mute */}
-        <div className="flex items-center gap-3">
+        <div id="percussion-bar-transport" className="flex items-center gap-3">
           {onToggleAutoPilot && (
             <button
               onClick={onToggleAutoPilot}
@@ -85,7 +87,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
           </button>
 
           <button
-            onClick={() => percussionDeck.togglePlay()}
+            onClick={onTogglePlay}
             className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-extrabold text-sm tracking-wider transition-all shadow-lg ${
               state.isPlaying
                 ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/40'
@@ -109,7 +111,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
 
       {/* AI Drum Advisor Reasoning Banner */}
       {decisionReason && (
-        <div className="bg-black/40 px-3.5 py-1.5 rounded-xl border border-white/5 font-mono text-[11px] text-rose-300 mt-2.5 flex items-center gap-2">
+        <div id="percussion-bar-advisor-reason" className="bg-black/40 px-3.5 py-1.5 rounded-xl border border-white/5 font-mono text-[11px] text-rose-300 mt-2.5 flex items-center gap-2">
           <Bot className="w-4 h-4 text-rose-400 shrink-0" />
           <span className="font-bold text-white">AI Drum Decision:</span>
           <span className="truncate">{decisionReason}</span>
@@ -117,9 +119,9 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
       )}
 
       {/* Grid of 4 Rhythm Patterns & Sync Controls */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-3 items-center">
+      <div id="percussion-bar-body" className="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-3 items-center">
         {/* Pattern Selectors */}
-        <div className="lg:col-span-7 flex flex-col gap-2">
+        <div id="percussion-bar-patterns" className="lg:col-span-7 flex flex-col gap-2">
           <div className="text-[11px] font-mono font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
             <Radio className="w-3.5 h-3.5 text-rose-400" />
             <span>Select Rhythmic Loop Pattern</span>
@@ -128,7 +130,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
             {PERCUSSION_PATTERNS.map((pattern) => {
               const isActive = state.activePatternId === pattern.id;
               return (
-                <button
+                <button id={`percussion-bar-pattern-${pattern.id}`}
                   key={pattern.id}
                   onClick={() => percussionDeck.switchPattern(pattern.id)}
                   className={`flex flex-col text-left p-2.5 rounded-xl border transition-all ${
@@ -151,9 +153,9 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
         </div>
 
         {/* Sync Mode & Tempo */}
-        <div className="lg:col-span-5 grid grid-cols-3 gap-3 bg-black/40 p-3 rounded-xl border border-white/5 items-center">
+        <div id="percussion-bar-sync" className="lg:col-span-5 grid grid-cols-3 gap-3 bg-black/40 p-3 rounded-xl border border-white/5 items-center">
           {/* Deck Sync Selector */}
-          <div className="flex flex-col gap-1 text-center">
+          <div id="percussion-bar-sync-deck" className="flex flex-col gap-1 text-center">
             <span className="text-[10px] font-mono text-slate-400">BEAT SYNC</span>
             <div className="flex justify-center bg-white/5 p-0.5 rounded-lg border border-white/10">
               <button
@@ -176,7 +178,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
           </div>
 
           {/* Dhol Loop BPM Display */}
-          <div className="flex flex-col items-center gap-0.5">
+          <div id="percussion-bar-bpm" className="flex flex-col items-center gap-0.5">
             <span className="text-[10px] font-mono text-slate-400">LOOP BPM</span>
             <span className="text-base font-extrabold text-rose-400 font-mono">
               {Math.round(state.currentBpm)}
@@ -185,7 +187,7 @@ export const PercussionBar: React.FC<PercussionBarProps> = ({
           </div>
 
           {/* Volume & Intensity */}
-          <div className="flex flex-col gap-1 text-center">
+          <div id="percussion-bar-volume" className="flex flex-col gap-1 text-center">
             <div className="flex justify-between text-[10px] font-mono text-slate-400">
               <span>VOL</span>
               <span className="text-slate-200">{Math.round(state.volume * 100)}%</span>

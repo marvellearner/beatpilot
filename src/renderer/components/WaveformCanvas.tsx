@@ -10,9 +10,11 @@ interface WaveformCanvasProps {
   highlightTime?: number;
   cueInTime?: number;
   onSeek: (time: number) => void;
+  id?: string; // DOM id of the waveform container (unique per deck)
 }
 
 export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
+  id,
   analyser,
   isPlaying,
   currentTime,
@@ -149,7 +151,7 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
   };
 
   return (
-    <div className="relative w-full h-24 rounded-lg overflow-hidden border border-white/10 shadow-inner cursor-pointer group">
+    <div id={id} className="relative w-full h-24 rounded-lg overflow-hidden border border-white/10 shadow-inner cursor-pointer group">
       <canvas
         ref={canvasRef}
         width={600}

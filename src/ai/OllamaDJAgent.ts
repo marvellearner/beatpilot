@@ -1,5 +1,6 @@
-import { AICommandSchema, AICommandPlan } from './schema';
-import { AudioEngine } from '../audio/AudioEngine';
+import { z } from 'zod';
+import { AICommandSchema, type AICommandPlan } from './schema';
+import type { AudioEngine } from '../audio/AudioEngine';
 
 export interface AIResponseResult {
   plan: AICommandPlan;
@@ -8,9 +9,111 @@ export interface AIResponseResult {
   rawResponse?: string;
 }
 
+/** What the AI DJ sees when choosing how to mix: only options that already obey the mixing rules. */
+export interface MixDecisionContext {
+  mood: string;
+  sessionBpm: number | null;
+  current: { title: string; artist: string; bpm: number; position: number; duration: number };
+  next: { title: string; artist: string; bpm: number; keyLocked: boolean };
+  canBlend: boolean; // false when tempos are too far apart: only a cut is allowed
+  exitOptions: Array<{ inSeconds: number; at: number; why: string }>;
+  entryOptions: Array<{ at: number; why: string }>;
+}
+
+export interface NextSongContext {
+  mood: string;
+  sessionBpm: number | null;
+  current: { title: string; artist: string; bpm: number };
+  recentlyPlayed: string[];
+  options: Array<{ title: string; artist: string; bpm: number; requested: boolean }>;
+}
+
+const MixDecisionSchema = z.object({
+  exit: z.coerce.number().int().min(1),
+  entry: z.coerce.number().int().min(1),
+  style: z.enum(['blend', 'cut']),
+  bars: z.coerce.number().refine((b) => [4, 8, 16].includes(b)),
+  reason: z.string().max(200),
+});
+export type MixDecision = z.infer<typeof MixDecisionSchema>;
+
+const NextSongSchema = z.object({
+  pick: z.coerce.number().int().min(1),
+  reason: z.string().max(200),
+});
+export type NextSongDecision = z.infer<typeof NextSongSchema>;
+
+const formatTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
 export class OllamaDJAgent {
-  private endpoint: string = 'http://localhost:11434/api/generate';
-  private model: string = 'qwen2.5:3b';
+  // Proxied by the dev server (server/apiPlugin.ts), which keeps the model warm in RAM
+  private endpoint: string = '/api/llm';
+
+  /** Sends a prompt to the local model and parses its JSON reply; null if unavailable or too slow. */
+  private async askJson(prompt: string, maxTokens: number, timeoutMs: number): Promise<unknown> {
+    try {
+      const response = await fetch(this.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, maxTokens, timeoutMs }),
+        signal: AbortSignal.timeout(timeoutMs + 1000),
+      });
+      if (!response.ok) return null;
+      const data = await response.json();
+      return JSON.parse(data.response);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether Ollama is running with the model installed. */
+  public async checkHealth(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/llm/health', { signal: AbortSignal.timeout(4000) });
+      return res.ok && (await res.json()).online === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Asks the AI DJ which of the rule-abiding exit/entry points to use, and blend vs cut.
+   * Returns null (keep the analysis' first choice) if the model is slow, offline or off-script.
+   */
+  public async chooseMix(ctx: MixDecisionContext): Promise<MixDecision | null> {
+    const prompt = `You are an expert ${ctx.mood} DJ deciding how to mix into the next song.
+NOW PLAYING: "${ctx.current.title}" by ${ctx.current.artist}, ${Math.round(ctx.current.bpm)} BPM, at ${formatTime(ctx.current.position)} of ${formatTime(ctx.current.duration)}.
+NEXT SONG: "${ctx.next.title}" by ${ctx.next.artist}, ${Math.round(ctx.next.bpm)} BPM${ctx.next.keyLocked ? ' (tempo-matched, key-locked)' : ''}.
+${ctx.sessionBpm ? `The whole set is locked to ${ctx.sessionBpm} BPM for dancing.\n` : ''}WHERE TO START MIXING OUT OF THE CURRENT SONG:
+${ctx.exitOptions.map((o, i) => `${i + 1}) in ${Math.round(o.inSeconds)}s at ${formatTime(o.at)}: ${o.why}`).join('\n')}
+WHERE THE NEXT SONG STARTS:
+${ctx.entryOptions.map((o, i) => `${i + 1}) at ${formatTime(o.at)}: ${o.why}`).join('\n')}
+STYLE: ${ctx.canBlend ? '"blend" (beatmatched overlap of 4, 8 or 16 bars) or "cut" (instant switch on the beat)' : 'tempos are too far apart, so style must be "cut"'}.
+DJ RULES: don't throw away a chorus or hook; prefer mixing out where the current song calms down; land the next song's drop or hook as the mix ends; short mixes for vocal-heavy Desi songs; long smooth blends for chill moods; high energy for parties.
+Reply ONLY with JSON: {"exit": <number>, "entry": <number>, "style": "blend"|"cut", "bars": 4|8|16, "reason": "<max 12 words>"}`;
+
+    const parsed = MixDecisionSchema.safeParse(await this.askJson(prompt, 60, 12_000));
+    if (!parsed.success) return null;
+    const d = parsed.data;
+    if (d.exit > ctx.exitOptions.length || d.entry > ctx.entryOptions.length) return null;
+    if (!ctx.canBlend) d.style = 'cut';
+    return d;
+  }
+
+  /** Asks the AI DJ which ready song should play next for the best energy flow. */
+  public async chooseNextSong(ctx: NextSongContext): Promise<NextSongDecision | null> {
+    const prompt = `You are an expert ${ctx.mood} DJ picking the next song to keep the dance floor flowing.
+NOW PLAYING: "${ctx.current.title}" by ${ctx.current.artist}, ${Math.round(ctx.current.bpm)} BPM.
+RECENTLY PLAYED: ${ctx.recentlyPlayed.length ? ctx.recentlyPlayed.map((t) => `"${t}"`).join(', ') : 'none'}.
+${ctx.sessionBpm ? `The set is locked to ${ctx.sessionBpm} BPM.\n` : ''}READY SONGS:
+${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round(o.bpm)} BPM${o.requested ? ' (requested by a guest)' : ''}`).join('\n')}
+Consider energy flow, genre and language continuity, and the mood. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
+Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
+
+    const parsed = NextSongSchema.safeParse(await this.askJson(prompt, 40, 12_000));
+    if (!parsed.success || parsed.data.pick > ctx.options.length) return null;
+    return parsed.data;
+  }
 
   /**
    * Processes a natural language DJ command with the local Qwen 2.5 3B model,
@@ -97,28 +200,9 @@ USER INSTRUCTION: "${userInput}"
 Output ONLY the JSON object. Do not include markdown code blocks or explanations outside the JSON.`;
 
     try {
-      const response = await fetch(this.endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.model,
-          prompt: systemPrompt,
-          stream: false,
-          format: 'json',
-          options: {
-            num_gpu: 0, // Safe CPU execution avoiding VRAM watchdog timeouts
-            temperature: 0.1,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ollama HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      const rawText = data.response;
-      const parsed = JSON.parse(rawText);
+      // ~150 output tokens at ~7 tokens/s on this CPU: allow up to 30 s before falling back
+      const parsed = await this.askJson(systemPrompt, 160, 30_000);
+      if (parsed === null) throw new Error('Local LLM unavailable or timed out');
 
       // Validate with Zod
       const validatedPlan = AICommandSchema.parse(parsed);
@@ -128,7 +212,7 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
         plan: validatedPlan,
         latencyMs,
         source: 'ollama_qwen',
-        rawResponse: rawText,
+        rawResponse: JSON.stringify(parsed),
       };
     } catch (err) {
       console.warn('Ollama unavailable or schema error, using deterministic fallback:', err);
@@ -166,7 +250,6 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
           active: !isStop,
           pattern_id: pattern,
           volume: 0.85,
-          sync_to_deck: 'A',
         },
         explanation: isStop
           ? 'Paused continuous percussion deck.'
@@ -176,7 +259,7 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
 
     // 2. Transitions
     if (text.includes('mix') || text.includes('transition') || text.includes('crossfade') || text.includes('switch')) {
-      const targetDeck = text.includes('deck a') || text.includes('song a') ? 'A' : 'B';
+      const targetDeck = /\b(deck|song)\s*a\b/.test(text) ? 'A' : 'B';
       const isSmooth = text.includes('smooth') || text.includes('harmonic');
       const isDrop = text.includes('drop') || text.includes('cut') || text.includes('fast');
 
@@ -195,7 +278,8 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
 
     // 3. EQ / Bass Kill
     if (text.includes('bass') || text.includes('low') || text.includes('eq')) {
-      const targetDeck = text.includes('b') ? 'B' : 'A';
+      // Match "deck b" explicitly: a bare 'b' would match the word "bass" itself
+      const targetDeck = /\b(deck|song)\s*b\b/.test(text) ? 'B' : 'A';
       const isCut = text.includes('cut') || text.includes('kill') || text.includes('lower') || text.includes('drop');
 
       return {
@@ -231,14 +315,20 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
   public executePlanOnEngine(plan: AICommandPlan, engine: AudioEngine) {
     // 1. Execute Transitions
     if (plan.action === 'execute_transition' && plan.transition) {
-      const sourceDeck = plan.transition.target_deck === 'A' ? 'B' : 'A';
-      engine.startTransition({
-        sourceDeck,
-        targetDeck: plan.transition.target_deck,
-        durationSeconds: plan.transition.duration_seconds,
-        style: plan.transition.style === 'drop_cut' ? 'smooth_crossfade' : plan.transition.style,
-        syncPercussion: plan.transition.sync_percussion,
-      });
+      // "Mix" means the next song: the off-air deck usually still holds the previous one
+      const nextReady = engine.queue.find((q) => q.status === 'ready' && q.audioBuffer);
+      if (nextReady) {
+        engine.mixQueuedTrack(nextReady.id, plan.transition.duration_seconds);
+      } else {
+        const sourceDeck = plan.transition.target_deck === 'A' ? 'B' : 'A';
+        engine.startTransition({
+          sourceDeck,
+          targetDeck: plan.transition.target_deck,
+          durationSeconds: plan.transition.duration_seconds,
+          style: plan.transition.style === 'drop_cut' ? 'smooth_crossfade' : plan.transition.style,
+          syncPercussion: plan.transition.sync_percussion,
+        });
+      }
     }
 
     // 2. Control Percussion
@@ -247,13 +337,13 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
         if (plan.percussion.pattern_id) {
           engine.percussionDeck.switchPattern(plan.percussion.pattern_id);
         }
-        if (plan.percussion.sync_to_deck) {
-          engine.percussionDeck.setSyncDeck(plan.percussion.sync_to_deck);
-        }
         if (plan.percussion.volume !== undefined) {
           engine.percussionDeck.setVolume(plan.percussion.volume);
         }
-        engine.percussionDeck.play();
+        // Start locked to the beat of the song on air (no-op if already playing)
+        if (!engine.percussionDeck.getState().isPlaying) {
+          engine.togglePercussion();
+        }
       } else {
         engine.percussionDeck.pause();
       }
@@ -274,6 +364,7 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
       const applyDeck = (deck: typeof engine.deckA) => {
         if (plan.playback?.command === 'play') deck.play();
         else if (plan.playback?.command === 'pause') deck.pause();
+        else if (plan.playback?.command === 'stop') deck.stop();
       };
 
       if (plan.playback.deck === 'A' || plan.playback.deck === 'both') applyDeck(engine.deckA);

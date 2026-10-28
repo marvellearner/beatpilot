@@ -148,13 +148,19 @@ export class PercussionDeck {
     const pattern = PERCUSSION_PATTERNS.find((p) => p.id === patternId);
     if (!pattern) return;
 
-    const currentTime = this.getCurrentTime();
+    // All patterns are 4 bars, so keep the same position within the bar cycle
+    const oldBuffer = this.getBuffer();
+    const loopFraction = oldBuffer ? this.getCurrentTime() / oldBuffer.duration : 0;
     this.activePatternId = patternId;
+    const newBuffer = this.getBuffer();
+    const newOffset = newBuffer ? loopFraction * newBuffer.duration : 0;
 
     if (this.isPlaying) {
       // Seamlessly hot-swap the buffer without stopping the timeline
       this.stopSource();
-      this.startLoop(currentTime);
+      this.startLoop(newOffset);
+    } else {
+      this.pausedAt = newOffset;
     }
     this.notifyUpdate();
   }
@@ -178,14 +184,20 @@ export class PercussionDeck {
   }
 
   public syncBpm(targetBpm: number) {
+    // Re-anchor the clock so the loop position stays continuous across the rate change
+    const position = this.getCurrentTime();
     this.currentBpm = Math.max(80, Math.min(180, targetBpm));
     if (this.sourceNode) {
-      const activePattern = PERCUSSION_PATTERNS.find((p) => p.id === this.activePatternId);
-      const defaultBpm = activePattern ? activePattern.defaultBpm : 128;
-      const rate = this.currentBpm / defaultBpm;
+      const rate = this.getRate();
       this.sourceNode.playbackRate.setTargetAtTime(rate, this.ctx.currentTime, 0.05);
+      this.startedAt = this.ctx.currentTime - position / rate;
     }
     this.notifyUpdate();
+  }
+
+  private getRate(): number {
+    const activePattern = PERCUSSION_PATTERNS.find((p) => p.id === this.activePatternId);
+    return this.currentBpm / (activePattern ? activePattern.defaultBpm : 128);
   }
 
   public setSyncDeck(deckId: DeckId | 'manual') {
@@ -209,7 +221,8 @@ export class PercussionDeck {
     const buffer = this.getBuffer();
     if (!buffer) return 0;
     if (this.isPlaying) {
-      const elapsed = this.ctx.currentTime - this.startedAt;
+      // Position within the loop buffer (buffer seconds advance at the playback rate)
+      const elapsed = (this.ctx.currentTime - this.startedAt) * this.getRate();
       return elapsed % buffer.duration;
     }
     return this.pausedAt;
@@ -222,14 +235,16 @@ export class PercussionDeck {
     this.notifyUpdate();
   }
 
+  /**
+   * Locks the loop to the song's beat grid. Times are in real (wall-clock) seconds
+   * since the song started, so they stay correct when the song deck is tempo-shifted.
+   */
   public syncPhaseToTime(deckCurrentTime: number, deckBpm: number, firstDownbeatTime: number = 0) {
     this.syncBpm(deckBpm);
     const buffer = this.getBuffer();
     if (!buffer) return;
 
-    const activePattern = PERCUSSION_PATTERNS.find((p) => p.id === this.activePatternId);
-    const defaultBpm = activePattern ? activePattern.defaultBpm : 128;
-    const rate = this.currentBpm / defaultBpm;
+    const rate = this.getRate();
     const effectiveLoopDuration = buffer.duration / rate;
 
     // Calculate musical time aligned to song downbeat grid
@@ -237,7 +252,13 @@ export class PercussionDeck {
     const targetPhaseInLoop = (relativeTime % effectiveLoopDuration) * rate;
 
     if (this.isPlaying) {
-      this.startedAt = this.ctx.currentTime - (targetPhaseInLoop / rate);
+      // Only restart the loop when it is audibly out of phase (> ~15 ms)
+      const drift = Math.abs(this.getCurrentTime() - targetPhaseInLoop);
+      const circularDrift = Math.min(drift, buffer.duration - drift) / rate;
+      if (circularDrift > 0.015) {
+        this.stopSource();
+        this.startLoop(targetPhaseInLoop);
+      }
     } else {
       this.pausedAt = targetPhaseInLoop;
     }
@@ -252,16 +273,15 @@ export class PercussionDeck {
     this.sourceNode.loop = true;
 
     // Adjust playbackRate according to target BPM
-    const activePattern = PERCUSSION_PATTERNS.find((p) => p.id === this.activePatternId);
-    const defaultBpm = activePattern ? activePattern.defaultBpm : 128;
-    this.sourceNode.playbackRate.value = this.currentBpm / defaultBpm;
+    const rate = this.getRate();
+    this.sourceNode.playbackRate.value = rate;
 
     // Connect to HighPass -> Presence -> Gain -> Output chain
     this.sourceNode.connect(this.highPassFilter);
 
     const safeOffset = offsetSeconds % buffer.duration;
     this.sourceNode.start(0, safeOffset);
-    this.startedAt = this.ctx.currentTime - safeOffset;
+    this.startedAt = this.ctx.currentTime - safeOffset / rate;
   }
 
   private stopSource() {

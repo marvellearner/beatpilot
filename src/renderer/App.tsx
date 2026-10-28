@@ -37,9 +37,8 @@ export const App: React.FC = () => {
   const [showHelp, setShowHelp] = useState<boolean>(false);
   const [showRemoteModal, setShowRemoteModal] = useState<boolean>(false);
 
-  // Check if current URL requested dedicated remote view (?remote=true) or toggle in UI
-  const isUrlRemote = new URLSearchParams(window.location.search).get('remote') === 'true';
-  const [viewMode, setViewMode] = useState<'console' | 'remote'>(isUrlRemote ? 'remote' : 'console');
+  // 'remote' previews the phone remote on this laptop (the real phone uses RemoteClient)
+  const [viewMode, setViewMode] = useState<'console' | 'remote'>('console');
   const [consoleMode, setConsoleMode] = useState<'party' | 'pro'>('party');
 
   // Initialize AudioEngine & OllamaDJAgent
@@ -47,7 +46,7 @@ export const App: React.FC = () => {
     engineRef.current = new AudioEngine();
   }
   if (!agentRef.current) {
-    agentRef.current = new OllamaDJAgent();
+    agentRef.current = engineRef.current.djAgent;
   }
 
   const engine = engineRef.current;
@@ -79,7 +78,7 @@ export const App: React.FC = () => {
           engine.nextTrack();
           break;
         case 'CMD_PERCUSSION_TOGGLE':
-          engine.percussionDeck.togglePlay();
+          engine.togglePercussion();
           break;
         case 'CMD_PERCUSSION_PATTERN':
           engine.percussionDeck.switchPattern(action.patternId);
@@ -108,6 +107,39 @@ export const App: React.FC = () => {
         case 'CMD_TOGGLE_AUTO_CUE_HOOK':
           engine.toggleAutoCueHook();
           break;
+        case 'CMD_MIX_QUEUED':
+          engine.mixQueuedTrack(action.itemId);
+          break;
+        case 'CMD_REMOVE_QUEUED':
+          engine.removeFromQueue(action.itemId);
+          break;
+        case 'CMD_CANCEL_PENDING_MIX':
+          engine.cancelPendingMix();
+          break;
+        case 'CMD_SET_MOOD':
+          engine.setMood(action.mood);
+          break;
+        case 'CMD_SET_EQ':
+          engine.setEqBand(action.band, action.gainDb);
+          break;
+        case 'CMD_RESET_EQ':
+          engine.resetEq();
+          break;
+        case 'CMD_SET_TEMPO':
+          engine.setTempo(action.ratio);
+          break;
+        case 'CMD_SET_BPM':
+          engine.setBpm(action.bpm);
+          break;
+        case 'CMD_TOGGLE_KEY_LOCK':
+          engine.toggleKeyLock();
+          break;
+        case 'CMD_TOGGLE_SET_TEMPO_LOCK':
+          engine.toggleSetTempoLock();
+          break;
+        case 'CMD_TOGGLE_PLAY_ORIGINAL':
+          engine.togglePlayOriginal();
+          break;
         case 'CMD_LOAD_MY_SONGS':
           engine.loadSongsFromTextFile();
           break;
@@ -123,6 +155,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    // Without this flag the cleanup's close() triggers a reconnect, leaving two live sockets
+    // (React StrictMode mounts effects twice) and every phone command runs twice.
+    let disposed = false;
+    let reconnectTimer: number | undefined;
 
     const connectWs = () => {
       const ws = new WebSocket(wsUrl);
@@ -144,13 +181,15 @@ export const App: React.FC = () => {
       };
 
       ws.onclose = () => {
-        setTimeout(connectWs, 2000); // Reconnect loop
+        if (!disposed) reconnectTimer = window.setTimeout(connectWs, 2000); // Reconnect loop
       };
     };
 
     connectWs();
 
     return () => {
+      disposed = true;
+      window.clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
   }, [engine, handleMobileAction]);
@@ -201,7 +240,7 @@ export const App: React.FC = () => {
   // If in pure mobile view, render touch-first controller
   if (viewMode === 'remote') {
     return (
-      <div className="relative">
+      <div id="app-remote-preview" className="relative">
         <div className="fixed top-2 right-2 z-50">
           <button
             onClick={() => setViewMode('console')}
@@ -210,16 +249,11 @@ export const App: React.FC = () => {
             Switch to Laptop Console
           </button>
         </div>
+        {/* Preview runs on the host itself, so actions go straight to the local engine */}
         <MobileRemoteView
           syncState={engine.getSyncState()}
-          onSendAction={(action) => {
-            handleMobileAction(action);
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify(action));
-            }
-          }}
-          onAcquireTrack={(q, autoMix) => engine.acquireTrack(q, autoMix).then(() => {})}
-          acquisitionStatus={engine.acquisitionStatus}
+          connected
+          onSendAction={handleMobileAction}
         />
       </div>
     );
@@ -235,9 +269,9 @@ export const App: React.FC = () => {
   const remoteUrl = `http://${window.location.hostname}:5173/?remote=true`;
 
   return (
-    <div className="min-h-screen bg-[#07090e] text-slate-100 p-3 lg:p-4 flex flex-col gap-3">
+    <div id="app-root" className="min-h-screen bg-[#07090e] text-slate-100 p-3 lg:p-4 flex flex-col gap-3">
       {/* Top Navbar */}
-      <header className="flex flex-wrap items-center justify-between gap-3 dj-panel rounded-2xl px-4 py-2.5 border border-white/10">
+      <header id="app-top-navbar" className="flex flex-wrap items-center justify-between gap-3 dj-panel rounded-2xl px-4 py-2.5 border border-white/10">
         <div className="flex items-center gap-2.5">
           <div className="p-2 rounded-xl bg-gradient-to-tr from-cyan-500 via-rose-500 to-amber-500 text-black shadow-md shadow-rose-500/20">
             <Disc className="w-5 h-5 animate-spin text-black" />
@@ -256,9 +290,9 @@ export const App: React.FC = () => {
         </div>
 
         {/* Telemetry and Controls */}
-        <div className="flex flex-wrap items-center gap-3">
+        <div id="app-header-controls" className="flex flex-wrap items-center gap-3">
           {/* View Switcher: Party Console vs Pro DJ Decks */}
-          <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/10">
+          <div id="app-view-switcher" className="flex items-center bg-black/40 p-1 rounded-xl border border-white/10">
             <button
               onClick={() => setConsoleMode('party')}
               className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
@@ -282,7 +316,7 @@ export const App: React.FC = () => {
           </div>
 
           {/* Mobile Remote Pairing Button */}
-          <button
+          <button id="app-connect-remote-button"
             onClick={() => setShowRemoteModal(true)}
             className="flex items-center gap-1.5 bg-gradient-to-r from-rose-600 to-purple-600 hover:from-rose-500 hover:to-purple-500 text-white font-bold px-3.5 py-1.5 rounded-xl text-xs shadow-lg shadow-rose-600/30 transition-all"
           >
@@ -291,7 +325,7 @@ export const App: React.FC = () => {
           </button>
 
           {/* Test Remote Simulator in Browser */}
-          <button
+          <button id="app-simulate-remote-button"
             onClick={() => setViewMode('remote')}
             className="flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-slate-200 font-semibold px-3 py-1.5 rounded-xl text-xs border border-white/10 transition-colors"
             title="Preview iPhone Remote View"
@@ -299,10 +333,27 @@ export const App: React.FC = () => {
             <span>Simulate Mobile View</span>
           </button>
 
-          {/* Ollama Status Pill */}
-          <div className="flex items-center gap-1.5 bg-purple-500/10 text-purple-300 border border-purple-500/30 px-3 py-1.5 rounded-xl text-xs font-mono">
-            <Cpu className="w-3.5 h-3.5 text-purple-400" />
-            <span>Qwen 2.5 3B Ready</span>
+          {/* AI DJ (Ollama) status: real health check, refreshed every minute */}
+          <div id="app-ai-status"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono border ${
+              engine.aiStatus === 'online'
+                ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+                : 'bg-white/5 text-slate-400 border-white/10'
+            }`}
+            title={
+              engine.aiStatus === 'online'
+                ? `AI DJ chooses mix points and song order.${engine.lastAiDecision ? ` Last: ${engine.lastAiDecision}` : ''}`
+                : 'Ollama is not running: mixing uses the built-in rules. Start Ollama to enable AI DJ decisions.'
+            }
+          >
+            <Cpu className={`w-3.5 h-3.5 ${engine.aiStatus === 'online' ? 'text-purple-400' : 'text-slate-500'}`} />
+            <span>
+              {engine.aiStatus === 'online'
+                ? '🤖 AI DJ: Qwen 2.5 3B online'
+                : engine.aiStatus === 'checking'
+                  ? 'Checking AI DJ…'
+                  : 'AI DJ offline (rule-based)'}
+            </span>
           </div>
 
           <div className="hidden sm:flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-xl border border-white/5 text-xs font-mono text-slate-400">
@@ -322,7 +373,7 @@ export const App: React.FC = () => {
 
       {/* iPhone Remote Modal */}
       {showRemoteModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+        <div id="app-remote-modal" className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="dj-panel rounded-3xl p-6 border border-white/20 max-w-md w-full flex flex-col gap-4 text-center shadow-2xl relative">
             <button
               onClick={() => setShowRemoteModal(false)}
@@ -373,7 +424,7 @@ export const App: React.FC = () => {
 
       {/* Instructions / Help Banner */}
       {showHelp && (
-        <div className="dj-panel rounded-2xl p-5 border border-cyan-500/30 bg-cyan-950/20 text-xs text-slate-300 flex flex-col gap-2">
+        <div id="app-help-banner" className="dj-panel rounded-2xl p-5 border border-cyan-500/30 bg-cyan-950/20 text-xs text-slate-300 flex flex-col gap-2">
           <div className="flex items-center justify-between text-cyan-300 font-bold">
             <span className="flex items-center gap-1.5 text-sm">
               <ShieldCheck className="w-4 h-4" />
@@ -388,7 +439,7 @@ export const App: React.FC = () => {
             2. <strong>Autonomous 5-Song Queue:</strong> If you haven't given the next track, the AI automatically searches the internet for 5 culturally and energetically compatible tracks and keeps them ready in the queue.
           </p>
           <p>
-            3. <strong>Automatic Outro Mixing:</strong> When the song reaches its final 14 seconds, the system automatically triggers a phrase-aligned bass-swap mix into the next track!
+            3. <strong>Automatic Outro Mixing:</strong> About 22 seconds before the song ends, it mixes into the next ready track. It ramps the tempo to match, starts the new song on the beat, and does a bass swap. Tempos too far apart get a clean cut on the beat.
           </p>
         </div>
       )}
@@ -402,29 +453,30 @@ export const App: React.FC = () => {
       ) : (
         <>
           {/* Primary Percussion Layer (Deck P) with Autonomous Decision Advisor */}
-          <section>
+          <section id="app-pro-percussion">
             <PercussionBar
               percussionDeck={engine.percussionDeck}
               decisionReason={engine.percussionDecisionReason}
               autoPilotActive={engine.autoPercussionEnabled}
               onToggleAutoPilot={() => engine.toggleAutoPercussion()}
+              onTogglePlay={() => engine.togglePercussion()}
             />
           </section>
 
           {/* Main Dual-Deck and Center Mixer Grid */}
-          <main className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          <main id="app-pro-decks" className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             {/* Deck A (Left) */}
-            <div className="lg:col-span-4">
+            <div id="app-pro-deck-a-column" className="lg:col-span-4">
               <DeckView deck={engine.deckA} deckId="A" />
             </div>
 
             {/* Master Center Mixer & AI Transition (Middle) */}
-            <div className="lg:col-span-4">
+            <div id="app-pro-mixer-column" className="lg:col-span-4">
               <MixerSection engine={engine} />
             </div>
 
             {/* Deck B (Right) */}
-            <div className="lg:col-span-4">
+            <div id="app-pro-deck-b-column" className="lg:col-span-4">
               <DeckView deck={engine.deckB} deckId="B" />
             </div>
           </main>
@@ -433,7 +485,7 @@ export const App: React.FC = () => {
 
       {/* Autonomous 5-Song Upcoming Queue Panel (Desktop Console Pro View) */}
       {consoleMode === 'pro' && (
-        <section className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5">
+        <section id="app-pro-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5">
           <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-white/10">
             <div className="flex items-center gap-2">
               <ListMusic className="w-4 h-4 text-purple-400" />
@@ -462,9 +514,9 @@ export const App: React.FC = () => {
           </div>
 
           {/* Queue Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 pt-1">
+          <div id="app-pro-queue-grid" className="grid grid-cols-1 sm:grid-cols-5 gap-3 pt-1">
             {engine.queue.map((item, idx) => (
-              <div
+              <div id={`app-pro-queue-item-${item.id}`}
                 key={item.id}
                 className="p-3 rounded-xl bg-black/40 border border-white/5 flex flex-col justify-between gap-2 text-xs hover:border-white/20 transition-all relative group"
               >
@@ -513,15 +565,15 @@ export const App: React.FC = () => {
       )}
 
       {/* Natural Language AI DJ Command Bar & Response Panel */}
-      <footer className="dj-panel rounded-xl p-2.5 border border-white/10 flex flex-col gap-2">
+      <footer id="app-ai-command-bar" className="dj-panel rounded-xl p-2.5 border border-white/10 flex flex-col gap-2">
         {/* Quick Sample Prompts & Model Indicator */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div id="app-quick-prompts" className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[10px] font-mono text-slate-400 font-semibold uppercase">
               Quick Prompts:
             </span>
             {samplePrompts.map((prompt, idx) => (
-              <button
+              <button id={`app-quick-prompt-${idx}`}
                 key={idx}
                 onClick={() => executeCommand(prompt)}
                 disabled={isAiThinking}
@@ -539,7 +591,7 @@ export const App: React.FC = () => {
         </div>
 
         {/* Input Form & Telemetry in a single row for maximum desktop compactness */}
-        <div className="flex flex-col sm:flex-row items-center gap-2">
+        <div id="app-ai-command-row" className="flex flex-col sm:flex-row items-center gap-2">
           <form onSubmit={handleAiCommandSubmit} className="flex-1 w-full flex items-center gap-2">
             <input
               type="text"
@@ -565,7 +617,7 @@ export const App: React.FC = () => {
           </form>
 
           {/* AI Reasoning / Telemetry Pill */}
-          <div className="w-full sm:w-auto flex items-center justify-between gap-2 bg-black/60 px-3 py-1 rounded-xl border border-white/5 font-mono text-[11px] shrink-0">
+          <div id="app-ai-response-pill" className="w-full sm:w-auto flex items-center justify-between gap-2 bg-black/60 px-3 py-1 rounded-xl border border-white/5 font-mono text-[11px] shrink-0">
             <div className="flex items-center gap-1.5 text-slate-300 truncate max-w-[340px]">
               {isAiThinking ? (
                 <span className="text-purple-400 flex items-center gap-1 animate-pulse">

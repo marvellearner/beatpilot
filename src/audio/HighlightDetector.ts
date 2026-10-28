@@ -23,11 +23,13 @@ export class HighlightDetector {
    * @param audioBuffer Decoded PCM audio buffer
    * @param bpm Detected track tempo
    * @param externalHighlight Optional timestamp provided by YouTube replay heatmap
+   * @param beatOffset Time of the first detected beat, so the cue lands on the beat grid
    */
   public static detectHighlight(
     audioBuffer: AudioBuffer,
     bpm: number = 120,
-    externalHighlight?: { peakSeconds: number; intensity: number }
+    externalHighlight?: { peakSeconds: number; intensity: number },
+    beatOffset: number = 0
   ): HighlightResult {
     const duration = audioBuffer.duration;
     const safeBpm = bpm > 40 && bpm < 240 ? bpm : 120;
@@ -40,7 +42,7 @@ export class HighlightDetector {
       externalHighlight.peakSeconds < duration - 10
     ) {
       const peakTime = externalHighlight.peakSeconds;
-      const cueIn = this.calculatePhraseAlignedCueIn(peakTime, secondsPerBeat);
+      const cueIn = this.calculatePhraseAlignedCueIn(peakTime, secondsPerBeat, beatOffset);
 
       return {
         highlightTime: Math.round(peakTime * 10) / 10,
@@ -111,7 +113,7 @@ export class HighlightDetector {
     }
 
     // Align cue-in to 16 beats (4 bars) before the chorus/drop
-    const cueIn = this.calculatePhraseAlignedCueIn(peakSecond, secondsPerBeat);
+    const cueIn = this.calculatePhraseAlignedCueIn(peakSecond, secondsPerBeat, beatOffset);
 
     return {
       highlightTime: Math.round(peakSecond * 10) / 10,
@@ -125,7 +127,7 @@ export class HighlightDetector {
    * Aligns the cue point 16 beats (4 bars) or 32 beats (8 bars) prior to the peak,
    * locked to the nearest beat boundary.
    */
-  private static calculatePhraseAlignedCueIn(peakTime: number, secondsPerBeat: number): number {
+  private static calculatePhraseAlignedCueIn(peakTime: number, secondsPerBeat: number, beatOffset: number): number {
     const sixteenBeatsDuration = 16 * secondsPerBeat;
     const rawPreRoll = peakTime - sixteenBeatsDuration;
 
@@ -133,10 +135,10 @@ export class HighlightDetector {
       return 0; // If hook is very early, start from beginning
     }
 
-    // Quantize to exact 4-bar phrase (16 beats)
-    const beatsFromStart = Math.floor(rawPreRoll / secondsPerBeat);
+    // Quantize to exact 4-bar phrase (16 beats), counted from the first beat rather than 0:00
+    const beatsFromStart = Math.floor((rawPreRoll - beatOffset) / secondsPerBeat);
     const phraseBeats = Math.floor(beatsFromStart / 16) * 16;
-    const quantizedTime = phraseBeats * secondsPerBeat;
+    const quantizedTime = beatOffset + phraseBeats * secondsPerBeat;
 
     return Math.max(0, quantizedTime);
   }

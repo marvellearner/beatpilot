@@ -37,11 +37,22 @@ Loading `qwen2.5:3b` on the GTX 1050 crashed with `0xe06d7363` (CUDA out of memo
 ```json
 { "options": { "num_gpu": 0, "num_thread": 8, "temperature": 0.2 } }
 ```
-**Benchmark on the i7-9750H:**
-- About 320 ms to the first token, then 28.4 tok/s.
-- About 1.08 s for a 35-token mix plan.
-- About 28% CPU use, which leaves 4 threads free for audio.
-- No audio buffer underruns and no crashes over 500 cycles.
+**Measured on this laptop (2026-10-28), `qwen2.5:3b` Q4_K_M, CPU only:**
+
+| | Time |
+| :--- | :--- |
+| Cold start (model not yet in RAM) | ~12.6 s total, ~3.4 s of it loading the model |
+| Warm answer, ~340-token prompt | ~4.2 s (prompt read 0.15 s, generation ~7 tokens/s) |
+| AI DJ mix decision (~50 output tokens) | ~7 s |
+| AI DJ next-song pick | ~3 s |
+
+> The previous version of this section claimed 28 tokens/s and about 1 s per plan. That was not reproducible; the measured generation speed is about 7 tokens/s.
+
+How the app copes with this speed:
+
+- **Warm model:** the dev server keeps the model in RAM (`keep_alive: 30m`) and loads it as soon as the app checks AI status, so the 12 s cold start doesn't hit a mix.
+- **AI never blocks the music:** the AI DJ refines decisions in the background. The analysis-based plan stands if the AI is slow or offline.
+- **Background curation:** song recommendations have 20 s. They used to time out after 2.5 s, so the AI was never actually used for them.
 
 ---
 

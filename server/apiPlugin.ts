@@ -7,6 +7,33 @@ import { IncomingMessage, ServerResponse } from 'http';
 import fs from 'fs';
 import path from 'path';
 
+const OLLAMA_URL = 'http://localhost:11434';
+const OLLAMA_MODEL = 'qwen2.5:3b';
+// Keep the model in RAM: a cold load takes ~3–12 s on this laptop, a warm answer ~4 s
+const OLLAMA_KEEP_ALIVE = '30m';
+
+/** One JSON-mode completion from the local model (CPU only, see SETUP_AND_OPERATIONS.md §2). */
+async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number): Promise<string> {
+  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      prompt,
+      stream: false,
+      format: 'json',
+      keep_alive: OLLAMA_KEEP_ALIVE,
+      options: { num_gpu: 0, temperature: 0.2, num_predict: maxTokens },
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!resp.ok) throw new Error(`Ollama HTTP ${resp.status}`);
+  const data = await resp.json();
+  return data.response as string;
+}
+
+let ollamaWarmed = false;
+
 const ROOT_DIR = process.cwd();
 const MY_SONGS_FILE = path.join(ROOT_DIR, 'my_songs.txt');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -24,15 +51,32 @@ interface SearchResult {
 }
 
 /**
- * Scrapes YouTube audience replay heatmap to extract the world's most liked / replayed moment.
+ * Extracts the 11-character video ID from any YouTube / YouTube Music link
+ * (watch?v=, youtu.be/, /shorts/, /embed/, /live/, with or without https://).
  */
-async function extractYouTubeHeatmap(videoUrl: string): Promise<{ peakSeconds: number; intensity: number } | null> {
+function extractYouTubeVideoId(input: string): string | null {
+  const match = input.match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+}
+
+function canonicalYouTubeUrl(videoId: string): string {
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+/**
+ * Scrapes YouTube audience replay heatmap to extract the world's most liked / replayed moment.
+ * Only ever fetches youtube.com, built from a validated video ID.
+ */
+async function extractYouTubeHeatmap(videoId: string): Promise<{ peakSeconds: number; intensity: number } | null> {
   try {
-    const res = await fetch(videoUrl, {
+    const res = await fetch(canonicalYouTubeUrl(videoId), {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
       },
+      signal: AbortSignal.timeout(5000),
     });
     const html = await res.text();
     const regex = /\{"startMillis":"(\d+)","durationMillis":"(\d+)","intensityScoreNormalized":([\d\.]+)\}/g;
@@ -135,26 +179,22 @@ export function aiDjApiPlugin(): Plugin {
             res.setHeader('Content-Type', 'application/json');
 
             // Check if query is already a YouTube/YouTube Music URL
-            const isUrl = query.includes('youtube.com/') || query.includes('youtu.be/');
+            const videoId = extractYouTubeVideoId(query);
 
-            if (isUrl) {
-              const videoId = query.includes('youtu.be/')
-                ? query.split('youtu.be/')[1].split('?')[0]
-                : new URL(query).searchParams.get('v') || query;
-
-              const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
+            if (videoId) {
+              const cleanUrl = canonicalYouTubeUrl(videoId);
               const [info, heatmap] = await Promise.all([
                 ytdl.getInfo(cleanUrl),
-                extractYouTubeHeatmap(cleanUrl),
+                extractYouTubeHeatmap(videoId),
               ]);
 
               const result: SearchResult = {
                 title: info.videoDetails.title,
                 url: cleanUrl,
                 author: info.videoDetails.author.name,
-                duration: parseInt(info.videoDetails.lengthSeconds, 10) || 180,
+                duration: Number(info.videoDetails.lengthSeconds) || 180,
                 thumbnail: info.videoDetails.thumbnails[0]?.url || '',
-                timestamp: formatDuration(parseInt(info.videoDetails.lengthSeconds, 10) || 180),
+                timestamp: formatDuration(Number(info.videoDetails.lengthSeconds) || 180),
                 highlightTime: heatmap?.peakSeconds,
                 highlightIntensity: heatmap?.intensity,
               };
@@ -164,7 +204,7 @@ export function aiDjApiPlugin(): Plugin {
 
             // Otherwise, perform title search using yt-search
             const searchResults = await ytSearch(query);
-            const videos = (searchResults.videos || []).slice(0, 5).map((v: { title: string; url: string; author: { name: string }; seconds: number; thumbnail: string; timestamp: string }) => ({
+            const videos: SearchResult[] = (searchResults.videos || []).slice(0, 5).map((v: { title: string; url: string; author: { name: string }; seconds: number; thumbnail: string; timestamp: string }) => ({
               title: v.title,
               url: v.url,
               author: v.author?.name || 'Unknown Artist',
@@ -172,6 +212,14 @@ export function aiDjApiPlugin(): Plugin {
               thumbnail: v.thumbnail || '',
               timestamp: v.timestamp || '',
             }));
+
+            // The client plays the top result, so give it the "most replayed" hook too
+            const topId = videos[0] ? extractYouTubeVideoId(videos[0].url) : null;
+            if (topId) {
+              const heatmap = await extractYouTubeHeatmap(topId);
+              videos[0].highlightTime = heatmap?.peakSeconds;
+              videos[0].highlightIntensity = heatmap?.intensity;
+            }
 
             res.end(JSON.stringify({ results: videos }));
           } catch (err: unknown) {
@@ -184,10 +232,10 @@ export function aiDjApiPlugin(): Plugin {
 
         // 2. Stream Audio Bytes
         if (url.pathname === '/api/stream') {
-          const targetUrl = url.searchParams.get('url');
-          if (!targetUrl) {
+          const videoId = extractYouTubeVideoId(url.searchParams.get('url') || '');
+          if (!videoId) {
             res.statusCode = 400;
-            res.end(JSON.stringify({ error: 'targetUrl parameter is required' }));
+            res.end(JSON.stringify({ error: 'A valid YouTube url parameter is required' }));
             return;
           }
 
@@ -197,10 +245,13 @@ export function aiDjApiPlugin(): Plugin {
             res.setHeader('Cache-Control', 'no-cache');
 
             // Download audio stream using ytdl
-            const stream = ytdl.download(targetUrl, {
+            const stream = ytdl.download(canonicalYouTubeUrl(videoId), {
               filter: { hasAudio: true, hasVideo: false },
               quality: 'highestaudio',
             });
+
+            // Stop downloading if the browser goes away (tab closed, page reloaded)
+            res.on('close', () => stream.destroy());
 
             stream.on('error', (streamErr) => {
               console.error('Audio stream error:', streamErr);
@@ -221,36 +272,41 @@ export function aiDjApiPlugin(): Plugin {
           return;
         }
 
-        // 3. Autonomous 5-Song Recommendations Based on Current Song
+        // 3. Autonomous Recommendations Based on Current Song
         if (url.pathname === '/api/recommend') {
           const currentTitle = url.searchParams.get('title') || 'Bollywood Punjabi Party';
           const artist = url.searchParams.get('artist') || '';
+          const mood = url.searchParams.get('mood') || 'normal';
 
           try {
             res.setHeader('Content-Type', 'application/json');
 
-            // Get 5 curated recommendations using Ollama or genre intelligence
-            const queries = await generateRelatedSongQueries(currentTitle, artist);
-            const recommendations: SearchResult[] = [];
+            // Get curated recommendations using Ollama or genre intelligence (10-12 suggestions)
+            const queries = await generateRelatedSongQueries(currentTitle, artist, mood);
 
-            for (const q of queries) {
+            // Run YouTube searches in parallel for speed
+            const searchPromises = queries.map(async (q) => {
               try {
                 const searchRes = await ytSearch(q);
                 if (searchRes.videos && searchRes.videos.length > 0) {
                   const v = searchRes.videos[0];
-                  recommendations.push({
+                  return {
                     title: v.title,
                     url: v.url,
                     author: v.author?.name || 'Artist',
                     duration: v.seconds || 180,
                     thumbnail: v.thumbnail || '',
                     timestamp: v.timestamp || '',
-                  });
+                  };
                 }
               } catch {
-                // Continue with next recommendation query
+                return null;
               }
-            }
+              return null;
+            });
+
+            const settled = await Promise.all(searchPromises);
+            const recommendations: SearchResult[] = settled.filter((r): r is SearchResult => r !== null);
 
             res.end(JSON.stringify({ recommendations }));
           } catch (err) {
@@ -261,18 +317,59 @@ export function aiDjApiPlugin(): Plugin {
           return;
         }
 
+        // 3b. Local LLM (Ollama) proxy: status, and JSON completions for the AI DJ.
+        // Going through the server avoids browser CORS limits and works from any device.
+        if (url.pathname === '/api/llm/health') {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const tags = await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(2000) })).json();
+            const hasModel = (tags.models || []).some((m: { name: string }) => m.name.startsWith(OLLAMA_MODEL));
+            if (hasModel && !ollamaWarmed) {
+              ollamaWarmed = true;
+              // Load the model into RAM now so the first DJ decision isn't a 12 s cold start
+              fetch(`${OLLAMA_URL}/api/generate`, {
+                method: 'POST',
+                body: JSON.stringify({ model: OLLAMA_MODEL, keep_alive: OLLAMA_KEEP_ALIVE }),
+              }).catch(() => {
+                ollamaWarmed = false;
+              });
+            }
+            res.end(JSON.stringify({ online: hasModel, model: hasModel ? OLLAMA_MODEL : null }));
+          } catch {
+            ollamaWarmed = false;
+            res.end(JSON.stringify({ online: false, model: null }));
+          }
+          return;
+        }
+
+        if (url.pathname === '/api/llm' && req.method === 'POST') {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const body = await parseJsonBody(req);
+            const maxTokens = Math.min(400, Math.max(16, Number(body?.maxTokens) || 150));
+            const timeoutMs = Math.min(60_000, Math.max(2000, Number(body?.timeoutMs) || 20_000));
+            const started = Date.now();
+            const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, timeoutMs);
+            res.end(JSON.stringify({ response, latencyMs: Date.now() - started }));
+          } catch (err) {
+            res.statusCode = 503;
+            res.end(JSON.stringify({ error: 'Local LLM unavailable', details: String(err) }));
+          }
+          return;
+        }
+
         // 4. Query YouTube Audience Replay Heatmap for any URL
         if (url.pathname === '/api/heatmap') {
-          const targetUrl = url.searchParams.get('url');
-          if (!targetUrl) {
+          const videoId = extractYouTubeVideoId(url.searchParams.get('url') || '');
+          if (!videoId) {
             res.statusCode = 400;
-            res.end(JSON.stringify({ error: 'url parameter is required' }));
+            res.end(JSON.stringify({ error: 'A valid YouTube url parameter is required' }));
             return;
           }
 
           try {
             res.setHeader('Content-Type', 'application/json');
-            const heatmap = await extractYouTubeHeatmap(targetUrl);
+            const heatmap = await extractYouTubeHeatmap(videoId);
             res.end(JSON.stringify({ heatmap }));
           } catch (err) {
             console.error('Heatmap query error:', err);
@@ -462,47 +559,86 @@ Badshah - Kar Gayi Chull
  * Suggests 5 stylistically and energetically compatible song queries
  * using local Ollama if available, with intelligent fallback heuristics.
  */
-async function generateRelatedSongQueries(currentTitle: string, artist: string): Promise<string[]> {
+const MOOD_PROMPTS: Record<string, string> = {
+  normal: 'a relaxed house party; mix of popular songs',
+  party: 'a high-energy dance party; upbeat, well-known bangers',
+  bhangra: 'a Punjabi bhangra / wedding dance floor; dhol-heavy, high energy',
+  chill: 'a chill, laid-back evening; mellow, smooth, low-tempo songs',
+  romantic: 'a romantic, slow-dance mood; love songs and soft melodies',
+};
+
+const MOOD_FALLBACK_SONGS: Record<string, string[]> = {
+  chill: [
+    'Prateek Kuhad Kasoor',
+    'AP Dhillon Excuses',
+    'Anuv Jain Baarishein',
+    'Arijit Singh Kesariya',
+    'The Local Train Choo Lo',
+    'Zaeden tere bina',
+    'Twin Strings Dhaldha Chand',
+    'Jasleen Royal Kho Gaye Hum Kahan',
+    'Lucky Ali O Sanam',
+    'Prateek Kuhad cold/mess',
+    'Anuv Jain Alag Aasmaan',
+    'Bayaan Din Dhalay',
+  ],
+  romantic: [
+    'Arijit Singh Tum Hi Ho',
+    'Atif Aslam Tera Hone Laga Hoon',
+    'Jubin Nautiyal Raataan Lambiyan',
+    'B Praak Mann Bharrya',
+    'Diljit Dosanjh Lover',
+    'Arijit Singh Apna Bana Le',
+    'Mohit Chauhan Tum Se Hi',
+    'Shreya Ghoshal Sun Raha Hai',
+    'Atif Aslam Jeene Laga Hoon',
+    'Arijit Singh Hawayein',
+    'Pritam Shayad',
+    'Armaan Malik Bol Do Na Zara',
+  ],
+  bhangra: [
+    'Diljit Dosanjh Lover',
+    'AP Dhillon Brown Munde',
+    'Karan Aujla Softly',
+    'Sidhu Moose Wala Same Beef',
+    'Shubh Cheques',
+    'Mankirt Aulakh Badnam',
+    'Karan Aujla Tauba Tauba',
+    'Diljit Dosanjh GOAT',
+    'Sidhu Moose Wala 295',
+    'Shubh Baller',
+    'Guru Randhawa High Rated Gabru',
+    'Badshah Jugnu',
+  ],
+};
+
+async function generateRelatedSongQueries(currentTitle: string, artist: string, mood: string = 'normal'): Promise<string[]> {
   const combined = `${currentTitle} ${artist}`.toLowerCase();
+  const moodDescription = MOOD_PROMPTS[mood] ?? MOOD_PROMPTS.normal;
 
   // Try local Ollama first for creative curation
   try {
     const prompt = `You are a professional club/party AI DJ.
 CURRENT PLAYING SONG: "${currentTitle}" by "${artist}".
-Suggest exactly 5 party/club songs that are musically, culturally, and energetically compatible to play NEXT in the DJ set.
-Return a STRICT JSON object with key "suggestions" containing an array of 5 song titles with artists.
-Example: { "suggestions": ["Diljit Dosanjh - Lover", "Sidhu Moose Wala - 295", "AP Dhillon - Brown Munde", "Karan Aujla - Softly", "Badshah - Jugnu"] }
+THE MOOD OF THE PARTY: ${moodDescription}.
+Suggest exactly 10 to 12 songs that fit this mood and are musically, culturally, and energetically compatible to play NEXT in the DJ set.
+Return a STRICT JSON object with key "suggestions" containing an array of 10-12 song titles with artists.
+Example: { "suggestions": ["Diljit Dosanjh - Lover", "Sidhu Moose Wala - 295", "AP Dhillon - Brown Munde", "Karan Aujla - Softly", "Badshah - Jugnu", "Shubh - Cheques", "Yo Yo Honey Singh - Blue Eyes", "Guru Randhawa - High Rated Gabru", "Mika Singh - Subha Hone Na De", "Arijit Singh - Ghungroo"] }
 Output ONLY valid JSON.`;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
-
-    const resp = await fetch('http://localhost:11434/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen2.5:3b',
-        prompt,
-        stream: false,
-        format: 'json',
-        options: { num_gpu: 0, temperature: 0.3 },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (resp.ok) {
-      const data = await resp.json();
-      const parsed = JSON.parse(data.response);
-      if (Array.isArray(parsed.suggestions) && parsed.suggestions.length >= 3) {
-        return parsed.suggestions.slice(0, 5);
-      }
+    // Runs in the background, so give the CPU model time: ~4 s warm, up to ~12 s cold.
+    const parsed = JSON.parse(await ollamaGenerate(prompt, 120, 20_000));
+    if (Array.isArray(parsed.suggestions) && parsed.suggestions.length >= 3) {
+      return parsed.suggestions.slice(0, 12);
     }
   } catch {
     // Fall back to party graph heuristics
   }
 
-  // Heuristic Party Graph
+  // Heuristic Party Graph: the mood decides first, then the current song's style
+  if (MOOD_FALLBACK_SONGS[mood]) {
+    return MOOD_FALLBACK_SONGS[mood];
+  }
   if (
     combined.includes('moose') ||
     combined.includes('sidhu') ||
@@ -519,6 +655,13 @@ Output ONLY valid JSON.`;
       'Karan Aujla Softly',
       'Sidhu Moose Wala Same Beef',
       'Shubh Cheques',
+      'Mankirt Aulakh Badnam',
+      'Karan Aujla Tauba Tauba',
+      'Diljit Dosanjh GOAT',
+      'Sidhu Moose Wala 295',
+      'Shubh Baller',
+      'Guru Randhawa High Rated Gabru',
+      'Badshah Jugnu',
     ];
   }
 
@@ -529,6 +672,13 @@ Output ONLY valid JSON.`;
       'Calvin Harris One Kiss',
       'Mau P Drugs From Amsterdam',
       'Meduza Piece Of Your Heart',
+      'Fred again.. adore u',
+      'Tiësto The Business',
+      'Swedish House Mafia Moth To A Flame',
+      'David Guetta Titanium',
+      'Acraze Do It To It',
+      'John Summit Where You Are',
+      'Dom Dolla Rhyme Dust',
     ];
   }
 
@@ -539,6 +689,13 @@ Output ONLY valid JSON.`;
     'Diljit Dosanjh GOAT',
     'Mika Singh Subha Hone Na De',
     'Arijit Singh Ghungroo Party Mix',
+    'Badshah Kar Gayi Chull',
+    'Yo Yo Honey Singh Dope Shope',
+    'Guru Randhawa Lahore',
+    'Simmba Aankh Marey',
+    'War Jai Jai Shivshankar',
+    'Karan Aujla Tauba Tauba',
+    'Diljit Dosanjh Born to Shine',
   ];
 }
 

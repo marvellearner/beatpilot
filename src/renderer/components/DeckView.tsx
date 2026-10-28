@@ -42,9 +42,9 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
   };
 
   return (
-    <div className={`dj-panel rounded-2xl p-5 border flex flex-col gap-4 relative transition-all ${state.isPlaying ? borderGlow : 'border-white/10'}`}>
+    <div id={`deck-${deckId.toLowerCase()}`} className={`dj-panel rounded-2xl p-5 border flex flex-col gap-4 relative transition-all ${state.isPlaying ? borderGlow : 'border-white/10'}`}>
       {/* Deck Header */}
-      <div className="flex items-center justify-between">
+      <div id={`deck-${deckId.toLowerCase()}-header`} className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className={`text-xs font-black px-2.5 py-1 rounded-md tracking-wider ${badgeColor}`}>
             DECK {deckId}
@@ -64,6 +64,15 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
                   <span>{formatTime(track.highlightTime)}</span>
                 </button>
               )}
+              {track?.musicStartTime && track.musicStartTime > 0 && (
+                <span
+                  title={track.introSkipReason || `Skipped initial ${formatTime(track.musicStartTime)} conversation`}
+                  className="flex items-center gap-1 bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded-full text-[10px] font-bold"
+                >
+                  <span>🗣️</span>
+                  <span>{formatTime(track.musicStartTime)}</span>
+                </span>
+              )}
             </div>
             <span className="text-xs text-slate-400 truncate max-w-[220px]">
               {track ? track.artist : 'Load local MP3/WAV or Demo'}
@@ -72,7 +81,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
         </div>
 
         {/* Load Local File Button */}
-        <div>
+        <div id={`deck-${deckId.toLowerCase()}-load-file`}>
           <input
             type="file"
             ref={fileInputRef}
@@ -92,6 +101,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
 
       {/* Waveform & Playhead */}
       <WaveformCanvas
+        id={`deck-${deckId.toLowerCase()}-waveform`}
         analyser={deck.analyserNode}
         isPlaying={state.isPlaying}
         currentTime={state.currentTime}
@@ -104,7 +114,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
       />
 
       {/* Deck Telemetry (BPM, Key, Time Elapsed / Remaining) */}
-      <div className="grid grid-cols-4 gap-2 bg-black/40 p-2.5 rounded-xl border border-white/5 font-mono text-center">
+      <div id={`deck-${deckId.toLowerCase()}-telemetry`} className="grid grid-cols-4 gap-2 bg-black/40 p-2.5 rounded-xl border border-white/5 font-mono text-center">
         <div>
           <div className="text-[10px] text-slate-400">BPM</div>
           <div className="text-base font-bold text-white tracking-wider">
@@ -132,9 +142,9 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
       </div>
 
       {/* Transport & Pitch Controls */}
-      <div className="grid grid-cols-12 gap-2.5 items-center">
+      <div id={`deck-${deckId.toLowerCase()}-transport`} className="grid grid-cols-12 gap-2.5 items-center">
         {/* Play/Pause Button */}
-        <button
+        <button id={`deck-${deckId.toLowerCase()}-play-pause-button`}
           onClick={() => deck.togglePlay()}
           disabled={!track}
           className={`col-span-3 flex items-center justify-center gap-1.5 py-3.5 rounded-xl font-bold text-xs tracking-wide transition-all shadow-lg ${
@@ -161,7 +171,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
         </button>
 
         {/* Stop Button */}
-        <button
+        <button id={`deck-${deckId.toLowerCase()}-stop-button`}
           onClick={() => deck.stop()}
           disabled={!track}
           title="Stop and cue to beginning"
@@ -172,7 +182,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
         </button>
 
         {/* Jump to Viral Hook Button */}
-        <button
+        <button id={`deck-${deckId.toLowerCase()}-hook-button`}
           onClick={() => deck.jumpToHighlight()}
           disabled={!track}
           title={track?.highlightTime ? `Jump to world's favorite part (${formatTime(track.highlightTime)})` : 'Jump to hook'}
@@ -183,7 +193,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
         </button>
 
         {/* Pitch Slider (Tempo) */}
-        <div className="col-span-5 flex flex-col gap-1 bg-black/30 p-2.5 rounded-xl border border-white/5">
+        <div id={`deck-${deckId.toLowerCase()}-pitch-slider`} className="col-span-5 flex flex-col gap-1 bg-black/30 p-2.5 rounded-xl border border-white/5">
           <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono">
             <span>TEMPO / PITCH</span>
             <div className="flex items-center gap-1.5">
@@ -213,7 +223,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
       </div>
 
       {/* 3-Band Isolator EQ & Channel Volume */}
-      <div className="bg-black/30 p-3 rounded-xl border border-white/5 flex flex-col gap-2.5">
+      <div id={`deck-${deckId.toLowerCase()}-eq`} className="bg-black/30 p-3 rounded-xl border border-white/5 flex flex-col gap-2.5">
         <div className="text-[10px] font-mono font-semibold text-slate-400 tracking-wider flex items-center justify-between">
           <span>3-BAND ISOLATOR EQ & CHANNEL GAIN</span>
           <Disc3 className={`w-3.5 h-3.5 ${state.isPlaying ? 'animate-spin' : ''}`} />
@@ -221,7 +231,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
 
         <div className="grid grid-cols-4 gap-3 text-center">
           {/* LOW EQ */}
-          <div className="flex flex-col items-center gap-1">
+          <div id={`deck-${deckId.toLowerCase()}-low-eq`} className="flex flex-col items-center gap-1">
             <span className="text-[10px] font-bold text-slate-400">LOW</span>
             <input
               type="range"
@@ -243,7 +253,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
           </div>
 
           {/* MID EQ */}
-          <div className="flex flex-col items-center gap-1">
+          <div id={`deck-${deckId.toLowerCase()}-mid-eq`} className="flex flex-col items-center gap-1">
             <span className="text-[10px] font-bold text-slate-400">MID</span>
             <input
               type="range"
@@ -265,7 +275,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
           </div>
 
           {/* HIGH EQ */}
-          <div className="flex flex-col items-center gap-1">
+          <div id={`deck-${deckId.toLowerCase()}-high-eq`} className="flex flex-col items-center gap-1">
             <span className="text-[10px] font-bold text-slate-400">HIGH</span>
             <input
               type="range"
@@ -287,7 +297,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
           </div>
 
           {/* CHANNEL GAIN */}
-          <div className="flex flex-col items-center gap-1">
+          <div id={`deck-${deckId.toLowerCase()}-channel-gain`} className="flex flex-col items-center gap-1">
             <span className="text-[10px] font-bold text-slate-400">VOL</span>
             <input
               type="range"

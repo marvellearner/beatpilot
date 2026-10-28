@@ -1,10 +1,12 @@
 import { DeckId, TrackMetadata } from '../types';
 import { detectBpmFromBuffer } from './BpmDetector';
+import { IntroSkitDetector } from './IntroSkitDetector';
 
-// Tempo is changed via playbackRate, which also shifts pitch (no time-stretch),
-// so keep the range to what a DJ pitch fader allows.
-export const MIN_PLAYBACK_RATE = 0.85;
-export const MAX_PLAYBACK_RATE = 1.15;
+// playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
+// a re-timed buffer instead. Range matches the Tempo control (0.8x – 1.25x).
+export const MIN_PLAYBACK_RATE = 0.8;
+export const MAX_PLAYBACK_RATE = 1.25;
+const SWAP_FADE_SECONDS = 0.04;
 
 export class VirtualDeck {
   public readonly id: DeckId;
@@ -12,6 +14,7 @@ export class VirtualDeck {
 
   // Nodes
   private sourceNode: AudioBufferSourceNode | null = null;
+  private sourceGain: GainNode | null = null; // per-source fade, used when swapping audio mid-song
   private gainNode: GainNode;
   private lowFilter: BiquadFilterNode;
   private midFilter: BiquadFilterNode;
@@ -83,6 +86,11 @@ export class VirtualDeck {
     // Compute waveform peaks for visual scrubbing
     const peaks = VirtualDeck.extractPeaks(audioBuffer, 200);
     const bpmResult = detectBpmFromBuffer(audioBuffer);
+    const introAnalysis = IntroSkitDetector.detectMusicStart(
+      audioBuffer,
+      bpmResult.bpm,
+      bpmResult.firstDownbeatTime
+    );
 
     const metadata: TrackMetadata = {
       id: `local_${Date.now()}`,
@@ -94,6 +102,8 @@ export class VirtualDeck {
       firstDownbeatTime: bpmResult.firstDownbeatTime,
       audioBuffer,
       waveformPeaks: peaks,
+      musicStartTime: introAnalysis.suggestedMusicStart,
+      introSkipReason: introAnalysis.reason,
       sourceType: 'local',
     };
 
@@ -106,7 +116,8 @@ export class VirtualDeck {
       this.pause();
     }
     this.track = metadata;
-    this.pausedAt = 0;
+    // Always skip initial conversation/dialogue if any that is without music
+    this.pausedAt = metadata.musicStartTime && metadata.musicStartTime > 0 ? metadata.musicStartTime : 0;
     this.startedAt = 0;
     // A new song starts at its natural tempo/pitch
     this.playbackRate = 1.0;
@@ -114,7 +125,8 @@ export class VirtualDeck {
     this.notifyUpdate();
   }
 
-  public play(fromOffset?: number) {
+  /** @param when AudioContext time to start at (used to land the first beat on the other deck's beat) */
+  public play(fromOffset?: number, when?: number) {
     if (!this.track || !this.track.audioBuffer) return;
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
@@ -124,20 +136,66 @@ export class VirtualDeck {
       this.stopSource();
     }
 
-    const offset = fromOffset !== undefined ? fromOffset : this.pausedAt;
+    const musicStart = this.track.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0;
+    let offset = fromOffset !== undefined ? fromOffset : this.pausedAt;
+    // Always skip initial conversation/dialogue part if any that is without music
+    if (fromOffset === undefined && this.pausedAt < musicStart) {
+      offset = musicStart;
+    }
     const clampedOffset = Math.max(0, Math.min(offset, this.track.duration));
 
+    const startTime = Math.max(when ?? 0, this.ctx.currentTime);
+    this.startSource(this.track.audioBuffer, clampedOffset, startTime, false);
+
+    this.startedAt = startTime - clampedOffset / this.playbackRate;
+    this.pausedAt = clampedOffset;
+    this.isPlaying = true;
+    this.notifyUpdate();
+  }
+
+  private startSource(buffer: AudioBuffer, offset: number, startTime: number, fadeIn: boolean) {
     this.sourceNode = this.ctx.createBufferSource();
-    this.sourceNode.buffer = this.track.audioBuffer;
+    this.sourceNode.buffer = buffer;
     this.sourceNode.playbackRate.value = this.playbackRate;
     this.sourceNode.loop = true; // Loop for continuous DJ mixing
 
-    this.sourceNode.connect(this.lowFilter);
-    this.sourceNode.start(0, clampedOffset);
+    this.sourceGain = this.ctx.createGain();
+    if (fadeIn) {
+      this.sourceGain.gain.setValueAtTime(0, startTime);
+      this.sourceGain.gain.linearRampToValueAtTime(1, startTime + SWAP_FADE_SECONDS);
+    }
+    this.sourceNode.connect(this.sourceGain);
+    this.sourceGain.connect(this.lowFilter);
+    this.sourceNode.start(startTime, offset);
+  }
 
-    this.startedAt = this.ctx.currentTime - clampedOffset / this.playbackRate;
-    this.pausedAt = clampedOffset;
-    this.isPlaying = true;
+  /**
+   * Swaps in a re-timed version of the song (key-locked tempo change) without a gap or click:
+   * the new audio starts at `newOffset` while the old fades out over 40 ms.
+   */
+  public replaceAudio(track: TrackMetadata, newOffset: number) {
+    this.track = track;
+    const offset = Math.max(0, Math.min(newOffset, track.duration));
+    if (!this.isPlaying || !track.audioBuffer) {
+      this.pausedAt = offset;
+      this.notifyUpdate();
+      return;
+    }
+
+    const now = this.ctx.currentTime;
+    const oldSource = this.sourceNode;
+    const oldGain = this.sourceGain;
+    if (oldSource && oldGain) {
+      oldGain.gain.setValueAtTime(1, now);
+      oldGain.gain.linearRampToValueAtTime(0, now + SWAP_FADE_SECONDS);
+      oldSource.stop(now + SWAP_FADE_SECONDS + 0.01);
+      oldSource.onended = () => {
+        oldSource.disconnect();
+        oldGain.disconnect();
+      };
+    }
+    this.startSource(track.audioBuffer, offset, now, true);
+    this.startedAt = now - offset / this.playbackRate;
     this.notifyUpdate();
   }
 
@@ -152,7 +210,7 @@ export class VirtualDeck {
   public stop() {
     this.stopSource();
     this.isPlaying = false;
-    this.pausedAt = 0;
+    this.pausedAt = this.track?.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0;
     this.startedAt = 0;
     this.notifyUpdate();
   }
@@ -241,7 +299,8 @@ export class VirtualDeck {
   public getCurrentTime(): number {
     if (!this.track) return 0;
     if (this.isPlaying) {
-      const elapsed = (this.ctx.currentTime - this.startedAt) * this.playbackRate;
+      // Clamped at 0 while a scheduled start is still in the future
+      const elapsed = Math.max(0, (this.ctx.currentTime - this.startedAt) * this.playbackRate);
       return elapsed % this.track.duration;
     }
     return this.pausedAt;
@@ -278,6 +337,8 @@ export class VirtualDeck {
       }
       this.sourceNode = null;
     }
+    this.sourceGain?.disconnect();
+    this.sourceGain = null;
   }
 
   public static extractPeaks(buffer: AudioBuffer, count: number): number[] {

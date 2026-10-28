@@ -25,7 +25,7 @@
 3. **5-Song Autonomous Internet Auto-Queue:**
    * Never runs out of music. If the queue has fewer than 5 songs, the AI autonomously queries the internet for culturally and energetically compatible bangers.
    * Pre-downloads and decodes the audio stream of the next song in the background before the current song finishes.
-   * **Outro Auto-Mix:** When the song reaches its final 14 seconds, automatically executes a phrase-aligned bass-swap mix into the next song!
+   * **Outro Auto-Mix:** About 22 seconds before the end, it mixes into the next song. It ramps the tempo to meet, starts the new song exactly on the beat, and does a bass swap. Songs too far apart in tempo get a clean cut on the beat.
 4. **Wireless iPhone Remote Control:**
    * Touch-optimized web app running in Safari on your iPhone over local Wi-Fi (`ws://` duplex WebSocket synchronization).
    * Play, Pause, Rewind 10s, Forward 10s, Previous, Next/Mix, live timeline scrubber, and Dhol intensity controls.

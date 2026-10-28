@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AudioEngine } from '../../audio/AudioEngine';
 import { Sliders, Zap, ArrowRightLeft, Volume2, Sparkles } from 'lucide-react';
+import { VuMeter } from './VuMeter';
 
 interface MixerSectionProps {
   engine: AudioEngine;
@@ -30,9 +31,9 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
   };
 
   return (
-    <div className="dj-panel rounded-2xl p-5 border border-white/10 flex flex-col gap-4">
+    <div id="mixer" className="dj-panel rounded-2xl p-5 border border-white/10 flex flex-col gap-4">
       {/* Header */}
-      <div className="flex items-center justify-between pb-3 border-b border-white/10">
+      <div id="mixer-header" className="flex items-center justify-between pb-3 border-b border-white/10">
         <div className="flex items-center gap-2">
           <Sliders className="w-4 h-4 text-slate-300" />
           <span className="font-extrabold text-sm text-white tracking-wider">
@@ -69,8 +70,25 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
         </div>
       </div>
 
+      {/* Master Stereo Level VU Meter */}
+      <div id="mixer-vu-meter" className="flex justify-center items-center py-1">
+        <VuMeter
+          analyserL={engine.masterAnalyserL}
+          analyserR={engine.masterAnalyserR}
+          analyser={engine.masterAnalyser}
+          isPlaying={engine.deckA.getPlaybackState().isPlaying || engine.deckB.getPlaybackState().isPlaying}
+          height={120}
+          barWidth={8}
+          barGap={4}
+          segments={14}
+          showLabels={true}
+          showPeakText={true}
+          title="MASTER LEVEL"
+        />
+      </div>
+
       {/* Crossfader Section */}
-      <div className="flex flex-col gap-2 bg-black/40 p-4 rounded-xl border border-white/5">
+      <div id="mixer-crossfader-section" className="flex flex-col gap-2 bg-black/40 p-4 rounded-xl border border-white/5">
         <div className="flex justify-between items-center text-xs font-mono">
           <button
             onClick={() => engine.setCrossfader(-1)}
@@ -97,7 +115,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
         </div>
 
         {/* Crossfader Slider */}
-        <div className="relative py-1">
+        <div id="mixer-crossfader-slider" className="relative py-1">
           <input
             type="range"
             min="-1"
@@ -119,7 +137,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
       </div>
 
       {/* Automated AI DJ Transition Controls */}
-      <div className="bg-gradient-to-r from-cyan-950/20 via-purple-950/30 to-amber-950/20 p-4 rounded-xl border border-white/10 flex flex-col gap-3">
+      <div id="mixer-transition-controls" className="bg-gradient-to-r from-cyan-950/20 via-purple-950/30 to-amber-950/20 p-4 rounded-xl border border-white/10 flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-purple-400 animate-pulse" />
@@ -129,10 +147,10 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
           </div>
 
           {/* Duration Selector */}
-          <div className="flex items-center gap-1.5 text-xs font-mono">
+          <div id="mixer-duration-selector" className="flex items-center gap-1.5 text-xs font-mono">
             <span className="text-[10px] text-slate-400">DURATION:</span>
             {[4, 8, 16].map((sec) => (
-              <button
+              <button id={`mixer-duration-${sec}`}
                 key={sec}
                 onClick={() => setTransitionDuration(sec)}
                 className={`px-2 py-0.5 rounded text-[11px] font-bold transition-colors ${
@@ -146,7 +164,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
         </div>
 
         {/* Style Selector */}
-        <div className="grid grid-cols-2 gap-2 text-xs">
+        <div id="mixer-style-selector" className="grid grid-cols-2 gap-2 text-xs">
           <button
             onClick={() => setTransitionStyle('bass_swap')}
             className={`p-2 rounded-lg border text-left transition-all ${
@@ -184,7 +202,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
 
         {/* Live Transition Progress Bar if active */}
         {isTransitioning && (
-          <div className="flex flex-col gap-1 bg-black/40 p-2.5 rounded-lg border border-purple-500/30">
+          <div id="mixer-transition-progress" className="flex flex-col gap-1 bg-black/40 p-2.5 rounded-lg border border-purple-500/30">
             <div className="flex justify-between items-center text-[10px] font-mono text-purple-300">
               <span className="flex items-center gap-1">
                 <Sparkles className="w-3 h-3 animate-spin text-purple-400" />
@@ -202,7 +220,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
         )}
 
         {/* Action Buttons: Mix to A or Mix to B */}
-        <div className="grid grid-cols-2 gap-3 pt-1">
+        <div id="mixer-mix-buttons" className="grid grid-cols-2 gap-3 pt-1">
           <button
             onClick={() => handleStartTransition('A')}
             disabled={isTransitioning}
