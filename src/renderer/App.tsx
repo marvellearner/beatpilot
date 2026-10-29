@@ -29,6 +29,10 @@ export const App: React.FC = () => {
   const engineRef = useRef<AudioEngine | null>(null);
   const agentRef = useRef<OllamaDJAgent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const isHostRef = useRef(false);
+  const [hostRole, setHostRole] = useState<'host' | 'standby' | null>(null);
+  const [remoteUrls, setRemoteUrls] = useState<string[]>([]);
+  const [remoteQr, setRemoteQr] = useState<string | null>(null);
 
   const [, setTick] = useState<number>(0);
   const [nlCommand, setNlCommand] = useState<string>('');
@@ -179,13 +183,18 @@ export const App: React.FC = () => {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify(engine.getSyncState()));
+        // The server makes the first tab the host; any other tab waits as a standby
+        ws.send(JSON.stringify({ type: 'HELLO', role: 'host' }));
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type?.startsWith('CMD_')) {
+          if (data.type === 'ROLE') {
+            isHostRef.current = data.role === 'host';
+            setHostRole(data.role);
+            if (isHostRef.current) ws.send(JSON.stringify(engine.getSyncState()));
+          } else if (data.type?.startsWith('CMD_')) {
             handleMobileAction(data as MobileAction);
           }
         } catch {
@@ -194,6 +203,7 @@ export const App: React.FC = () => {
       };
 
       ws.onclose = () => {
+        isHostRef.current = false;
         if (!disposed) reconnectTimer = window.setTimeout(connectWs, 2000); // Reconnect loop
       };
     };
@@ -209,7 +219,7 @@ export const App: React.FC = () => {
 
   // Broadcast sync state to WebSocket on engine updates
   const broadcastSyncState = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (isHostRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(engine.getSyncState()));
     }
   }, [engine]);
