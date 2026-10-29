@@ -155,6 +155,7 @@ export interface HostSyncState {
   autoCueViralHook: boolean;
   mostPlayedSongs?: SongHistoryItem[];
   favorites?: FavoriteSong[];
+  bannedSongs?: BannedSong[];
   acquisitionStatus: string;
   pendingMix: PendingMixInfo | null;
   recentlyPlayed: PlayLogEntry[]; // newest first
@@ -199,6 +200,16 @@ export interface FavoriteSong {
   bpm?: number;
   highlightTime?: number;
   addedAt: number; // timestamp
+}
+
+export interface BannedSong {
+  id: string;
+  title: string;
+  artist: string;
+  url?: string;
+  thumbnail?: string;
+  duration?: number;
+  bannedAt: number; // timestamp
 }
 
 export interface SearchResult {
@@ -255,5 +266,16 @@ export type MobileAction =
         duration?: number;
         bpm?: number;
         highlightTime?: number;
+      };
+    }
+  | {
+      type: 'CMD_TOGGLE_DONT_PLAY_AGAIN';
+      song?: {
+        id?: string;
+        title?: string;
+        artist?: string;
+        url?: string;
+        thumbnail?: string;
+        duration?: number;
       };
     };

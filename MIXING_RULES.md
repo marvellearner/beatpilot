@@ -167,4 +167,174 @@ A good transition must sound natural, maintain musical timing, control competing
      - The phrase countdown is immediately bypassed.
      - The transition starts on the very next beat grid downbeat, preserving beatmatching and bass swap while fulfilling the user's explicit request for an immediate transition.
 
+---
+
+# Up Next Queue Deduplication Rules
+
+1. **Strict Single-Instance Guarantee:**
+   - The **Up Next queue must NEVER contain the same song twice**.
+   - Any duplicate song—whether matching by identical YouTube URL / video ID, exact title string, or normalized core title (ignoring artist prefixes like `"Artist - Title"`, `"(Official Video)"`, `"[Audio]"`, punctuation, and metadata tags)—is strictly prohibited.
+2. **Multi-Stage Queue Guarding:**
+   - **Initialization / Hydration:** When the queue is restored from `localStorage`, it is immediately sanitized through `deduplicateQueue()`.
+   - **User & Playlist Requests:** Before queuing a song via `acquireTrack()`, the query, URL, and search results are verified against existing queue tracks. If already present, the duplicate request is discarded.
+   - **AI Auto-Curation & Seeding:** Both `refillQueueWithRecommendations()` and `restoreOrSeedQueue()` verify every candidate song against the queue, on-air tracks, and recently played history using fuzzy core-title matching before insertion.
+   - **Save Guard:** `saveQueueToStorage()` deduplicates the queue before committing state to persistent storage.
+
+---
+
+# BPM Adjustment Rules for Dancing and DJ Mixing
+
+## Objective
+Adjust song tempo to create energetic, dance-friendly mixes while preserving musical quality, vocal naturalness, and rhythmic consistency.
+
+## BPM Adjustment Limits
+
+- **Preferred range:** ±3% from the original BPM.
+- **Default adjustment range:** ±5%.
+- **Extended adjustment range:** ±8% when musically appropriate.
+- **Maximum permitted adjustment:** ±16% from the original BPM.
+- Never exceed the ±16% limit unless the user explicitly changes this configuration.
+
+## Adjustment Guidelines
+
+### 1. Subtle Adjustments: 0–3%
+- Prefer this range for natural-sounding transitions.
+- Preserve the original groove and feel of the song.
+- Use for most routine DJ mixing.
+
+### 2. Moderate Adjustments: 3–5%
+- Use to increase dance energy or match the tempo of another song.
+- Suitable for many pop, Bollywood, Punjabi, and electronic dance tracks.
+- Check that vocals and percussion remain natural.
+
+### 3. Strong Adjustments: 5–8%
+- Use when a more energetic feel or closer tempo match is needed.
+- Evaluate the genre, rhythm, vocal delivery, and audio quality.
+- Prefer key-lock or pitch-preserving time-stretching to maintain vocal pitch.
+
+### 4. Aggressive Adjustments: 8–16%
+- Allow only when needed for a deliberate creative effect or a viable transition.
+- Treat this as an exceptional range, not the default.
+- Check for distorted transients, unnatural vocals, rhythmic artifacts, and loss of groove.
+- If the result sounds poor, use a different transition technique instead of forcing the tempo match.
+
+## Technical Rules
+
+1. Calculate tempo changes as a percentage of the original BPM.
+2. Enforce the configured limit in both directions.
+3. Never change tempo beyond ±16% from the original BPM.
+4. Prefer pitch-preserving time-stretching when changing tempo.
+5. Analyze both songs before choosing a target BPM.
+6. Choose a target BPM that minimizes unnecessary tempo changes while maintaining a suitable dancing rhythm.
+7. Do not force two songs to the same BPM if doing so produces poor audio quality.
+8. If the required tempo adjustment exceeds the limit, use an alternative such as a quick transition, breakdown, echo-out, or beat switch.
+9. Evaluate the actual rendered transition, not just the calculated BPM values.
+
+## Calculation
+
+For an original BPM of `B` and an adjustment percentage of `P`:
+
+- Increased BPM = `B × (1 + P / 100)`
+- Decreased BPM = `B × (1 - P / 100)`
+
+For example, a 100 BPM song has the following permitted range:
+
+- Minimum BPM: 84
+- Original BPM: 100
+- Maximum BPM: 116
+
+For a 128 BPM song:
+
+- Minimum BPM: 107.52
+- Original BPM: 128
+- Maximum BPM: 148.48
+
+Keep the internal calculations precise and round displayed BPM values appropriately.
+
+## Core Principle
+
+The ±16% limit is a hard technical constraint, not a guarantee of good sound. Prefer small tempo changes and prioritize danceability, vocal quality, musical phrasing, and a natural transition over forcing an exact BPM match.
+
+---
+
+# Previously Played Exclusion Rules for Up Next Queue
+
+1. **Strict Exclusion of Previously Played Songs:**
+   - **If any song is in Previously Played, the same name song should NOT be in the Up Next queue.**
+   - Matches are strictly evaluated across:
+     - Exact video URL or YouTube video ID
+     - Exact song title (case-insensitive)
+     - Normalized core title (stripping artist prefixes like `"Artist - Title"`, `"(Official Video)"`, `"[Audio]"`, etc.)
+     - Title segments and fuzzy key matches (`isSameSong`)
+   - Any matching song is immediately purged from the Up Next queue during queue sanitization, when a track finishes playing, and when restoring the queue from persistent storage.
+   - When automatically replenishing or seeding Up Next (up to 50 songs), songs in the Previously Played history (`playLog`) are strictly excluded.
+
+---
+
+# AI Mood Reading & Top 5 Queue Insertion
+
+1. **Vibe & Mood Analysis on Search & Play:**
+   - When a user searches for and plays a track (via **"Play & Sync Mood"** or search dropdown mix), the AI DJ agent (Ollama primary with Gemini cloud backup and genre heuristic fallback) analyzes the user's current mood:
+     - Detects musical genre, cultural vibe (e.g., Punjabi Club Bangers, Bollywood Dance Floor Hits, Club House & EDM, Afrobeat & Amapiano, Global Pop), tempo/BPM range, and dancefloor energy.
+   - Generates the **top 5 most compatible tracks** matching that specific mood.
+
+2. **Top-of-Queue Priority Placement:**
+   - The engine fetches and verifies video metadata for the 5 recommended tracks.
+   - Filters out any songs that are currently on air, in the Up Next queue, or in Previously Played.
+   - Pushes the recommended tracks to the **very top** of the Up Next queue (`queue.unshift(...)`), so they are queued to play immediately following the active track.
+   - Automatically begins background pre-buffering for the immediate next track to ensure zero-latency transitions.
+
+---
+
+# Top Queue Song Avoidance & 7-Skip Auto-Removal Rule
+
+1. **Avoidance Detection for Top Queue Item:**
+   - **If a song is at the first position (#1) of the Up Next queue and the user avoids it by playing other songs 7 times in a row, it is automatically removed from the top of the queue.**
+   - An avoidance occurs whenever any other song is mixed or put on air (via search play, top bangers selection, or picking another song from lower down the queue) while the current song remains unchosen at index 0.
+   - If the user plays the top song at any time, its avoidance counter is immediately reset to 0.
+   - If the avoidance counter reaches 7, the engine automatically drops the song from the queue (`queue.shift()`), notifies the user, and shifts the next song into position #1.
+   - The UI displays an active `⚠️ Skipped X/7` indicator on the top queue item to give visual feedback on avoidance progress.
+
+---
+
+# Maximum 5-Minute Song Duration Rule for Auto-Queue (User Search Exempt)
+
+1. **Strict 5-Minute (300 Seconds) Limit for Engine-Added Songs:**
+   - **Never add any song longer than 5 minutes on your own in the Up Next queue.**
+   - Applies to:
+     - Autonomous queue replenishment and recommendations (`refillQueueWithRecommendations`, `/api/recommend`).
+     - AI Mood-Reading recommendations (`readMoodAndPushTop5`).
+     - Background preloading and decoding (`preloadQueuedTrack`).
+     - Auto-seeding from text playlists (`restoreOrSeedQueue`, `loadSongsFromTextFile`).
+     - Queue sanitization (`deduplicateQueue()`).
+   - Any automatically acquired song with a duration exceeding 300 seconds ($> 5\text{ minutes}$) is immediately rejected or pruned from the queue.
+
+2. **Exemption for Explicit User Search & Play:**
+   - **If the user explicitly searches for a song and queues or plays it (`source === 'request'`), it is permitted regardless of duration.**
+   - The user has complete freedom to enjoy long mixes, extended club tracks, or live sets when explicitly requested.
+
+---
+
+# "Don't Play Again Ever" (Thumbs Down) Rule
+
+1. **Thumbs Down (👎) Dislike Action:**
+   - A dedicated **Thumbs Down (👎)** button is available directly on the **Now Playing** artwork and on every song in the **Up Next queue**.
+   - Clicking Thumbs Down permanently saves the song to the **"Don't Play Again Ever"** blacklist (persisted to `localStorage` and `data/banned_songs.json`).
+
+2. **Immediate Queue Purge & On-Air Skip:**
+   - When a song is thumbs-downed:
+     - Any copies or upcoming instances are immediately purged from the Up Next queue.
+     - If the song is currently playing on air, the DJ engine immediately initiates a transition to the next track (`nextTrack()`).
+
+3. **Strict Global Exclusion:**
+   - Songs in "Don't Play Again Ever" are strictly prohibited from:
+     - Being auto-recommended by the AI agent (`readMoodAndPushTop5`, `/api/recommend`).
+     - Being auto-curated or seeded into the queue (`refillQueueWithRecommendations`, `restoreOrSeedQueue`).
+     - Appearing in Top Bangers (`getTopBangers()`).
+     - Being downloaded or preloaded in the background.
+
+4. **Dedicated "Don't Play" Management Tab:**
+   - In the Quick Starters panel, a **"Don't Play"** tab lists all blocked tracks with their title, artist, and thumbnail.
+   - An **"Unblock"** button allows the user to easily remove any track from the blacklist at any time.
+
 

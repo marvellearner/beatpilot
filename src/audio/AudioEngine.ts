@@ -8,6 +8,7 @@ import {
   TrackMetadata,
   SongHistoryItem,
   FavoriteSong,
+  BannedSong,
   TempoInfo,
   PlayLogEntry,
 } from '../types';
@@ -17,13 +18,15 @@ import { HighlightDetector } from './HighlightDetector';
 import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
-import { songKeys, isSameSong, type SongRef } from './songMatch';
+import { songKeys, isSameSong, cleanCoreTitle, type SongRef } from './songMatch';
 import { OllamaDJAgent } from '../ai/OllamaDJAgent';
 import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
 
 const SOUND_SETTINGS_KEY = 'ai_dj_sound_settings';
 const PLAY_LOG_KEY = 'ai_dj_play_log';
 const CURRENT_TRACK_KEY = 'ai_dj_current_track';
+const TOP_SONG_AVOID_KEY = 'ai_dj_top_song_avoid';
+const DONT_PLAY_AGAIN_KEY = 'ai_dj_dont_play_again';
 // Up Next never auto-adds a song played within the last hour
 const NO_REPEAT_WINDOW_MS = 60 * 60 * 1000;
 const PLAY_LOG_MAX = 100;
@@ -42,13 +45,24 @@ const OUTRO_PLAN_SECONDS = 45; // auto-mix: plan the blend point within the last
 const PLAN_STABLE_SECONDS = 2.5; // stop ramping tempo this close to a planned mix so timing is exact
 // Tempo glide speed for both the pre-mix ramp and the return to natural pitch (0.4% per second)
 const PITCH_RETURN_PER_SECOND = 0.004;
-// Key-locked stretching (WSOLA) sounds clean up to about ±25%
-const MAX_KEYLOCK_STRETCH = 0.25;
+// BPM adjustment limits for dancing and DJ mixing per MIXING_RULES.md
+export const BPM_LIMITS = {
+  PREFERRED_PCT: 0.03, // 0–3%: routine DJ mixing, preserves natural groove
+  DEFAULT_PCT: 0.05,   // 3–5%: moderate adjustments, dance energy matching
+  EXTENDED_PCT: 0.08,  // 5–8%: strong adjustments, energetic feel / close match
+  MAX_PERMITTED_PCT: 0.16, // ±16%: absolute hard limit from original BPM
+  MIN_RATIO: 0.84,     // 1 - 0.16 = 0.84 (-16% minimum BPM)
+  MAX_RATIO: 1.16,     // 1 + 0.16 = 1.16 (+16% maximum BPM)
+} as const;
+
 // Tempo control range for the on-air song
 const MIN_TEMPO = 0.5;
 const MAX_TEMPO = 1.25;
 const MIN_QUEUE_TARGET = 45; // Maintain ~50 songs in queue at all times
 const MAX_QUEUE_TARGET = 50; // Up Next queue capacity (50 songs)
+// RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue.
+// If the user explicitly searches and plays then it is fine (source === 'request').
+export const MAX_AUTO_QUEUE_SONG_DURATION = 300;
 
 export class AudioEngine {
   public ctx: AudioContext;
@@ -97,6 +111,10 @@ export class AudioEngine {
   private introAnalyses = new Map<string, IntroAnalysisResult>();
   // Drums the user had running when they paused, restarted on play
   private resumePercussionOnPlay: boolean = false;
+  // Avoidance tracking for the first song in Up Next queue (remove after avoiding 7 times)
+  public topSongAvoidKey: string | null = null;
+  public topSongAvoidCount: number = 0;
+  private lastAvoidanceCheckedTrackId: string | null = null;
 
   // In-memory audio buffer cache (avoids re-downloading or re-rendering songs)
   private audioBufferCache = new Map<string, { buffer: AudioBuffer; metadata: TrackMetadata }>();
@@ -120,6 +138,7 @@ export class AudioEngine {
     return this.rawMostPlayedSongs;
   }
   public favorites: FavoriteSong[] = [];
+  public bannedSongs: BannedSong[] = [];
   private lastRecordedTrackId: string | null = null;
 
   // A mix waiting for its planned blend point (the song is out of the queue meanwhile)
@@ -247,9 +266,11 @@ export class AudioEngine {
 
     // Load persisted favorites (localStorage + sync with server)
     this.loadFavorites();
+    this.loadDontPlayAgain();
 
     // What played recently (before the queue is restored, so it can skip those songs)
     this.loadPlayLog();
+    this.loadTopSongAvoid();
 
     // Restore retained on-air playing song from localStorage if page was refreshed (retained in paused state)
     this.restoreCurrentTrackFromStorage();
@@ -561,7 +582,8 @@ export class AudioEngine {
     if (this.mood === 'party' && ratio < 1.0) {
       return 1.0;
     }
-    return Math.max(1 - MAX_KEYLOCK_STRETCH, Math.min(1 + MAX_KEYLOCK_STRETCH, ratio));
+    // Hard limit: never adjust beyond ±16% from the original BPM per MIXING_RULES.md
+    return Math.max(BPM_LIMITS.MIN_RATIO, Math.min(BPM_LIMITS.MAX_RATIO, ratio));
   }
 
   /** Keeps the song on air at the set tempo (Party mood / "Whole set at this BPM"), or at its original tempo. */
@@ -644,7 +666,8 @@ export class AudioEngine {
     if (this.mood === 'party' && naturalBpm >= this.sessionBpm) {
       return naturalBpm;
     }
-    return Math.abs(ratio - 1) <= MAX_KEYLOCK_STRETCH ? this.sessionBpm : null;
+    // Hard limit: never adjust beyond ±16% from original BPM per MIXING_RULES.md
+    return Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT ? this.sessionBpm : null;
   }
 
   private needsTempoWork(item: QueuedTrack): boolean {
@@ -902,7 +925,8 @@ export class AudioEngine {
       return false;
     }
     const gap = Math.abs(this.closestTempoRatio(out.bpm, inc.bpm ?? 128) - 1);
-    return gap <= MAX_OUTGOING_RAMP + MAX_INCOMING_SHIFT;
+    // Hard limit: never beatmatch if required shift exceeds ±16% per MIXING_RULES.md
+    return gap <= BPM_LIMITS.MAX_PERMITTED_PCT;
   }
 
   // --- Planned mixes: blend at the best point instead of immediately ---
@@ -942,6 +966,9 @@ export class AudioEngine {
   private planMixInto(itemId: string, lookAheadSeconds: number, durationSeconds?: number): boolean {
     const item = this.queue.find((q) => q.id === itemId);
     if (!item || !item.audioBuffer) return false;
+
+    // RULE: Track avoidance of first song in Up Next queue
+    this.checkTopSongAvoidance(item);
 
     const outState = this.onAirDeck().getPlaybackState();
     const outTrack = outState.track;
@@ -1142,12 +1169,16 @@ export class AudioEngine {
 
         for (const item of recs) {
           if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+          // RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue
+          if (item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
+
           // Avoid duplicates of the queue, the current song, and songs already played this session
           const isDuplicate =
             this.playedUrls.has(item.url) ||
             item.url === current.url ||
-            item.title.toLowerCase() === current.title.toLowerCase() ||
-            this.queue.some((q) => q.url === item.url || q.title.toLowerCase() === item.title.toLowerCase()) ||
+            this.isDontPlayAgain({ title: item.title, artist: item.author, url: item.url }) ||
+            this.isSongInQueueOrPlayed({ title: item.title, artist: item.author, url: item.url }) ||
+            this.isTitleInQueue(item.title, item.author, item.url) ||
             this.lastPlayedWithinHour({ title: item.title, artist: item.author, url: item.url }) !== null;
           if (!isDuplicate) {
             this.queue.push({
@@ -1196,12 +1227,24 @@ export class AudioEngine {
             item.duration = match.duration;
             item.highlightTime = match.highlightTime;
             streamUrl = match.url;
+
+            // RULE: Never add/keep any song longer than 5 minutes on your own in up next queue
+            if (item.source !== 'request' && item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+              console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 5 minutes limit.`);
+              this.queue = this.queue.filter((q) => q !== item);
+              this.saveQueueToStorage();
+              this.notify();
+              return;
+            }
           }
         }
       }
 
       // A playlist line can resolve to a song that just played: don't auto-queue it again within the hour
-      if (item.source !== 'request' && this.lastPlayedWithinHour(item) !== null) {
+      if (
+        (item.source !== 'request' && this.lastPlayedWithinHour(item) !== null) ||
+        this.isDontPlayAgain(item)
+      ) {
         this.queue = this.queue.filter((q) => q !== item);
         this.lastRefillAttemptAt = 0;
         this.saveQueueToStorage();
@@ -1221,6 +1264,15 @@ export class AudioEngine {
       item.audioBuffer = audioBuffer;
       item.duration = audioBuffer.duration;
       item.isDiskCached = true;
+
+      // RULE: Never add/keep any song longer than 5 minutes on your own in up next queue
+      if (item.source !== 'request' && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+        console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 5 minutes limit.`);
+        this.queue = this.queue.filter((q) => q !== item);
+        this.saveQueueToStorage();
+        this.notify();
+        return;
+      }
 
       // Analyse BPM, downbeat and hook ahead of time so the mix can be planned
       const track = this.queuedItemToTrack(item);
@@ -1325,12 +1377,132 @@ export class AudioEngine {
     return isSameSong(a, b);
   }
 
+  private loadTopSongAvoid() {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      const saved = JSON.parse(window.localStorage.getItem(TOP_SONG_AVOID_KEY) || 'null');
+      if (saved && typeof saved.count === 'number') {
+        this.topSongAvoidKey = saved.key || null;
+        this.topSongAvoidCount = saved.count || 0;
+      }
+    } catch {
+      // Ignore corrupt or unavailable storage
+    }
+  }
+
+  private saveTopSongAvoid() {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      if (this.topSongAvoidKey && this.topSongAvoidCount > 0) {
+        window.localStorage.setItem(
+          TOP_SONG_AVOID_KEY,
+          JSON.stringify({ key: this.topSongAvoidKey, count: this.topSongAvoidCount })
+        );
+      } else {
+        window.localStorage.removeItem(TOP_SONG_AVOID_KEY);
+      }
+    } catch {
+      // Storage unavailable
+    }
+  }
+
+  /**
+   * Tracks avoidance of the song at the first position of the Up Next queue.
+   * If the first song in the queue is avoided and other songs are played 7 times consecutively,
+   * remove that song from the top of the queue.
+   */
+  public checkTopSongAvoidance(playedSong: { id?: string; title?: string; artist?: string; url?: string }): void {
+    if (!playedSong) return;
+    if (playedSong.id && this.lastAvoidanceCheckedTrackId === playedSong.id) return;
+    if (playedSong.id) this.lastAvoidanceCheckedTrackId = playedSong.id;
+
+    if (this.queue.length === 0) {
+      this.topSongAvoidKey = null;
+      this.topSongAvoidCount = 0;
+      this.saveTopSongAvoid();
+      return;
+    }
+
+    const topItem = this.queue[0];
+    if (!topItem || !topItem.title) return;
+
+    // Check if the played song matches the top item in the queue
+    const playedTitle = (playedSong.title || '').trim().toLowerCase();
+    const playedCore = cleanCoreTitle(playedSong.title || '');
+    const playedUrl = playedSong.url ? playedSong.url.trim().toLowerCase() : '';
+    const topTitle = (topItem.title || '').trim().toLowerCase();
+    const topCore = cleanCoreTitle(topItem.title || '');
+    const topUrl = topItem.url ? topItem.url.trim().toLowerCase() : '';
+
+    const isMatch =
+      (playedSong.id && topItem.id && playedSong.id === topItem.id) ||
+      (playedUrl && topUrl && playedUrl === topUrl) ||
+      (playedTitle && topTitle && playedTitle === topTitle) ||
+      (playedCore && topCore && playedCore === topCore) ||
+      this.isSameSong(
+        this.songKeys({ title: playedSong.title || '', artist: playedSong.artist, url: playedSong.url }),
+        this.songKeys(topItem)
+      );
+
+    if (isMatch) {
+      // Top song was played: reset avoidance tracking
+      this.topSongAvoidKey = null;
+      this.topSongAvoidCount = 0;
+      this.saveTopSongAvoid();
+      return;
+    }
+
+    // A different song was played: top song was avoided
+    const topKey = topCore || topTitle || topItem.id;
+    if (this.topSongAvoidKey === topKey) {
+      this.topSongAvoidCount += 1;
+    } else {
+      this.topSongAvoidKey = topKey;
+      this.topSongAvoidCount = 1;
+    }
+
+    this.saveTopSongAvoid();
+
+    // RULE: If avoided 7 times in a row while playing other songs, remove from top of queue
+    if (this.topSongAvoidCount >= 7) {
+      const removed = this.queue.shift();
+      console.log(`[AudioEngine] Removed "${removed?.title}" from top of Up Next queue after being avoided 7 times.`);
+      this.acquisitionStatus = `Removed "${removed?.title}" from top of queue (avoided 7 times).`;
+      this.topSongAvoidKey = null;
+      this.topSongAvoidCount = 0;
+      this.saveTopSongAvoid();
+      this.saveQueueToStorage();
+      this.notify();
+    }
+  }
+
+  /** Checks whether a song matches any song in Previously Played (playLog). */
+  public isSongInPlayLog(song: { title?: string; artist?: string; url?: string; id?: string }): boolean {
+    if (!song) return false;
+    const sId = song.id;
+    const sUrl = song.url ? song.url.trim().toLowerCase() : '';
+    const sTitle = (song.title || '').trim().toLowerCase();
+    const sCore = cleanCoreTitle(song.title || '');
+    const sKeys = song.title ? this.songKeys({ title: song.title, artist: song.artist, url: song.url }) : [];
+
+    for (const p of this.playLog) {
+      if (sId && p.id && sId === p.id) return true;
+      if (sUrl && p.url && sUrl === p.url.trim().toLowerCase()) return true;
+      if (sTitle && p.title && sTitle === p.title.trim().toLowerCase()) return true;
+      if (sCore && p.title && sCore === cleanCoreTitle(p.title)) return true;
+      if (sKeys.length > 0 && p.title && this.isSameSong(sKeys, this.songKeys(p))) return true;
+    }
+    return false;
+  }
+
   /** Checks whether a song matches any song in the Up Next queue, Previously Played, or on-air decks. */
   public isSongInQueueOrPlayed(song: { id?: string; title?: string; artist?: string; url?: string }): boolean {
     if (!song) return false;
+    if (this.isDontPlayAgain(song)) return true;
     const sId = song.id;
     const sUrl = song.url;
     const sTitle = (song.title || '').trim().toLowerCase();
+    const sCore = cleanCoreTitle(song.title || '');
     const sKeys = song.title ? this.songKeys({ title: song.title, artist: song.artist, url: song.url }) : [];
 
     const matches = (other?: { id?: string; title?: string; artist?: string; url?: string } | null): boolean => {
@@ -1338,6 +1510,7 @@ export class AudioEngine {
       if (sId && other.id && sId === other.id) return true;
       if (sUrl && other.url && sUrl === other.url) return true;
       if (sTitle && other.title && sTitle === other.title.trim().toLowerCase()) return true;
+      if (sCore && other.title && sCore === cleanCoreTitle(other.title)) return true;
       if (sKeys.length > 0 && other.title && this.isSameSong(sKeys, this.songKeys({ title: other.title, artist: other.artist, url: other.url }))) return true;
       return false;
     };
@@ -1360,6 +1533,179 @@ export class AudioEngine {
     if (matches(this.deckB.getTrack())) return true;
 
     return false;
+  }
+
+  /** Checks whether a song title or key is already present in the Up Next queue. */
+  public isTitleInQueue(title: string, artist?: string, url?: string, excludeId?: string): boolean {
+    if (!title) return false;
+    const core = cleanCoreTitle(title);
+    const lower = title.trim().toLowerCase();
+    const keys = this.songKeys({ title, artist, url });
+
+    for (const q of this.queue) {
+      if (excludeId && q.id === excludeId) continue;
+      if (url && q.url && url.trim().toLowerCase() === q.url.trim().toLowerCase()) return true;
+      if (lower && q.title && lower === q.title.trim().toLowerCase()) return true;
+      if (core && q.title && core === cleanCoreTitle(q.title)) return true;
+      if (keys.length > 0 && q.title && this.isSameSong(keys, this.songKeys(q))) return true;
+    }
+    if (this.pendingMix && (!excludeId || this.pendingMix.item.id !== excludeId)) {
+      const pm = this.pendingMix.item;
+      if (url && pm.url && url.trim().toLowerCase() === pm.url.trim().toLowerCase()) return true;
+      if (lower && pm.title && lower === pm.title.trim().toLowerCase()) return true;
+      if (core && pm.title && core === cleanCoreTitle(pm.title)) return true;
+      if (keys.length > 0 && pm.title && this.isSameSong(keys, this.songKeys(pm))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Enforces that the Up Next queue never contains duplicate songs (same video, same name,
+   * or same normalized core title). Keeps the earliest ready or loading instance.
+   */
+  public deduplicateQueue(): void {
+    if (this.queue.length <= 1) return;
+    const seenKeys: string[][] = [];
+    const seenCoreTitles = new Set<string>();
+    const seenUrls = new Set<string>();
+    const uniqueQueue: QueuedTrack[] = [];
+
+    for (const item of this.queue) {
+      if (!item.title) continue;
+      const core = cleanCoreTitle(item.title);
+      const url = item.url ? item.url.trim().toLowerCase() : '';
+      const keys = this.songKeys(item);
+
+      // RULE: If any song is in previously played, same name song should NOT be there in up next queue!
+      if (this.isSongInPlayLog(item) || this.isDontPlayAgain(item)) {
+        continue;
+      }
+
+      // RULE: Never add or keep any song longer than 5 minutes on your own in up next queue.
+      // Explicit user searches and requests (source === 'request') are permitted.
+      if (item.source !== 'request' && item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+        continue;
+      }
+
+      // 1. Direct URL match
+      if (url && seenUrls.has(url)) {
+        continue;
+      }
+      // 2. Core title match (e.g. "Lover" vs "Diljit Dosanjh - Lover")
+      if (core && seenCoreTitles.has(core)) {
+        continue;
+      }
+      // 3. Multi-key fuzzy / videoId match via isSameSong
+      const matchesAnySeen = seenKeys.some((prevKeys) => this.isSameSong(prevKeys, keys));
+      if (matchesAnySeen) {
+        continue;
+      }
+
+      // Unique song: keep it
+      if (url) seenUrls.add(url);
+      if (core) seenCoreTitles.add(core);
+      seenKeys.push(keys);
+      uniqueQueue.push(item);
+    }
+
+    if (uniqueQueue.length !== this.queue.length) {
+      this.queue = uniqueQueue;
+    }
+  }
+
+  /**
+   * Reads user mood from a searched/played song and pushes the top 5
+   * matching songs to the top of the Up Next queue.
+   */
+  public async readMoodAndPushTop5(track: TrackMetadata): Promise<void> {
+    if (!track?.title) return;
+    try {
+      this.acquisitionStatus = `🤖 AI reading mood from "${track.title}"…`;
+      this.notify();
+
+      const moodResult = await this.djAgent.readMoodAndRecommendTop5({
+        title: track.title,
+        artist: track.artist,
+        bpm: track.bpm,
+      });
+
+      if (!moodResult || !moodResult.top5Songs || moodResult.top5Songs.length === 0) return;
+
+      const newQueuedItems: QueuedTrack[] = [];
+
+      for (let i = 0; i < moodResult.top5Songs.length; i++) {
+        const s = moodResult.top5Songs[i];
+        const searchPrompt = s.searchPrompt || `${s.artist} - ${s.title}`;
+
+        // Skip if this song is in previously played, already in queue, or in Don't Play Again Ever
+        if (
+          this.isDontPlayAgain({ title: s.title, artist: s.artist, url: searchPrompt }) ||
+          this.isSongInPlayLog({ title: s.title, artist: s.artist, url: searchPrompt }) ||
+          this.isSongInQueueOrPlayed({ title: s.title, artist: s.artist, url: searchPrompt }) ||
+          this.isTitleInQueue(s.title, s.artist, searchPrompt) ||
+          cleanCoreTitle(track.title) === cleanCoreTitle(s.title)
+        ) {
+          continue;
+        }
+
+        // Quick search to get thumbnail and YouTube url
+        let url = searchPrompt;
+        let duration = 180;
+        let thumbnail: string | undefined;
+        try {
+          const res = await fetch(`/api/search?q=${encodeURIComponent(searchPrompt)}&limit=1`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.results && data.results.length > 0) {
+              const r = data.results[0];
+              url = r.url || url;
+              duration = r.duration || duration;
+              thumbnail = r.thumbnail;
+            }
+          }
+        } catch {
+          // fallback to search prompt query string
+        }
+
+        // RULE: Never add any song longer than 5 minutes on your own in up next queue
+        if (duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
+
+        const queuedItem: QueuedTrack = {
+          id: `ai_mood_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+          title: s.title,
+          artist: s.artist,
+          duration,
+          url,
+          thumbnail,
+          status: 'queued',
+          isAiRecommended: true,
+          source: 'ai',
+        };
+
+        newQueuedItems.push(queuedItem);
+      }
+
+      if (newQueuedItems.length > 0) {
+        // Push to the VERY TOP of the Up Next queue
+        this.queue.unshift(...newQueuedItems);
+        this.deduplicateQueue();
+        if (this.queue.length > MAX_QUEUE_TARGET) {
+          this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
+        }
+        this.saveQueueToStorage();
+
+        // Pre-fetch the first song buffer from disk/cache for instant mix
+        if (newQueuedItems[0]) {
+          void this.ensureTrackBuffer(newQueuedItems[0]);
+        }
+
+        this.lastAiDecision = `Mood: ${moodResult.detectedMood} — ${moodResult.reason}`;
+        this.acquisitionStatus = `🤖 AI read mood: "${moodResult.detectedMood}" from "${track.title}". Pushed top ${newQueuedItems.length} songs to top of queue!`;
+        this.notify();
+      }
+    } catch (err) {
+      console.warn('Failed to read mood and push top 5 songs:', err);
+    }
   }
 
   /** Returns top party bangers filtered to never include songs in queue, previously played, or on air. */
@@ -1385,17 +1731,20 @@ export class AudioEngine {
    * returns false); a song the user asked for is allowed but flagged with when it last played.
    */
   private allowRecentlyPlayed(item: QueuedTrack): boolean {
+    // If any song is in previously played, same name song should NOT be in Up Next queue
+    if (this.isSongInPlayLog(item)) {
+      this.queue = this.queue.filter((q) => q !== item);
+      this.saveQueueToStorage();
+      this.acquisitionStatus = `Skipped "${item.title}": already in Previously Played.`;
+      this.notify();
+      return false;
+    }
     const lastPlayed = this.lastPlayedWithinHour(item);
     if (lastPlayed === null) return true;
     const minutes = Math.max(1, Math.round((Date.now() - lastPlayed) / 60000));
-    if (item.source === 'request') {
-      item.lastPlayedAt = lastPlayed;
-      this.acquisitionStatus = `Note: "${item.title}" was played ${minutes} min ago — adding it because you asked.`;
-      return true;
-    }
     this.queue = this.queue.filter((q) => q !== item);
     this.saveQueueToStorage();
-    this.acquisitionStatus = `Skipped "${item.title}": played ${minutes} min ago (no repeats within an hour).`;
+    this.acquisitionStatus = `Skipped "${item.title}": played ${minutes} min ago (no repeats allowed).`;
     this.notify();
     return false;
   }
@@ -1413,6 +1762,11 @@ export class AudioEngine {
   }
 
   public removeFromQueue(itemId: string) {
+    if (this.queue[0]?.id === itemId) {
+      this.topSongAvoidKey = null;
+      this.topSongAvoidCount = 0;
+      this.saveTopSongAvoid();
+    }
     this.queue = this.queue.filter((q) => q.id !== itemId);
     this.saveQueueToStorage();
     this.notify();
@@ -1541,6 +1895,12 @@ export class AudioEngine {
 
   public saveQueueToStorage() {
     try {
+      this.deduplicateQueue();
+      if (this.queue.length === 0) {
+        this.topSongAvoidKey = null;
+        this.topSongAvoidCount = 0;
+        this.saveTopSongAvoid();
+      }
       if (typeof window === 'undefined' || !window.localStorage) return;
       const serializable = this.queue.map((q) => ({
         id: q.id,
@@ -1577,10 +1937,11 @@ export class AudioEngine {
               status: 'queued',
               audioBuffer: undefined,
             }));
+            this.deduplicateQueue();
             const onAirTrack = this.onAirDeck().getTrack();
             if (onAirTrack) {
               this.queue = this.queue.filter(
-                (q) => q.id !== onAirTrack.id && q.url !== onAirTrack.url && q.title.toLowerCase() !== onAirTrack.title.toLowerCase()
+                (q) => q.id !== onAirTrack.id && q.url !== onAirTrack.url && q.title.toLowerCase() !== onAirTrack.title.toLowerCase() && cleanCoreTitle(q.title) !== cleanCoreTitle(onAirTrack.title)
               );
             }
             this.dropRecentlyPlayedFromQueue();
@@ -1608,8 +1969,9 @@ export class AudioEngine {
               const title = parts.length > 1 ? parts.slice(1).join(' - ').trim() : songTitle.trim();
               const onAirTrack = this.onAirDeck().getTrack();
               const isDuplicate =
-                this.queue.some((q) => q.title.toLowerCase() === title.toLowerCase() || q.url === songTitle) ||
-                (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === songTitle)) ||
+                this.isSongInQueueOrPlayed({ title, artist, url: songTitle }) ||
+                this.isTitleInQueue(title, artist, songTitle) ||
+                (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === songTitle || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(title))) ||
                 this.lastPlayedWithinHour({ title, artist, url: songTitle }) !== null;
               if (!isDuplicate) {
                 this.queue.push({
@@ -2048,6 +2410,9 @@ export class AudioEngine {
 
     const item = this.queue.find((q) => q.id === itemId);
     if (!item) return false;
+
+    // RULE: Track avoidance of first song in Up Next queue
+    this.checkTopSongAvoidance(item);
     if (!item.audioBuffer) {
       // Re-hydrate audio buffer from local disk cache before mixing
       void this.ensureTrackBuffer(item).then((buf) => {
@@ -2089,6 +2454,9 @@ export class AudioEngine {
       this.recordSongPlay(track);
       this.saveCurrentTrackToStorage();
       this.notify();
+      if (item.source === 'request') {
+        void this.readMoodAndPushTop5(track);
+      }
       return true;
     }
 
@@ -2111,6 +2479,10 @@ export class AudioEngine {
       style: 'bass_swap',
       syncPercussion: true,
     });
+
+    if (item.source === 'request') {
+      void this.readMoodAndPushTop5(track);
+    }
     return true;
   }
 
@@ -2178,10 +2550,38 @@ export class AudioEngine {
     queryOrUrl: string,
     autoMix: boolean = false,
     position: 'front' | 'back' = 'front',
-    source: 'request' | 'playlist' = 'request'
+    source: 'request' | 'playlist' = 'request',
+    readMoodOnPlay: boolean = false
   ): Promise<QueuedTrack | null> {
     const cacheKey = this.normalizeCacheKey(queryOrUrl);
     const cached = this.audioBufferCache.get(cacheKey);
+
+    // RULE: If song is in Don't Play Again Ever, do not acquire or queue
+    if (this.isDontPlayAgain({ title: queryOrUrl, url: queryOrUrl })) {
+      this.acquisitionStatus = `"${queryOrUrl}" is saved in "Don't Play Again Ever".`;
+      this.notify();
+      return null;
+    }
+
+    // RULE: If song is in previously played, same name song should NOT be there in up next queue
+    if (this.isSongInPlayLog({ title: queryOrUrl, url: queryOrUrl })) {
+      this.acquisitionStatus = `"${queryOrUrl}" was already played previously.`;
+      this.notify();
+      return null;
+    }
+
+    // Prevent duplicate entries of the same song in the queue
+    if (this.isTitleInQueue(queryOrUrl, undefined, queryOrUrl)) {
+      this.acquisitionStatus = `"${queryOrUrl}" is already in the queue.`;
+      this.notify();
+      return null;
+    }
+
+    // If playing/mixing immediately, check if the current first song in Up Next was avoided
+    if (autoMix) {
+      this.checkTopSongAvoidance({ title: queryOrUrl, url: queryOrUrl });
+    }
+
     const addToQueue = (item: QueuedTrack) =>
       position === 'front' ? this.queue.unshift(item) : this.queue.push(item);
 
@@ -2201,6 +2601,12 @@ export class AudioEngine {
         source,
       };
       if (!this.allowRecentlyPlayed(queuedItem)) return null;
+      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      if (source !== 'request' && cached.metadata.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+        this.acquisitionStatus = `Skipped "${cached.metadata.title}": exceeds 5 minutes limit.`;
+        this.notify();
+        return null;
+      }
       this.copyAnalysisToQueueItem(cached.metadata, queuedItem);
       addToQueue(queuedItem);
       this.saveQueueToStorage();
@@ -2208,6 +2614,9 @@ export class AudioEngine {
       // If a mix is already running, the song stays first in the queue for the next mix
       if (autoMix && this.mixQueuedTrack(id)) {
         this.acquisitionStatus = `Instantly mixed "${cached.metadata.title}" (from RAM)!`;
+      }
+      if (source === 'request' && (autoMix || readMoodOnPlay || !this.isAnyDeckPlaying())) {
+        void this.readMoodAndPushTop5(cached.metadata);
       }
 
       this.notify();
@@ -2241,6 +2650,33 @@ export class AudioEngine {
 
       const match = searchData.results[0];
 
+      // RULE: Check if resolved song is in Don't Play Again Ever
+      if (this.isDontPlayAgain({ title: match.title, artist: match.author, url: match.url })) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `"${match.title}" is saved in "Don't Play Again Ever".`;
+        this.notify();
+        return null;
+      }
+
+      // RULE: Check if resolved song is in previously played
+      if (this.isSongInPlayLog({ title: match.title, artist: match.author, url: match.url })) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `"${match.title}" was already played previously.`;
+        this.notify();
+        return null;
+      }
+
+      // Second-level deduplication: check if the resolved song is already in the queue
+      if (this.isTitleInQueue(match.title, match.author, match.url, queuedItem.id)) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `"${match.title}" is already in the queue.`;
+        this.notify();
+        return null;
+      }
+
       // Second-level check: check cache with matching URL or Title from search
       const matchUrlKey = match.url ? this.normalizeCacheKey(match.url) : '';
       const matchTitleKey = match.title ? this.normalizeCacheKey(match.title) : '';
@@ -2257,6 +2693,16 @@ export class AudioEngine {
       queuedItem.url = match.url;
       queuedItem.thumbnail = match.thumbnail;
       if (!this.allowRecentlyPlayed(queuedItem)) return null;
+
+      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      if (source !== 'request' && match.duration && match.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(match.duration)}s): exceeds 5 minutes limit.`;
+        this.notify();
+        return null;
+      }
+
       queuedItem.status = 'downloading';
       this.acquisitionStatus = `Downloading audio: "${match.title}"...`;
       this.notify();
@@ -2273,6 +2719,16 @@ export class AudioEngine {
       const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
       queuedItem.audioBuffer = audioBuffer;
       queuedItem.duration = audioBuffer.duration;
+
+      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      if (source !== 'request' && audioBuffer.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(audioBuffer.duration)}s): exceeds 5 minutes limit.`;
+        this.notify();
+        return null;
+      }
+
       queuedItem.status = 'ready';
       this.saveQueueToStorage();
       this.acquisitionStatus = `Ready: "${match.title}"`;
@@ -2306,6 +2762,9 @@ export class AudioEngine {
       // If autoMix requested: transition immediately (or as the next mix if one is running)
       if (autoMix && this.mixQueuedTrack(queuedItem.id)) {
         this.acquisitionStatus = `Mixing "${match.title}" into set!`;
+      }
+      if (source === 'request' && (autoMix || readMoodOnPlay || !this.isAnyDeckPlaying())) {
+        void this.readMoodAndPushTop5(trackMetadata);
       }
 
       this.notify();
@@ -2378,7 +2837,8 @@ export class AudioEngine {
     if (this.mood === 'party' && bestRate < 1.0) {
       return { rate: 1, matched: false };
     }
-    return bestShift <= MAX_INCOMING_SHIFT ? { rate: bestRate, matched: true } : { rate: 1, matched: false };
+    // Hard limit: never adjust beyond ±16% per MIXING_RULES.md
+    return bestShift <= BPM_LIMITS.MAX_PERMITTED_PCT ? { rate: bestRate, matched: true } : { rate: 1, matched: false };
   }
 
   public getCrossfader(): number {
@@ -2564,6 +3024,7 @@ export class AudioEngine {
       autoCueViralHook: this.autoCueViralHook,
       mostPlayedSongs: this.mostPlayedSongs,
       favorites: this.favorites,
+      bannedSongs: this.bannedSongs,
       recentlyPlayed: this.playLog.slice(0, 30),
       introAnalysis: curState.track ? this.introAnalyses.get(curState.track.id) ?? null : null,
       mood: this.mood,
@@ -2771,6 +3232,155 @@ export class AudioEngine {
     }
 
     return !alreadyFav;
+  }
+
+  public isDontPlayAgain(song?: { id?: string; title?: string; artist?: string; url?: string } | null): boolean {
+    if (!song) return false;
+    const sId = song.id;
+    const sUrl = song.url ? song.url.trim().toLowerCase() : '';
+    const sTitle = (song.title || '').trim().toLowerCase();
+    const sCore = cleanCoreTitle(song.title || '');
+    const sKeys = song.title ? this.songKeys({ title: song.title, artist: song.artist, url: song.url }) : [];
+
+    return this.bannedSongs.some((b) => {
+      if (sId && b.id === sId) return true;
+      if (sUrl && b.url && b.url.trim().toLowerCase() === sUrl) return true;
+      if (sTitle && b.title && b.title.trim().toLowerCase() === sTitle) return true;
+      if (sCore && b.title && cleanCoreTitle(b.title) === sCore) return true;
+      if (sKeys.length > 0 && b.title && this.isSameSong(sKeys, this.songKeys({ title: b.title, artist: b.artist, url: b.url }))) return true;
+      return false;
+    });
+  }
+
+  public async loadDontPlayAgain(): Promise<BannedSong[]> {
+    try {
+      const raw = localStorage.getItem(DONT_PLAY_AGAIN_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.bannedSongs = parsed;
+          this.notify();
+        }
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+    return this.fetchBannedSongs();
+  }
+
+  public async fetchBannedSongs(): Promise<BannedSong[]> {
+    try {
+      const res = await fetch('/api/banned');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.banned)) {
+          this.bannedSongs = data.banned;
+          try {
+            localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
+          } catch {}
+          this.notify();
+          return data.banned;
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch banned songs from server:', err);
+    }
+    return this.bannedSongs;
+  }
+
+  public async toggleDontPlayAgain(
+    song?: {
+      id?: string;
+      title?: string;
+      artist?: string;
+      url?: string;
+      thumbnail?: string;
+      duration?: number;
+    } | null
+  ): Promise<boolean> {
+    if (!song || (!song.id && !song.title && !song.url)) return false;
+
+    const alreadyBanned = this.isDontPlayAgain(song);
+    const normTitle = (song.title || '').trim().toLowerCase();
+    const coreTitle = cleanCoreTitle(song.title || '');
+
+    if (alreadyBanned) {
+      // Unban
+      this.bannedSongs = this.bannedSongs.filter((b) => {
+        if (song.id && b.id === song.id) return false;
+        if (song.url && b.url && b.url === song.url) return false;
+        if (normTitle && b.title && b.title.trim().toLowerCase() === normTitle) return false;
+        if (coreTitle && b.title && cleanCoreTitle(b.title) === coreTitle) return false;
+        return true;
+      });
+      this.acquisitionStatus = `Removed "${song.title}" from Don't Play Again Ever.`;
+    } else {
+      // Ban: Add to Don't Play Again Ever list
+      const newBanned: BannedSong = {
+        id: song.id || `banned_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        title: (song.title || 'Unknown Track').trim(),
+        artist: (song.artist || 'Unknown Artist').trim(),
+        url: song.url,
+        thumbnail: song.thumbnail,
+        duration: song.duration ? Math.round(song.duration) : undefined,
+        bannedAt: Date.now(),
+      };
+      this.bannedSongs = [newBanned, ...this.bannedSongs];
+      this.acquisitionStatus = `Saved "${newBanned.title}" in "Don't Play Again Ever".`;
+
+      // 1. Immediately purge any copies from Up Next queue!
+      const beforeQueueLen = this.queue.length;
+      this.queue = this.queue.filter((q) => !this.isDontPlayAgain(q));
+      if (this.queue.length !== beforeQueueLen) {
+        this.saveQueueToStorage();
+      }
+
+      // 2. If it's currently on air, skip immediately!
+      const curDeck = this.onAirDeck();
+      const curTrack = curDeck.getTrack();
+      if (curTrack && this.isDontPlayAgain(curTrack)) {
+        console.log(`[AudioEngine] Currently playing "${curTrack.title}" was banned (Thumbs Down) — skipping immediately.`);
+        this.nextTrack();
+      }
+    }
+
+    try {
+      localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
+    } catch {}
+    this.notify();
+
+    // Sync with backend /api/banned/toggle
+    try {
+      const res = await fetch('/api/banned/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          song: {
+            id: song.id,
+            title: song.title,
+            artist: song.artist,
+            url: song.url,
+            thumbnail: song.thumbnail,
+            duration: song.duration,
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.banned)) {
+          this.bannedSongs = data.banned;
+          try {
+            localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
+          } catch {}
+          this.notify();
+          return Boolean(data.isBanned);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to sync banned song toggle with backend:', err);
+    }
+
+    return !alreadyBanned;
   }
 
   public async playStarterSong(songId: string) {

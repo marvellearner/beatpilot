@@ -76,6 +76,7 @@ async function pruneAudioCache() {
 }
 const PLAY_HISTORY_FILE = path.join(DATA_DIR, 'play_history.json');
 const FAVORITES_FILE = path.join(DATA_DIR, 'favorites.json');
+const BANNED_SONGS_FILE = path.join(DATA_DIR, 'banned_songs.json');
 
 interface GeminiConfig {
   apiKey: string;
@@ -487,14 +488,17 @@ export function aiDjApiPlugin(): Plugin {
               try {
                 const searchRes = await ytSearch(q);
                 if (searchRes.videos && searchRes.videos.length > 0) {
-                  return searchRes.videos.slice(0, 2).map((v) => ({
-                    title: v.title,
-                    url: v.url,
-                    author: v.author?.name || 'Artist',
-                    duration: v.seconds || 180,
-                    thumbnail: v.thumbnail || '',
-                    timestamp: v.timestamp || '',
-                  }));
+                  return searchRes.videos
+                    .filter((v) => !v.seconds || v.seconds <= 300)
+                    .slice(0, 2)
+                    .map((v) => ({
+                      title: v.title,
+                      url: v.url,
+                      author: v.author?.name || 'Artist',
+                      duration: v.seconds || 180,
+                      thumbnail: v.thumbnail || '',
+                      timestamp: v.timestamp || '',
+                    }));
                 }
               } catch {
                 return [];
@@ -502,12 +506,25 @@ export function aiDjApiPlugin(): Plugin {
               return [];
             });
 
+            let bannedKeys = new Set<string>();
+            try {
+              if (fs.existsSync(BANNED_SONGS_FILE)) {
+                const bannedData = JSON.parse(fs.readFileSync(BANNED_SONGS_FILE, 'utf-8') || '[]');
+                for (const b of bannedData) {
+                  if (b.url) bannedKeys.add(b.url.toLowerCase());
+                  if (b.title) bannedKeys.add(b.title.toLowerCase());
+                }
+              }
+            } catch {}
+
             const settled = await Promise.all(searchPromises);
             const rawRecommendations = settled.flat();
             const seen = new Set<string>();
             const recommendations: SearchResult[] = [];
             for (const r of rawRecommendations) {
+              if (r.duration && r.duration > 300) continue;
               const key = (r.url || r.title).toLowerCase();
+              if (bannedKeys.has(key) || (r.title && bannedKeys.has(r.title.toLowerCase()))) continue;
               if (!seen.has(key)) {
                 seen.add(key);
                 recommendations.push(r);
@@ -830,6 +847,91 @@ export function aiDjApiPlugin(): Plugin {
               console.error('Error updating favorites:', err);
               res.statusCode = 500;
               res.end(JSON.stringify({ error: 'Failed to update favorites' }));
+            }
+            return;
+          }
+        }
+
+        // 6b. Banned Songs / "Don't Play Again Ever" (GET /api/banned & POST /api/banned/toggle)
+        if (url.pathname === '/api/banned' || url.pathname === '/api/banned/toggle') {
+          res.setHeader('Content-Type', 'application/json');
+
+          if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+          }
+          if (!fs.existsSync(BANNED_SONGS_FILE)) {
+            fs.writeFileSync(BANNED_SONGS_FILE, JSON.stringify([], null, 2), 'utf-8');
+          }
+
+          if (req.method === 'GET') {
+            try {
+              const rawData = fs.readFileSync(BANNED_SONGS_FILE, 'utf-8');
+              const banned = JSON.parse(rawData || '[]');
+              if (Array.isArray(banned)) {
+                banned.sort((a: any, b: any) => (b.bannedAt || 0) - (a.bannedAt || 0));
+              }
+              res.end(JSON.stringify({ banned: Array.isArray(banned) ? banned : [] }));
+            } catch (err) {
+              console.error('Error reading banned songs:', err);
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to read banned songs', banned: [] }));
+            }
+            return;
+          }
+
+          if (req.method === 'POST') {
+            try {
+              const body = await parseJsonBody(req);
+              const song = body?.song;
+              if (!song || (!song.id && !song.title && !song.url)) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'Invalid song object' }));
+                return;
+              }
+
+              let banned: any[] = [];
+              try {
+                const rawData = fs.readFileSync(BANNED_SONGS_FILE, 'utf-8');
+                banned = JSON.parse(rawData || '[]');
+                if (!Array.isArray(banned)) banned = [];
+              } catch {
+                banned = [];
+              }
+
+              const normTitle = (song.title || '').trim().toLowerCase();
+              const existingIdx = banned.findIndex(
+                (b: any) =>
+                  (song.id && b.id === song.id) ||
+                  (song.url && b.url && b.url === song.url) ||
+                  (normTitle && b.title && b.title.trim().toLowerCase() === normTitle)
+              );
+
+              let isBanned = false;
+              if (existingIdx !== -1) {
+                // If already banned, toggle off (unban)
+                banned.splice(existingIdx, 1);
+                isBanned = false;
+              } else {
+                // Add to banned songs (newest first)
+                const newBanned = {
+                  id: song.id || `banned_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                  title: (song.title || 'Unknown Track').trim(),
+                  artist: (song.artist || 'Unknown Artist').trim(),
+                  url: song.url,
+                  thumbnail: song.thumbnail,
+                  duration: song.duration ? Math.round(song.duration) : undefined,
+                  bannedAt: Date.now(),
+                };
+                banned.unshift(newBanned);
+                isBanned = true;
+              }
+
+              fs.writeFileSync(BANNED_SONGS_FILE, JSON.stringify(banned, null, 2), 'utf-8');
+              res.end(JSON.stringify({ success: true, isBanned, banned }));
+            } catch (err) {
+              console.error('Error updating banned songs:', err);
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to update banned songs' }));
             }
             return;
           }

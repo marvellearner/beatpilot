@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   Star,
   Heart,
+  ThumbsDown,
   FileText,
   Edit3,
   Check,
@@ -54,7 +55,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isLoadingSongs, setIsLoadingSongs] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [bangersTab, setBangersTab] = useState<'favorites' | 'most_played'>('favorites');
+  const [bangersTab, setBangersTab] = useState<'favorites' | 'most_played' | 'banned'>('favorites');
 
   // Debounced search query listener for opening matching songs dropdown
   useEffect(() => {
@@ -207,8 +208,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     setIsDropdownOpen(false);
     setSearchQuery('');
     setSearchResults([]);
-    showToast(`${autoMix ? 'Mixing in' : 'Queued'}: "${song.title}"`);
-    await engine.acquireTrack(song.url || `${song.title} ${song.author}`, autoMix, 'back', 'request');
+    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued'}: "${song.title}"`);
+    await engine.acquireTrack(song.url || `${song.title} ${song.author}`, autoMix, 'back', 'request', autoMix);
   };
 
   const handleSearchSubmit = async (e: React.FormEvent, autoMix: boolean = false) => {
@@ -223,8 +224,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     setIsDropdownOpen(false);
     setSearchQuery('');
     setSearchResults([]);
-    showToast(`${autoMix ? 'Mixing in' : 'Queued'}: "${displayTitle}"`);
-    await engine.acquireTrack(targetQuery, autoMix, 'back', 'request');
+    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued'}: "${displayTitle}"`);
+    await engine.acquireTrack(targetQuery, autoMix, 'back', 'request', autoMix);
   };
 
   return (
@@ -366,6 +367,35 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         <Heart
                           className={`w-4 h-4 transition-transform ${
                             engine.isFavorite(currentTrack) ? 'fill-rose-500 text-rose-500' : ''
+                          }`}
+                        />
+                      </button>
+                    )}
+
+                    {/* Interactive Thumbs Down (Don't Play Again Ever) Button */}
+                    {currentTrack && (
+                      <button
+                        id="party-console-dislike-btn"
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          engine.toggleDontPlayAgain(currentTrack);
+                        }}
+                        className={`absolute top-2 left-2 p-2 rounded-full backdrop-blur-md transition-all duration-200 z-20 shadow-xl ${
+                          engine.isDontPlayAgain(currentTrack)
+                            ? 'bg-red-950/90 text-red-400 border border-red-500/80 scale-105 hover:scale-115 shadow-[0_0_15px_rgba(239,68,68,0.6)]'
+                            : 'bg-black/60 text-white/70 hover:text-red-400 hover:bg-black/85 border border-white/20 hover:scale-110'
+                        }`}
+                        title={
+                          engine.isDontPlayAgain(currentTrack)
+                            ? "Saved in Don't Play Again Ever (Click to unblock)"
+                            : "Don't play again ever (Thumbs Down)"
+                        }
+                        aria-label="Don't play again ever"
+                      >
+                        <ThumbsDown
+                          className={`w-4 h-4 transition-transform ${
+                            engine.isDontPlayAgain(currentTrack) ? 'fill-red-500 text-red-500' : ''
                           }`}
                         />
                       </button>
@@ -594,7 +624,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     id="party-console-next-button"
                     onClick={() => engine.nextTrack()}
                     className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
-                    title={pendingMix ? 'Mix now (skip the wait)' : 'Mix into the next song at the best point in the next 30 s'}
+                    title={pendingMix ? 'Mix now (skip the 45s wait)' : 'Mix into the next song at the best point in the next 45 s (following MIXING_RULES.md)'}
                     aria-label="Next / mix"
                   >
                     <SkipForward className="w-5 h-5 fill-current" />
@@ -638,7 +668,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 <div id="party-console-pending-mix" className="flex items-center justify-between gap-2 bg-cyan-500/10 border border-cyan-500/25 rounded-xl px-3 py-2 text-[11px]">
                   <div className="min-w-0">
                     <div className="font-semibold text-cyan-100 truncate">
-                      Mixing into "{pendingMix.title}" in {Math.ceil(pendingMix.startsInSeconds)}s
+                      Mixing into "{pendingMix.title}" in {Math.ceil(pendingMix.startsInSeconds)}s (following MIXING_RULES.md)
                     </div>
                     <div className="text-cyan-300/70 truncate" title={pendingMix.reason}>
                       {pendingMix.reason} · enters at {formatTime(pendingMix.entryTime)}
@@ -648,6 +678,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     <button
                       onClick={() => engine.nextTrack()}
                       className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold transition-colors"
+                      title="Mix now immediately (skip phrase wait)"
                     >
                       Mix now
                     </button>
@@ -903,10 +934,21 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 <button
                   type="submit"
                   disabled={!searchQuery.trim()}
-                  className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-3 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
+                  className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
+                  title="Queue at back"
                 >
                   <Plus className="w-3 h-3" />
                   <span>Queue</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleSearchSubmit(e, true)}
+                  disabled={!searchQuery.trim()}
+                  className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-orange-500/20"
+                  title="Search & Play: AI reads mood and pushes top 5 matching songs to top of queue"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  <span>Play & Sync Mood</span>
                 </button>
               </form>
 
@@ -989,11 +1031,11 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                           <button
                             type="button"
                             onClick={() => handleSelectSong(song, true)}
-                            className="py-1 px-2 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                            title="Mix into this song now"
+                            className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                            title="Play/Mix now: AI will read mood and push top 5 songs to top of queue"
                           >
                             <Play className="w-2.5 h-2.5 fill-current" />
-                            <span>Mix</span>
+                            <span>Play & Sync Mood</span>
                           </button>
                         </div>
                       </div>
@@ -1044,9 +1086,19 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         </button>
                       </div>
                       <div className="flex flex-col truncate min-w-0 flex-1">
-                        <span className="font-bold text-white text-[11px] truncate" title={item.title}>
-                          {item.title}
-                        </span>
+                        <div className="flex items-center gap-1.5 truncate">
+                          <span className="font-bold text-white text-[11px] truncate" title={item.title}>
+                            {item.title}
+                          </span>
+                          {idx === 0 && engine.topSongAvoidCount > 0 && (
+                            <span
+                              className="text-[8px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.5 rounded shrink-0 animate-pulse"
+                              title={`Avoided ${engine.topSongAvoidCount}/7 times. Will be automatically removed if other songs are played 7 times.`}
+                            >
+                              ⚠️ Skipped {engine.topSongAvoidCount}/7
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[9px] text-slate-400 truncate">
                           {item.artist}
                           {item.lastPlayedAt !== undefined && (
@@ -1092,12 +1144,28 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         <button
                           onClick={() => engine.mixQueuedTrack(item.id)}
                           disabled={engine.isTransitioning}
-                          className="text-[9px] font-bold text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/30 px-1.5 py-0.5 rounded transition-colors disabled:opacity-40"
-                          title="Mix into this song now"
+                          className={`text-[9px] font-bold px-1.5 py-0.5 rounded transition-colors disabled:opacity-40 ${
+                            pendingMix?.id === item.id
+                              ? 'text-cyan-950 bg-cyan-400 hover:bg-cyan-300 font-extrabold animate-pulse'
+                              : 'text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/30'
+                          }`}
+                          title={
+                            pendingMix?.id === item.id
+                              ? 'Mix now immediately (skip 45s wait)'
+                              : 'Plan mix within next 45s (following MIXING_RULES.md)'
+                          }
                         >
-                          MIX
+                          {pendingMix?.id === item.id ? 'MIX NOW' : 'MIX'}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => engine.toggleDontPlayAgain(item)}
+                        className="text-slate-500 hover:text-red-400 p-0.5 rounded transition-colors"
+                        title="Don't play again ever (Thumbs Down)"
+                      >
+                        <ThumbsDown className="w-3 h-3" />
+                      </button>
                       <button
                         onClick={() => engine.removeFromQueue(item.id)}
                         className="text-slate-500 hover:text-white p-0.5 rounded transition-colors"
@@ -1152,6 +1220,23 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                   <span>Top Bangers</span>
                   <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
                     {engine.mostPlayedSongs.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBangersTab('banned')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    bangersTab === 'banned'
+                      ? 'bg-red-500/20 text-red-300 border border-red-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Songs saved in Don't Play Again Ever"
+                >
+                  <ThumbsDown className="w-3 h-3 text-red-400" />
+                  <span>Don&apos;t Play</span>
+                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                    {engine.bannedSongs.length}
                   </span>
                 </button>
               </div>
@@ -1299,6 +1384,58 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                       >
                         <Play className="w-2.5 h-2.5 fill-current" />
                         <span>Start</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Don't Play Again Ever Tab View */}
+            {bangersTab === 'banned' && (
+              <div id="party-console-banned-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                {engine.bannedSongs.length === 0 ? (
+                  <div id="party-console-banned-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
+                    <div className="p-2.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400/80">
+                      <ThumbsDown className="w-5 h-5" />
+                    </div>
+                    <p className="text-[11px] font-medium leading-relaxed">
+                      No blocked songs.<br />
+                      Click the <span className="text-red-400 font-bold">👎 thumbs down</span> on any song to permanently block it from playing!
+                    </p>
+                  </div>
+                ) : (
+                  engine.bannedSongs.map((song) => (
+                    <div
+                      id={`party-console-banned-item-${song.id}`}
+                      key={song.id}
+                      className="group bg-black/40 hover:bg-black/60 border border-red-500/20 hover:border-red-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
+                          {song.thumbnail ? (
+                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-red-950 to-slate-900">
+                              <Music className="w-3.5 h-3.5 text-red-400" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <span className="text-xs font-bold text-white truncate group-hover:text-red-300 transition-colors" title={song.title}>
+                            {song.title}
+                          </span>
+                          <span className="text-[10px] text-slate-400 truncate">{song.artist}</span>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => engine.toggleDontPlayAgain(song)}
+                        className="py-1 px-2.5 bg-red-500/20 hover:bg-red-500 text-red-300 hover:text-white border border-red-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
+                        title="Remove from Don't Play Again Ever (Unblock)"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                        <span>Unblock</span>
                       </button>
                     </div>
                   ))

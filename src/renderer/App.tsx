@@ -154,6 +154,11 @@ export const App: React.FC = () => {
           if (curTrack) engine.toggleFavorite(curTrack);
           break;
         }
+        case 'CMD_TOGGLE_DONT_PLAY_AGAIN': {
+          const curTrack = action.song || (engine.activeDeck === 'A' ? engine.deckA : engine.deckB).getPlaybackState().track;
+          if (curTrack) engine.toggleDontPlayAgain(curTrack);
+          break;
+        }
       }
     },
     [engine]

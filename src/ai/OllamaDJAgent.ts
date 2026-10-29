@@ -77,6 +77,29 @@ export const PercussionSyncSchema = z.object({
 });
 export type AIPercussionSyncDecision = z.infer<typeof PercussionSyncSchema>;
 
+export interface MoodReadingResult {
+  detectedMood: string;
+  energyLevel: 'low' | 'medium' | 'high' | 'peak';
+  vibeDescription: string;
+  top5Songs: Array<{ title: string; artist: string; searchPrompt: string }>;
+  reason: string;
+  source: 'ai' | 'heuristic';
+}
+
+const MoodReadingSchema = z.object({
+  detectedMood: z.string().max(100),
+  energyLevel: z.enum(['low', 'medium', 'high', 'peak']).default('high'),
+  vibeDescription: z.string().max(250),
+  top5Songs: z.array(
+    z.object({
+      title: z.string(),
+      artist: z.string(),
+      searchPrompt: z.string(),
+    })
+  ).min(1).max(10),
+  reason: z.string().max(250),
+});
+
 const formatTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 interface LlmJsonResponse {
@@ -212,6 +235,161 @@ Respond ONLY with valid JSON in this exact schema:
     if (!res) return null;
     const parsed = PercussionSyncSchema.safeParse(res.data);
     return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * Reads the user's mood from a searched/played song and recommends the top 5
+   * songs matching that exact mood and momentum to push to the top of the queue.
+   */
+  public async readMoodAndRecommendTop5(track: {
+    title: string;
+    artist: string;
+    bpm?: number;
+  }): Promise<MoodReadingResult> {
+    const prompt = `You are an elite party AI DJ with deep musical psychology and genre expertise.
+A user just searched for and played this song:
+TRACK: "${track.title}" by "${track.artist || 'Unknown'}"${track.bpm ? ` (${Math.round(track.bpm)} BPM)` : ''}.
+
+TASK:
+1. READ THE USER'S MOOD: Analyze the musical vibe, lyrical emotion, cultural context, danceability, and energy of this song to determine what mood the user is in.
+2. RECOMMEND TOP 5 SONGS: Pick the 5 best, most musically compatible songs that match this exact mood and momentum to play immediately next in the DJ set.
+Do NOT suggest the same song that is currently playing. Provide 5 distinct, high-quality songs matching the vibe. All songs MUST be standard radio length (under 5 minutes, avoid long 8+ minute extended mixes or compilations).
+
+Reply ONLY with valid JSON in this exact structure:
+{
+  "detectedMood": "<short mood label, e.g. High-Energy Punjabi Club, Late Night Melodic R&B, Euphoric House, Romantic Acoustic>",
+  "energyLevel": "low" | "medium" | "high" | "peak",
+  "vibeDescription": "<one sentence describing the mood>",
+  "top5Songs": [
+    { "title": "<Song Title 1>", "artist": "<Artist 1>", "searchPrompt": "<Artist 1> - <Song Title 1>" },
+    { "title": "<Song Title 2>", "artist": "<Artist 2>", "searchPrompt": "<Artist 2> - <Song Title 2>" },
+    { "title": "<Song Title 3>", "artist": "<Artist 3>", "searchPrompt": "<Artist 3> - <Song Title 3>" },
+    { "title": "<Song Title 4>", "artist": "<Artist 4>", "searchPrompt": "<Artist 4> - <Song Title 4>" },
+    { "title": "<Song Title 5>", "artist": "<Artist 5>", "searchPrompt": "<Artist 5> - <Song Title 5>" }
+  ],
+  "reason": "<short explanation, max 15 words>"
+}`;
+
+    try {
+      const res = await this.askJson(prompt, 350, 15_000);
+      if (res && res.data) {
+        const parsed = MoodReadingSchema.safeParse(res.data);
+        if (parsed.success && parsed.data.top5Songs.length >= 3) {
+          return {
+            ...parsed.data,
+            top5Songs: parsed.data.top5Songs.slice(0, 5),
+            source: 'ai',
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('AI mood reading failed, falling back to heuristic:', err);
+    }
+
+    return this.heuristicMoodFallback(track);
+  }
+
+  /**
+   * Deterministic heuristic mood classifier and top 5 recommendation fallback.
+   */
+  private heuristicMoodFallback(track: { title: string; artist: string; bpm?: number }): MoodReadingResult {
+    const combined = `${track.title} ${track.artist}`.toLowerCase();
+
+    // 1. Punjabi / Bhangra / Desi Hype
+    if (
+      /moose|sidhu|diljit|aujla|dhillon|shubh|punjabi|bhangra|karan|ap dhillon|amrinder|badshah|honey singh|guru randhawa|mankirt|jassi|channi/i.test(
+        combined
+      )
+    ) {
+      return {
+        detectedMood: 'High-Energy Punjabi Club Bangers',
+        energyLevel: 'peak',
+        vibeDescription: 'Heavy bass, dholak rhythm, and high-octane modern Punjabi bangers',
+        top5Songs: [
+          { title: 'Softly', artist: 'Karan Aujla', searchPrompt: 'Karan Aujla - Softly' },
+          { title: 'Brown Munde', artist: 'AP Dhillon', searchPrompt: 'AP Dhillon - Brown Munde' },
+          { title: 'Same Beef', artist: 'Sidhu Moose Wala', searchPrompt: 'Sidhu Moose Wala - Same Beef' },
+          { title: 'Cheques', artist: 'Shubh', searchPrompt: 'Shubh - Cheques' },
+          { title: 'Born to Shine', artist: 'Diljit Dosanjh', searchPrompt: 'Diljit Dosanjh - Born to Shine' },
+        ],
+        reason: 'Matched authentic Punjabi dancefloor momentum and heavy rhythm',
+        source: 'heuristic',
+      };
+    }
+
+    // 2. Bollywood Dance / Party
+    if (
+      /arijit|neha|badshah|bollywood|mika|jubin|chull|aankh marey|kala chashma|nashe si|ghungroo|salman|shahrukh/i.test(
+        combined
+      )
+    ) {
+      return {
+        detectedMood: 'Bollywood Party Dance Anthems',
+        energyLevel: 'high',
+        vibeDescription: 'Celebratory, upbeat Bollywood club dance hits for singing and dancing along',
+        top5Songs: [
+          { title: 'Kala Chashma', artist: 'Badshah', searchPrompt: 'Badshah - Kala Chashma' },
+          { title: 'Ghungroo', artist: 'Arijit Singh', searchPrompt: 'Arijit Singh - Ghungroo' },
+          { title: 'Blue Eyes', artist: 'Yo Yo Honey Singh', searchPrompt: 'Yo Yo Honey Singh - Blue Eyes' },
+          { title: 'Subha Hone Na De', artist: 'Mika Singh', searchPrompt: 'Mika Singh - Subha Hone Na De' },
+          { title: 'Kar Gayi Chull', artist: 'Badshah', searchPrompt: 'Badshah - Kar Gayi Chull' },
+        ],
+        reason: 'Selected chart-topping Bollywood party tracks to keep the energy soaring',
+        source: 'heuristic',
+      };
+    }
+
+    // 3. Electronic / House / EDM
+    if (/calvin harris|david guetta|tiesto|house|edm|techno|fisher|peggy gou|remix|fred again|meduza|john summit/i.test(combined)) {
+      return {
+        detectedMood: 'Euphoric Club House & EDM',
+        energyLevel: 'high',
+        vibeDescription: 'Driving four-on-the-floor kick drums and energetic festival anthems',
+        top5Songs: [
+          { title: 'Losing It', artist: 'Fisher', searchPrompt: 'Fisher - Losing It' },
+          { title: '(It Goes Like) Nanana', artist: 'Peggy Gou', searchPrompt: 'Peggy Gou - Nanana' },
+          { title: 'One Kiss', artist: 'Calvin Harris', searchPrompt: 'Calvin Harris - One Kiss' },
+          { title: 'adore u', artist: 'Fred again..', searchPrompt: 'Fred again.. - adore u' },
+          { title: 'Piece Of Your Heart', artist: 'Meduza', searchPrompt: 'Meduza - Piece Of Your Heart' },
+        ],
+        reason: 'Selected pulsating club house tracks to preserve seamless four-on-the-floor momentum',
+        source: 'heuristic',
+      };
+    }
+
+    // 4. Afrobeat / Amapiano
+    if (/burna|rema|wizkid|asake|afro|amapiano|davido|tyla|amapiano/i.test(combined)) {
+      return {
+        detectedMood: 'Vibrant Afrobeat & Amapiano Groove',
+        energyLevel: 'medium',
+        vibeDescription: 'Hypnotic syncopated log drums and tropical dance bounce',
+        top5Songs: [
+          { title: 'Last Last', artist: 'Burna Boy', searchPrompt: 'Burna Boy - Last Last' },
+          { title: 'Calm Down', artist: 'Rema', searchPrompt: 'Rema - Calm Down' },
+          { title: 'Lonely At The Top', artist: 'Asake', searchPrompt: 'Asake - Lonely At The Top' },
+          { title: 'Essence', artist: 'Wizkid', searchPrompt: 'Wizkid - Essence' },
+          { title: 'Water', artist: 'Tyla', searchPrompt: 'Tyla - Water' },
+        ],
+        reason: 'Sequenced tropical polyrhythmic Afrobeat grooves for infectious dance vibe',
+        source: 'heuristic',
+      };
+    }
+
+    // 5. Default Global Pop / Party Club
+    return {
+      detectedMood: 'Upbeat Pop & Global Club Bangers',
+      energyLevel: 'high',
+      vibeDescription: 'Modern chart-topping pop and dance hits with undeniable crowd appeal',
+      top5Songs: [
+        { title: 'Blinding Lights', artist: 'The Weeknd', searchPrompt: 'The Weeknd - Blinding Lights' },
+        { title: 'Levitating', artist: 'Dua Lipa', searchPrompt: 'Dua Lipa - Levitating' },
+        { title: 'Shape of You', artist: 'Ed Sheeran', searchPrompt: 'Ed Sheeran - Shape of You' },
+        { title: 'Cruel Summer', artist: 'Taylor Swift', searchPrompt: 'Taylor Swift - Cruel Summer' },
+        { title: 'As It Was', artist: 'Harry Styles', searchPrompt: 'Harry Styles - As It Was' },
+      ],
+      reason: 'Delivered universally loved high-energy anthems to match current vibe',
+      source: 'heuristic',
+    };
   }
 
   /**

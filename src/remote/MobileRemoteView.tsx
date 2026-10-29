@@ -25,6 +25,7 @@ import {
   Radio,
   Star,
   Heart,
+  ThumbsDown,
   FileText,
   Square,
   Music,
@@ -247,6 +248,35 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                 aria-label={isFav ? 'In Favourites (tap to remove)' : 'Save to Favourites'}
               >
                 <Heart className={`w-4 h-4 ${isFav ? 'fill-white' : ''}`} />
+              </button>
+            );
+          })()}
+
+          {/* Interactive Thumbs Down (Don't Play Again Ever) Button Around Song Image */}
+          {currentTrack && (() => {
+            const isBanned = syncState.bannedSongs?.some(
+              (b) =>
+                (currentTrack.id && b.id === currentTrack.id) ||
+                (currentTrack.url && b.url === currentTrack.url) ||
+                (b.title && b.title.trim().toLowerCase() === currentTrack.title?.trim().toLowerCase())
+            );
+            return (
+              <button
+                id="remote-dislike-btn"
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSendAction({ type: 'CMD_TOGGLE_DONT_PLAY_AGAIN', song: currentTrack });
+                }}
+                className={`absolute top-0 left-0 p-2 rounded-full backdrop-blur-md shadow-xl transition-transform active:scale-90 z-20 ${
+                  isBanned
+                    ? 'bg-red-600 text-white shadow-red-500/50 border border-red-400'
+                    : 'bg-black/70 text-white/80 hover:text-red-400 border border-white/20'
+                }`}
+                title={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
+                aria-label={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
+              >
+                <ThumbsDown className="w-4 h-4" />
               </button>
             );
           })()}
