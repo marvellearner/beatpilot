@@ -213,7 +213,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
           <input
             type="range"
             min="0.5"
-            max="1.25"
+            max="1.5"
             step="0.002"
             value={state.playbackRate}
             onChange={handlePitchChange}

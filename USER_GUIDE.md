@@ -79,7 +79,7 @@ Once a song is playing, the app looks after the party:
 
 | Control | What it does |
 | :--- | :--- |
-| **0.9x / 1.0x / 1.1x / 1.2x** | Play slower or faster. Any speed from 0.8x to 1.25x works. |
+| **0.5x / 0.9x / 1.0x / 1.1x / 1.2x / 1.5x** | Play slower or faster. Any speed from 0.5x to 1.5x works. |
 | **− / +** | Nudge the tempo down or up by 1 BPM. |
 | **BPM box + Set** | Type an exact tempo, e.g. `128`. |
 | **🔒 Key Lock: ON** (default) | Speed changes but the **pitch stays the same**. Voices don't go chipmunk or deep. The change takes about a second to prepare, then switches in smoothly at the same spot in the song. |

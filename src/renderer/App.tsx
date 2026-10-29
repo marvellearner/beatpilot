@@ -7,6 +7,7 @@ import { PartyConsoleView } from './components/PartyConsoleView';
 import { OllamaDJAgent, AIResponseResult } from '../ai/OllamaDJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
+import QRCode from 'qrcode';
 import {
   Disc,
   Send,
@@ -217,6 +218,26 @@ export const App: React.FC = () => {
     };
   }, [engine, handleMobileAction]);
 
+  // Phone pairing: fetch the laptop's Wi-Fi link and draw it as a QR code
+  useEffect(() => {
+    if (!showRemoteModal) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { urls } = (await (await fetch('/api/remote-info')).json()) as { urls: string[] };
+        if (cancelled || !urls.length) return;
+        setRemoteUrls(urls);
+        const qr = await QRCode.toDataURL(urls[0], { margin: 1, width: 220 });
+        if (!cancelled) setRemoteQr(qr);
+      } catch (err) {
+        console.error('Failed to get the remote link:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showRemoteModal]);
+
   // Broadcast sync state to WebSocket on engine updates
   const broadcastSyncState = useCallback(() => {
     if (isHostRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -289,7 +310,8 @@ export const App: React.FC = () => {
     'Start smooth 16-second crossfade into Deck A',
   ];
 
-  const remoteUrl = `http://${window.location.hostname}:5173/?remote=true`;
+  // The server's Wi-Fi address; this window's own origin is only a fallback (it may be "localhost")
+  const remoteUrl = remoteUrls[0] ?? `${window.location.origin}/?remote=true`;
 
   return (
     <div id="app-root" className="min-h-screen bg-[#07090e] text-slate-100 p-3 lg:p-4 flex flex-col gap-3">
@@ -394,6 +416,13 @@ export const App: React.FC = () => {
         </div>
       </header>
 
+      {hostRole === 'standby' && (
+        <div id="app-standby-banner" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+          AI DJ is already open in another tab, which the phone remote controls. Close this tab, or close the
+          other one and this tab takes over.
+        </div>
+      )}
+
       {/* iPhone Remote Modal */}
       {showRemoteModal && (
         <div id="app-remote-modal" className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
@@ -405,20 +434,33 @@ export const App: React.FC = () => {
               ✕
             </button>
 
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-rose-500 to-purple-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-rose-500/30">
-              <QrCode className="w-6 h-6" />
-            </div>
+            {remoteQr ? (
+              <img
+                src={remoteQr}
+                alt={`QR code for ${remoteUrl}`}
+                className="w-44 h-44 mx-auto rounded-xl bg-white p-1"
+              />
+            ) : (
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-rose-500 to-purple-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-rose-500/30">
+                <QrCode className="w-6 h-6" />
+              </div>
+            )}
 
             <div>
               <h2 className="text-lg font-extrabold text-white">Connect Your iPhone</h2>
               <p className="text-xs text-slate-400 mt-1">
-                Open Safari on your iPhone connected to the same Wi-Fi and navigate to:
+                On the same Wi-Fi, scan the code with the iPhone camera or open this link in Safari:
               </p>
             </div>
 
             <div className="bg-black/60 p-3 rounded-xl border border-white/10 font-mono text-sm text-cyan-400 break-all select-all flex items-center justify-center gap-2">
               <span>{remoteUrl}</span>
             </div>
+            {remoteUrls.length > 1 && (
+              <p className="text-[11px] text-slate-500 -mt-2 break-all">
+                Not working? Try: {remoteUrls.slice(1).join(' or ')}
+              </p>
+            )}
 
             <div className="flex flex-col gap-2 pt-2">
               <a

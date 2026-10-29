@@ -3,9 +3,9 @@ import { detectBpmFromBuffer } from './BpmDetector';
 import { IntroSkitDetector } from './IntroSkitDetector';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
-// a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.25x).
+// a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.5x).
 export const MIN_PLAYBACK_RATE = 0.5;
-export const MAX_PLAYBACK_RATE = 1.25;
+export const MAX_PLAYBACK_RATE = 1.5;
 const SWAP_FADE_SECONDS = 0.04;
 
 export class VirtualDeck {

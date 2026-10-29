@@ -253,7 +253,13 @@ Keep the internal calculations precise and round displayed BPM values appropriat
 
 ## Core Principle
 
-The ±16% limit is a hard technical constraint, not a guarantee of good sound. Prefer small tempo changes and prioritize danceability, vocal quality, musical phrasing, and a natural transition over forcing an exact BPM match.
+The ±16% limit is a hard technical constraint for automated mixing, not a guarantee of good sound. Prefer small tempo changes and prioritize danceability, vocal quality, musical phrasing, and a natural transition over forcing an exact BPM match.
+
+## Manual Tempo Presets (User Explicit Override)
+
+- The user can explicitly change the on-air track speed with dedicated presets: `0.5x`, `0.9x`, `1.0x`, `1.1x`, `1.2x`, and `1.5x`.
+- Selecting `1.5x` accelerates tempo to 150% of the natural BPM. With **Key Lock ON**, WSOLA time-stretching maintains vocal and instrumental pitch; with **Key Lock OFF (vinyl)**, pitch scales naturally with the speed.
+- The user's explicit manual tempo choice overrides the automatic ±16% mixing constraint for that playback.
 
 ---
 

@@ -57,7 +57,7 @@ export const BPM_LIMITS = {
 
 // Tempo control range for the on-air song
 const MIN_TEMPO = 0.5;
-const MAX_TEMPO = 1.25;
+const MAX_TEMPO = 1.5;
 const MIN_QUEUE_TARGET = 45; // Maintain ~50 songs in queue at all times
 const MAX_QUEUE_TARGET = 50; // Up Next queue capacity (50 songs)
 // RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue.
@@ -471,7 +471,7 @@ export class AudioEngine {
   }
 
   /**
-   * Plays the on-air song at `ratio` × its natural tempo (0.5x – 1.25x).
+   * Plays the on-air song at `ratio` × its natural tempo (0.5x – 1.5x).
    * Key lock on: the audio is re-timed so the pitch stays the same (takes ~1 s, swapped in
    * seamlessly at the same musical position). Key lock off: vinyl style, pitch follows speed.
    */

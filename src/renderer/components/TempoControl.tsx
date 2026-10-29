@@ -12,7 +12,7 @@ interface TempoControlProps {
   compact?: boolean;
 }
 
-const SPEED_PRESETS = [0.5, 0.9, 1.0, 1.1, 1.2];
+const SPEED_PRESETS = [0.5, 0.9, 1.0, 1.1, 1.2, 1.5];
 
 /**
  * Pro-style tempo section for the on-air song: original vs current BPM, an "Original" toggle,

@@ -10,6 +10,7 @@ export const RemoteClient: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const [hostState, setHostState] = useState<HostSyncState | null>(null);
   const [connected, setConnected] = useState(false);
+  const [hostGone, setHostGone] = useState(false);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -21,11 +22,22 @@ export const RemoteClient: React.FC = () => {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        // The server answers with the laptop's latest state (or HOST_GONE) straight away
+        ws.send(JSON.stringify({ type: 'HELLO', role: 'remote' }));
+      };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'SYNC_STATE') setHostState(data as HostSyncState);
+          if (data.type === 'SYNC_STATE') {
+            setHostState(data as HostSyncState);
+            setHostGone(false);
+          } else if (data.type === 'HOST_GONE') {
+            // Don't keep showing the last song as if it were still playing
+            setHostState(null);
+            setHostGone(true);
+          }
         } catch {
           // Ignore invalid message
         }
@@ -55,10 +67,21 @@ export const RemoteClient: React.FC = () => {
     return (
       <div id="remote-connecting" className="min-h-screen bg-[#07090e] text-slate-300 flex flex-col items-center justify-center gap-3 p-6 text-center">
         <div className="w-10 h-10 rounded-full border-4 border-cyan-500/30 border-t-cyan-400 animate-spin" />
-        <h1 className="text-base font-extrabold text-white">Connecting to the laptop…</h1>
-        <p className="text-xs text-slate-400 max-w-xs">
-          Make sure AI DJ is open on the laptop and both devices are on the same Wi-Fi.
-        </p>
+        {hostGone ? (
+          <>
+            <h1 className="text-base font-extrabold text-white">AI DJ isn't open on the laptop</h1>
+            <p className="text-xs text-slate-400 max-w-xs">
+              Open AI DJ in a browser tab on the laptop. This remote connects to it automatically.
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="text-base font-extrabold text-white">Connecting to the laptop…</h1>
+            <p className="text-xs text-slate-400 max-w-xs">
+              Make sure AI DJ is open on the laptop and both devices are on the same Wi-Fi.
+            </p>
+          </>
+        )}
       </div>
     );
   }
