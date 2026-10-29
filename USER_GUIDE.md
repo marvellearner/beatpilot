@@ -65,6 +65,7 @@ Once a song is playing, the app looks after the party:
 - **Mixes automatically:** about 20 seconds before a song ends, it blends into the next one with the beats lined up. In the final stretch it gently nudges the tempo toward the next song, so the two meet at the same BPM. If two songs' tempos are too far apart, it does a quick, clean cut on the beat instead of a messy blend.
 - **Plays the best part:** with **Auto-Cue: ON**, the next songs start just before their most popular part. Turn it **OFF** if you'd rather every song play from the start.
 - **Never goes silent while loading:** if the next song isn't ready yet, the current song keeps playing.
+- **Real-Time RAM Usage Meter:** The top navigation bar displays a live RAM gauge showing system memory (GB and percentage), process footprint (AI DJ server RSS), and browser JS/audio heap with interactive health telemetry on click/hover.
 
 ---
 
@@ -215,6 +216,12 @@ This works best with Ollama running (see [§1](#1-one-time-setup)). Without it, 
 
 ## 10. Pro Mode (Optional)
 
+**Hot cues and loops** (on each deck in Pro mode):
+
+- **Hot cues 1–4:** tap an empty pad (**Set**) to save the current spot, snapped to the beat. Tap a saved pad to jump there. **×** clears it. They're remembered per song.
+- **Loops ⟲1, ⟲2, ⟲4:** loop 1, 2 or 4 bars from the start of the bar that's playing, to stretch a build-up. Tap the same button again to carry on. The dhol stays on the beat. Looping the song on air cancels a planned mix, since you're holding the song.
+- **KEY** shows the song's key as it sounds at the current speed. Grey means the app isn't sure of it, so it isn't used for mixing.
+
 Click **🎛️ Pro Decks** at the top for full manual control:
 
 - Two decks.
@@ -226,6 +233,8 @@ Click **🎛️ Pro Decks** at the top for full manual control:
 Click **✨ Party Console** to return to the simple view.
 
 ---
+
+**AI lights** (header): a 🟢 green or 🔴 red light each for **Ollama** (the local AI, used first) and **Gemini** (the cloud backup). Grey Gemini means no API key is set. Hover a light to see why it's red. The AI DJ works if either is green; with both red, mixing uses the built-in rules.
 
 ## 11. Party-Night Checklist
 

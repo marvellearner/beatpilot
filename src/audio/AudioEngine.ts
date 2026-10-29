@@ -6,6 +6,8 @@ import {
   TransitionConfig,
   QueuedTrack,
   HostSyncState,
+  LiveSyncState,
+  PendingMixInfo,
   TrackMetadata,
   SongHistoryItem,
   FavoriteSong,
@@ -14,6 +16,9 @@ import {
   PlayLogEntry,
 } from '../types';
 import { detectBpmFromBuffer } from './BpmDetector';
+import { detectKey, keyCompatibility, shiftKey } from './KeyDetector';
+import { measureLoudnessDb, loudnessGainDb } from './Loudness';
+import { HOT_CUE_SLOTS, loadHotCues, saveHotCues } from './HotCues';
 import { HighlightDetector } from './HighlightDetector';
 import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
@@ -63,6 +68,9 @@ interface AiOutroPrep {
   mix?: AiMixChoice & { itemId: string; key: string };
 }
 const SONG_LANGUAGES_KEY = 'ai_dj_song_languages'; // the AI DJ's answer per song, so it's asked once
+// Below this, the detected key is too unsure to act on (on 40 cached songs, keys from 0.3 up
+// were stable between the two halves of every song; below it, about half were not)
+const MIN_KEY_CONFIDENCE = 0.3;
 const PLAN_STABLE_SECONDS = 2.5; // stop ramping tempo this close to a planned mix so timing is exact
 // Tempo glide speed for both the pre-mix ramp and the return to natural pitch (0.4% per second)
 const PITCH_RETURN_PER_SECOND = 0.004;
@@ -159,6 +167,7 @@ export class AudioEngine {
   public favorites: FavoriteSong[] = [];
   public bannedSongs: BannedSong[] = [];
   private lastRecordedTrackId: string | null = null;
+  private topBangersCache: { key: string; raw: SongHistoryItem[]; list: SongHistoryItem[] } | null = null;
 
   // A mix waiting for its planned blend point (the song is out of the queue meanwhile)
   private pendingMix: {
@@ -167,7 +176,8 @@ export class AudioEngine {
     durationSeconds?: number;
     timer: number;
     style?: 'blend' | 'cut'; // set by the AI DJ
-    blendBars?: number; // set by the AI DJ
+    blendBars?: number; // set by the AI DJ (or 4 when the keys clash)
+    keyFit?: 'good' | 'ok' | 'clash' | 'unknown';
   } | null = null;
 
   // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
@@ -175,6 +185,11 @@ export class AudioEngine {
   public aiStatus: 'checking' | 'online' | 'offline' = 'checking';
   public aiProvider: 'gemini' | 'ollama' | 'none' = 'none';
   public aiModelName: string = '';
+  // Each AI backend's availability, for the header lights (refreshed every minute)
+  public aiBackends: {
+    ollama: { online: boolean; model: string | null };
+    gemini: { configured: boolean; online: boolean; model: string | null; error: string | null };
+  } | null = null;
   public lastAiDecision: string = '';
   // Disk Cache stats (cache/audio directory on disk)
   public diskCacheCount: number = 0;
@@ -274,8 +289,9 @@ export class AudioEngine {
     this.crossfaderGainB.connect(this.masterBus);
 
     // Initialize Decks
-    this.deckA = new VirtualDeck('A', this.ctx, this.crossfaderGainA);
-    this.deckB = new VirtualDeck('B', this.ctx, this.crossfaderGainB);
+    // Each deck's echo FX goes straight to the master bus, so it rings on after a crossfader cut
+    this.deckA = new VirtualDeck('A', this.ctx, this.crossfaderGainA, this.masterBus);
+    this.deckB = new VirtualDeck('B', this.ctx, this.crossfaderGainB, this.masterBus);
 
     // The rhythm layer joins the master bus directly (independent of the crossfader) and
     // follows whichever song is on air
@@ -343,6 +359,15 @@ export class AudioEngine {
     this.aiStatus = health.online ? 'online' : 'offline';
     this.aiProvider = health.provider || (health.online ? 'ollama' : 'none');
     this.aiModelName = health.model || (health.provider === 'gemini' ? 'Gemini Flash' : 'Qwen 2.5 3B');
+    this.aiBackends = {
+      ollama: { online: Boolean(health.ollama?.online), model: health.ollama?.model ?? null },
+      gemini: {
+        configured: Boolean(health.gemini?.configured),
+        online: Boolean(health.gemini?.online),
+        model: health.gemini?.model ?? null,
+        error: health.gemini?.error ?? null,
+      },
+    };
     this.notify();
   }
 
@@ -998,7 +1023,10 @@ export class AudioEngine {
 
     const outInfo = outTrack ? this.mixSongInfo(outTrack) : null;
     const incInfo = this.mixSongInfo(incoming);
-    const blendBeats = outTrack && this.canBeatmatch(outTrack, incoming) ? this.blendBars() * 4 : 4;
+    const keyFit = outTrack ? this.keyFit(outTrack, outState.playbackRate, incoming) : 'unknown';
+    // Clashing keys: keep the overlap to 4 bars so the harmonies never sit on top of each other long
+    const maxBars = keyFit === 'clash' || keyFit === 'ok' ? 4 : this.blendBars();
+    const blendBeats = outTrack && this.canBeatmatch(outTrack, incoming) ? maxBars * 4 : 4;
     const plan =
       outTrack && outInfo && incInfo
         ? planMix({
@@ -1014,7 +1042,7 @@ export class AudioEngine {
     if (!plan) return this.startQueuedMixNow(item, durationSeconds);
 
     this.queue = this.queue.filter((q) => q.id !== itemId);
-    this.pendingMix = { item, plan, durationSeconds, timer: 0 };
+    this.pendingMix = { item, plan, durationSeconds, timer: 0, keyFit, blendBars: keyFit === 'clash' || keyFit === 'ok' ? 4 : undefined };
     this.schedulePendingMix();
     const startsIn = this.pendingMixStartsIn() ?? 0;
     this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s (following MIXING_RULES.md): ${plan.reason}. Click Mix Now to mix immediately.`;
@@ -1142,6 +1170,7 @@ export class AudioEngine {
       current: { title: outTrack.title, artist: outTrack.artist, bpm: outState.effectiveBpm, position: outState.currentTime, duration: outState.duration },
       next: { title: incoming.title, artist: incoming.artist, bpm: incoming.bpm, keyLocked: item.tempoLockedTo !== undefined },
       canBlend,
+      keyFit: this.keyFit(outTrack, outState.playbackRate, incoming),
       exitOptions: plan.exitOptions.map((o) => ({ inSeconds: (o.time - outState.currentTime) / outState.playbackRate, at: o.time, why: o.why })),
       entryOptions: plan.entryOptions.map((o) => ({ at: o.time, why: o.why })),
     }));
@@ -1153,7 +1182,13 @@ export class AudioEngine {
       sessionBpm: this.sessionBpm,
       current: { title: current.title, artist: current.artist, bpm: current.bpm },
       recentlyPlayed: this.recentTitles.slice(-3),
-      options: ready.map((q) => ({ title: q.title, artist: q.artist, bpm: q.bpm ?? 0, requested: !q.isAiRecommended })),
+      options: ready.map((q) => ({
+        title: q.title,
+        artist: q.artist,
+        bpm: q.bpm ?? 0,
+        requested: !q.isAiRecommended,
+        keyFit: this.keyFit(current, this.onAirDeck().getPlaybackState().playbackRate, this.queuedItemToTrack(q)),
+      })),
     }));
   }
 
@@ -1164,6 +1199,21 @@ export class AudioEngine {
     } finally {
       this.aiMixCalls--;
     }
+  }
+
+  /**
+   * Without the AI: the first ready song, unless its key clashes with the song on air and one of
+   * the next two (not a guest request jumping ahead of it) fits. Guest requests are never skipped.
+   */
+  private keyFriendlyChoice(current: TrackMetadata, ready: QueuedTrack[]): QueuedTrack {
+    const first = ready[0];
+    if (!first.isAiRecommended) return first;
+    const rate = this.onAirDeck().getPlaybackState().playbackRate;
+    if (this.keyFit(current, rate, this.queuedItemToTrack(first)) !== 'clash') return first;
+    const better = ready.slice(1, 3).find((q) => q.isAiRecommended && this.keyFit(current, rate, this.queuedItemToTrack(q)) === 'good');
+    if (!better) return first;
+    this.lastAiDecision = `Next: "${better.title}" — its key fits, "${first.title}" clashes`;
+    return better;
   }
 
   /** Switches a planned mix to the AI DJ's exit/entry points and style, if there's still time. */
@@ -1179,7 +1229,7 @@ export class AudioEngine {
       reason: `🤖 ${choice.reason}`,
     };
     pending.style = choice.style;
-    pending.blendBars = choice.bars;
+    pending.blendBars = pending.keyFit === 'clash' || pending.keyFit === 'ok' ? Math.min(4, choice.bars) : choice.bars;
     this.schedulePendingMix();
 
     const startsIn = Math.round(this.pendingMixStartsIn() ?? 0);
@@ -1197,7 +1247,7 @@ export class AudioEngine {
   private async planOutroMix(current: TrackMetadata) {
     const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer).slice(0, 3);
     if (ready.length === 0) return;
-    let choice = ready[0];
+    let choice = this.keyFriendlyChoice(current, ready);
 
     const prep = this.aiOutroPrep;
     const preparedPick =
@@ -1882,7 +1932,25 @@ export class AudioEngine {
 
   /** Returns top party bangers filtered to never include songs in queue, previously played, or on air. */
   public getTopBangers(): SongHistoryItem[] {
-    return this.rawMostPlayedSongs.filter((song) => !this.isSongInQueueOrPlayed(song));
+    // One pass compares every history song with the queue and play log (~24 ms with a 50-song
+    // history and queue), and the UI and phone sync read this several times a second
+    const raw = this.rawMostPlayedSongs;
+    const key = [
+      raw.length,
+      raw[0]?.id,
+      raw.reduce((sum, h) => sum + (h.playCount || 0), 0),
+      this.queue.map((q) => q.id).join(','),
+      this.playLog.length,
+      this.playLog[0]?.playedAt,
+      this.bannedSongs.length,
+      this.pendingMix?.item.id,
+      this.deckA.getTrack()?.id,
+      this.deckB.getTrack()?.id,
+    ].join('|');
+    if (this.topBangersCache?.key !== key || this.topBangersCache.raw !== raw) {
+      this.topBangersCache = { key, raw, list: raw.filter((song) => !this.isSongInQueueOrPlayed(song)) };
+    }
+    return this.topBangersCache.list;
   }
 
   /** When the song last played within the no-repeat window (ms timestamp), or null. */
@@ -2325,7 +2393,30 @@ export class AudioEngine {
       track.introSkipReason = intro.reason;
     }
 
+    // Key (for harmonic mixing) and loudness (for level matching), ~50 ms
+    if (track.keyConfidence === undefined) {
+      const key = detectKey(track.audioBuffer);
+      track.key = key.camelot;
+      track.keyConfidence = key.confidence;
+    }
+    if (track.loudnessDb === undefined) track.loudnessDb = measureLoudnessDb(track.energyProfile);
+    for (const deck of [this.deckA, this.deckB]) {
+      if (deck.getTrack() === track) deck.setTrimDb(loudnessGainDb(track.loudnessDb));
+    }
+
     this.ensureRhythmPlan(track);
+  }
+
+  /**
+   * How well two songs' keys fit as they'll be heard in the mix: without key lock a deck's speed
+   * shifts its pitch (6 % = a semitone), so the incoming song is judged at its beatmatch rate.
+   */
+  private keyFit(out: TrackMetadata, outRate: number, inc: TrackMetadata): 'good' | 'ok' | 'clash' | 'unknown' {
+    if (!out.key || !inc.key || (out.keyConfidence ?? 0) < MIN_KEY_CONFIDENCE || (inc.keyConfidence ?? 0) < MIN_KEY_CONFIDENCE) return 'unknown';
+    const outConfidence = out.bpmConfidence ?? 0;
+    const incRate = this.computeBeatmatchRate(out.bpm * outRate, outConfidence, inc).rate;
+    const fit = keyCompatibility(shiftKey(out.key, outRate), shiftKey(inc.key, incRate));
+    return fit === null ? 'unknown' : fit >= 1 ? 'good' : fit > 0 ? 'ok' : 'clash';
   }
 
   private copyAnalysisToQueueItem(track: TrackMetadata, item: QueuedTrack) {
@@ -2337,6 +2428,9 @@ export class AudioEngine {
     item.musicStartTime = track.musicStartTime;
     item.introSkipReason = track.introSkipReason;
     item.energyProfile = track.energyProfile;
+    item.key = track.key;
+    item.keyConfidence = track.keyConfidence;
+    item.loudnessDb = track.loudnessDb;
   }
 
   /**
@@ -2465,6 +2559,89 @@ export class AudioEngine {
     } catch {
       // storage unavailable: songs are just asked about again next session
     }
+  }
+
+  // --- Hot cues & beat loops (Pro decks) ---
+
+  private deckById(id: DeckId): VirtualDeck {
+    return id === 'A' ? this.deckA : this.deckB;
+  }
+
+  public getHotCues(deckId: DeckId): Array<number | null> {
+    const track = this.deckById(deckId).getTrack();
+    return track ? loadHotCues(this.songKey(track)) : Array(HOT_CUE_SLOTS).fill(null);
+  }
+
+  /** An empty slot saves the current position (on the nearest beat); a saved one jumps to it. */
+  public hotCue(deckId: DeckId, slot: number) {
+    const deck = this.deckById(deckId);
+    const track = deck.getTrack();
+    if (!track || slot < 0 || slot >= HOT_CUE_SLOTS) return;
+    const cues = loadHotCues(this.songKey(track));
+    const saved = cues[slot];
+    if (saved === null) {
+      const beat = 60 / (track.bpm || 120);
+      const downbeat = track.firstDownbeatTime ?? 0;
+      const position = deck.getCurrentTime();
+      cues[slot] = Math.max(0, Math.min(track.duration - 0.5, downbeat + Math.round((position - downbeat) / beat) * beat));
+      saveHotCues(this.songKey(track), cues);
+    } else {
+      deck.seek(saved);
+      if (deck === this.onAirDeck()) {
+        this.afterSeek();
+        this.saveCurrentTrackToStorage();
+      }
+    }
+    this.notify();
+  }
+
+  public clearHotCue(deckId: DeckId, slot: number) {
+    const track = this.deckById(deckId).getTrack();
+    if (!track) return;
+    const cues = loadHotCues(this.songKey(track));
+    cues[slot] = null;
+    saveHotCues(this.songKey(track), cues);
+    this.notify();
+  }
+
+  /** Bars in the deck's current loop, or 0. */
+  public getLoopBars(deckId: DeckId): number {
+    const deck = this.deckById(deckId);
+    const loop = deck.getLoop();
+    const track = deck.getTrack();
+    if (!loop || !track) return 0;
+    return Math.round((loop.end - loop.start) / ((4 * 60) / (track.bpm || 120)));
+  }
+
+  /**
+   * Loops `bars` bars from the start of the bar playing now (pressing the same length again
+   * leaves the loop). On the song on air it cancels a planned mix: the loop is holding the song.
+   */
+  public toggleBeatLoop(deckId: DeckId, bars: number) {
+    const deck = this.deckById(deckId);
+    const track = deck.getTrack();
+    if (!track) return;
+    const onAir = deck === this.onAirDeck();
+    if (deck.getLoop()) {
+      const same = this.getLoopBars(deckId) === bars;
+      deck.exitLoop();
+      // The clock jumped back by the loop's repeats: re-lock the drums now rather than wait for the song
+      if (onAir) this.rhythm.silence();
+      if (same) {
+        this.notify();
+        return;
+      }
+    }
+    if (!deck.getPlaybackState().isPlaying || (onAir && this.isTransitioning)) return;
+    const bar = (4 * 60) / (track.bpm || 120);
+    const downbeat = track.firstDownbeatTime ?? 0;
+    const start = downbeat + Math.floor((deck.getCurrentTime() - downbeat) / bar) * bar;
+    if (!deck.setLoop(Math.max(0, start), start + bars * bar)) return;
+    if (onAir) {
+      this.cancelPendingMix('Loop on: planned mix cancelled. Leave the loop to carry on.');
+      this.acquisitionStatus = `Looping ${bars} bar${bars > 1 ? 's' : ''} of "${track.title}". Press the loop again to carry on.`;
+    }
+    this.notify();
   }
 
   /** Every rhythm control (laptop UI, phone remote and typed commands) goes through here. */
@@ -2722,9 +2899,7 @@ export class AudioEngine {
       bpmConfidence: item.bpmConfidence,
       firstDownbeatTime: item.firstDownbeatTime,
       audioBuffer: item.audioBuffer,
-      waveformPeaks: item.audioBuffer
-        ? VirtualDeck.extractPeaks(item.audioBuffer, 200)
-        : this.generateSyntheticPeaks(200, 'anthem'),
+      waveformPeaks: this.queuedItemPeaks(item),
       sourceType: 'download',
       url: item.url,
       thumbnail: item.thumbnail,
@@ -2733,11 +2908,24 @@ export class AudioEngine {
       musicStartTime: item.musicStartTime,
       introSkipReason: item.introSkipReason,
       energyProfile: item.energyProfile,
+      key: item.key,
+      keyConfidence: item.keyConfidence,
+      loudnessDb: item.loudnessDb,
       // Tuned to the set tempo: keep the original so the Tempo control can re-time from it
       originalBuffer: item.original ? item.originalBuffer : undefined,
       original: item.original,
       tempoRatio: item.original && item.bpm ? item.bpm / item.original.bpm : undefined,
     };
+  }
+
+  /**
+   * The waveform overview, computed once per song (it scans the whole buffer, ~12 ms) and kept
+   * on the queue item: it's a 200-point outline, so it looks the same at any tempo.
+   */
+  private queuedItemPeaks(item: QueuedTrack): number[] {
+    if (item.waveformPeaks) return item.waveformPeaks;
+    if (!item.audioBuffer) return this.generateSyntheticPeaks(200, 'anthem');
+    return (item.waveformPeaks = VirtualDeck.extractPeaks(item.audioBuffer, 200));
   }
 
   private newQueueId(prefix: string): string {
@@ -3157,6 +3345,14 @@ export class AudioEngine {
     this.crossfaderGainA.gain.setValueCurveAtTime(curveA, startTime, durationSeconds);
     this.crossfaderGainB.gain.setValueCurveAtTime(curveB, startTime, durationSeconds);
 
+    // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
+    // echoes out on its own beat instead of stopping dead
+    const isCut = isSourcePlaying && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01);
+    if (isCut) {
+      sourceDeck.scheduleEchoOut(startTime + durationSeconds / 2, 60 / Math.max(60, sourceBpm));
+      this.acquisitionStatus += ' Echo-out on the old song.';
+    }
+
     // Bass swap: outgoing bass fades out over the first half, incoming bass comes in over the second
     if (config.style === 'bass_swap') {
       const midTime = startTime + durationSeconds / 2;
@@ -3205,47 +3401,63 @@ export class AudioEngine {
     this.notify();
   }
 
+  /** The mix waiting for its blend point, for the UI (cheap: no queue or history copying). */
+  public getPendingMixInfo(): PendingMixInfo | null {
+    const startsIn = this.pendingMixStartsIn();
+    if (!this.pendingMix || startsIn === null) return null;
+    return {
+      id: this.pendingMix.item.id,
+      title: this.pendingMix.item.title,
+      startsInSeconds: Math.max(0, startsIn),
+      entryTime: this.pendingMix.plan.entryTime,
+      reason: this.pendingMix.plan.reason,
+    };
+  }
+
+  /** Everything the phone remote shows (sent when the slow parts change; see getSyncSignature). */
   public getSyncState(): HostSyncState {
-    const curDeck = this.activeDeck === 'A' ? this.deckA : this.deckB;
-    const curState = curDeck.getPlaybackState();
-    // Decoded audio and analysis envelopes are large; keep them out of the 4 Hz WebSocket broadcast
+    const curState = this.onAirDeck().getPlaybackState();
+    // Decoded audio, analysis envelopes and peaks are large; keep them out of the broadcast
     const currentTrack = curState.track
       ? { ...curState.track, audioBuffer: undefined, originalBuffer: undefined, energyProfile: undefined }
       : null;
-    const startsIn = this.pendingMixStartsIn();
-    const pendingMix =
-      this.pendingMix && startsIn !== null
-        ? {
-            id: this.pendingMix.item.id,
-            title: this.pendingMix.item.title,
-            startsInSeconds: Math.max(0, startsIn),
-            entryTime: this.pendingMix.plan.entryTime,
-            reason: this.pendingMix.plan.reason,
-          }
-        : null;
-
     return {
+      ...this.getLiveSyncState(),
       type: 'SYNC_STATE',
-      activeDeck: this.activeDeck,
       currentTrack,
+      queue: this.queue.map((q) => ({
+        ...q,
+        audioBuffer: undefined,
+        originalBuffer: undefined,
+        energyProfile: undefined,
+        waveformPeaks: undefined,
+      })),
+      mostPlayedSongs: this.mostPlayedSongs,
+      favorites: this.favorites,
+      bannedSongs: this.bannedSongs,
+      recentlyPlayed: this.dedupeConsecutivePlayLog(this.playLog).slice(0, 30),
+      introAnalysis: curState.track ? this.introAnalyses.get(curState.track.id) ?? null : null,
+    };
+  }
+
+  /** The parts that change from moment to moment (under 1 KB), sent to the phone several times a second. */
+  public getLiveSyncState(): LiveSyncState {
+    const curState = this.onAirDeck().getPlaybackState();
+    return {
+      type: 'SYNC_LIVE',
+      activeDeck: this.activeDeck,
       isPlaying: curState.isPlaying,
       currentTime: curState.currentTime,
       duration: curState.duration,
       bpm: curState.effectiveBpm,
       crossfader: this.crossfaderPosition,
       rhythm: this.rhythm.getState(),
-      queue: this.queue.map((q) => ({ ...q, audioBuffer: undefined, originalBuffer: undefined, energyProfile: undefined })),
       acquisitionStatus: this.acquisitionStatus,
-      pendingMix,
+      pendingMix: this.getPendingMixInfo(),
       isTransitioning: this.isTransitioning,
       transitionProgress: this.transitionProgress,
       autoCurationEnabled: this.autoCurationEnabled,
       autoCueViralHook: this.autoCueViralHook,
-      mostPlayedSongs: this.mostPlayedSongs,
-      favorites: this.favorites,
-      bannedSongs: this.bannedSongs,
-      recentlyPlayed: this.dedupeConsecutivePlayLog(this.playLog).slice(0, 30),
-      introAnalysis: curState.track ? this.introAnalyses.get(curState.track.id) ?? null : null,
       mood: this.mood,
       eqGains: this.eqGains,
       sessionBpm: this.sessionBpm,
@@ -3253,6 +3465,30 @@ export class AudioEngine {
       lastAiDecision: this.lastAiDecision,
       tempo: this.getTempoInfo(),
     };
+  }
+
+  /**
+   * A cheap fingerprint of the slow parts of the sync state (queue, history, favourites, the
+   * song on air): when it hasn't changed, the host sends only getLiveSyncState().
+   */
+  public getSyncSignature(): string {
+    const track = this.onAirDeck().getTrack();
+    const queue = this.queue
+      .map((q) => `${q.id}:${q.status}:${q.bpm ?? ''}:${q.tempoLockedTo ?? ''}:${q.isDiskCached ? 1 : 0}:${q.lastPlayedAt ?? ''}`)
+      .join(',');
+    return [
+      queue,
+      track ? `${track.id}:${track.bpm}:${track.highlightTime ?? ''}:${track.musicStartTime ?? ''}` : '-',
+      this.playLog.length,
+      this.playLog[0]?.playedAt,
+      this.getTopBangers().length,
+      this.topBangersCache?.key,
+      this.favorites.length,
+      this.favorites[0]?.id,
+      this.bannedSongs.length,
+      this.bannedSongs[0]?.id,
+      track ? (this.introAnalyses.has(track.id) ? 1 : 0) : 0,
+    ].join('|');
   }
 
   // --- History & Favorites Management ---

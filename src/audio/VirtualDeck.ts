@@ -1,6 +1,7 @@
 import { DeckId, TrackMetadata } from '../types';
 import { detectBpmFromBuffer } from './BpmDetector';
 import { IntroSkitDetector } from './IntroSkitDetector';
+import { loudnessGainDb } from './Loudness';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
 // a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.5x).
@@ -16,10 +17,17 @@ export class VirtualDeck {
   private sourceNode: AudioBufferSourceNode | null = null;
   private sourceGain: GainNode | null = null; // per-source fade, used when swapping audio mid-song
   private gainNode: GainNode;
+  private trimNode: GainNode; // loudness matching (see Loudness.ts), before the volume fader
   private lowFilter: BiquadFilterNode;
   private midFilter: BiquadFilterNode;
   private highFilter: BiquadFilterNode;
   public analyserNode: AnalyserNode;
+  // Echo-out FX (used on cuts): post-fader send -> delay (with feedback) -> high-pass -> master.
+  // It goes to the master bus, not through the crossfader, so the echo tail rings on after the cut.
+  private fxSend: GainNode;
+  private fxDelay: DelayNode;
+  private fxFeedback: GainNode;
+  private fxFilter: BiquadFilterNode;
 
   // Playback State
   private track: TrackMetadata | null = null;
@@ -35,11 +43,13 @@ export class VirtualDeck {
   // Time tracking
   private startedAt: number = 0;
   private pausedAt: number = 0;
+  // A beat loop on the playing source (song seconds); cleared by any new source, pause or seek
+  private loop: { start: number; end: number } | null = null;
 
   // Callback on playback state change
   public onStateUpdate?: () => void;
 
-  constructor(id: DeckId, ctx: AudioContext, destinationNode: AudioNode) {
+  constructor(id: DeckId, ctx: AudioContext, destinationNode: AudioNode, fxDestination?: AudioNode) {
     this.id = id;
     this.ctx = ctx;
 
@@ -63,7 +73,8 @@ export class VirtualDeck {
     this.highFilter.frequency.value = 3500;
     this.highFilter.gain.value = 0;
 
-    // Gain (Volume) Node
+    // Loudness trim, then the volume fader
+    this.trimNode = this.ctx.createGain();
     this.gainNode = this.ctx.createGain();
     this.gainNode.gain.value = this.volume;
 
@@ -74,9 +85,55 @@ export class VirtualDeck {
     // Chain: Filters -> Gain -> Analyser -> Output Bus
     this.lowFilter.connect(this.midFilter);
     this.midFilter.connect(this.highFilter);
-    this.highFilter.connect(this.gainNode);
+    this.highFilter.connect(this.trimNode);
+    this.trimNode.connect(this.gainNode);
     this.gainNode.connect(this.analyserNode);
     this.analyserNode.connect(destinationNode);
+
+    this.fxSend = this.ctx.createGain();
+    this.fxSend.gain.value = 0;
+    this.fxDelay = this.ctx.createDelay(2);
+    this.fxFeedback = this.ctx.createGain();
+    this.fxFeedback.gain.value = 0;
+    this.fxFilter = this.ctx.createBiquadFilter();
+    this.fxFilter.type = 'highpass';
+    this.fxFilter.frequency.value = 300;
+    this.gainNode.connect(this.fxSend);
+    this.fxSend.connect(this.fxDelay);
+    this.fxDelay.connect(this.fxFeedback);
+    this.fxFeedback.connect(this.fxDelay);
+    this.fxDelay.connect(this.fxFilter);
+    this.fxFilter.connect(fxDestination ?? destinationNode);
+  }
+
+  /**
+   * Echo-out for a cut at `cutTime` (audio clock): the last beat before the cut feeds a
+   * dotted-8th echo whose repeats rise through a high-pass sweep and fade over ~3 s, so the
+   * outgoing song trails off on its own rhythm instead of stopping dead.
+   */
+  public scheduleEchoOut(cutTime: number, beatSeconds: number) {
+    const now = this.ctx.currentTime;
+    const beat = Math.max(0.2, Math.min(1, beatSeconds));
+    const feedStart = Math.max(now, cutTime - beat);
+    const tail = 3;
+    const send = this.fxSend.gain;
+    const feedback = this.fxFeedback.gain;
+    const cutoff = this.fxFilter.frequency;
+    for (const p of [send, feedback, cutoff]) p.cancelScheduledValues(now);
+
+    this.fxDelay.delayTime.setValueAtTime(Math.min(1.9, beat * 0.75), now);
+    // Feed the echo during the last beat before the cut, then close the send
+    send.setValueAtTime(0, feedStart);
+    send.linearRampToValueAtTime(0.7, feedStart + 0.05);
+    send.setValueAtTime(0.7, cutTime);
+    send.linearRampToValueAtTime(0, cutTime + 0.1);
+    // Repeats fade out over the tail
+    feedback.setValueAtTime(0.5, feedStart);
+    feedback.setValueAtTime(0.5, cutTime);
+    feedback.linearRampToValueAtTime(0, cutTime + tail);
+    // High-pass sweep: the echo thins out as it fades, leaving room for the new song's bass
+    cutoff.setValueAtTime(300, feedStart);
+    cutoff.exponentialRampToValueAtTime(3000, cutTime + tail);
   }
 
   public async loadAudioFile(file: File): Promise<TrackMetadata> {
@@ -123,7 +180,17 @@ export class VirtualDeck {
     // A new song starts at its natural tempo/pitch
     this.playbackRate = 1.0;
     this.rateIsAutomatic = false;
+    this.setTrimDb(metadata.loudnessDb !== undefined ? loudnessGainDb(metadata.loudnessDb) : 0, true);
     this.notifyUpdate();
+  }
+
+  /** Loudness trim in dB; glides over half a second unless `instant` (a song being loaded). */
+  public setTrimDb(db: number, instant = false) {
+    const gain = Math.pow(10, db / 20);
+    const param = this.trimNode.gain;
+    param.cancelScheduledValues(this.ctx.currentTime);
+    if (instant) param.setValueAtTime(gain, this.ctx.currentTime);
+    else param.setTargetAtTime(gain, this.ctx.currentTime, 0.15);
   }
 
   /** @param when AudioContext time to start at (used to land the first beat on the other deck's beat) */
@@ -159,6 +226,7 @@ export class VirtualDeck {
     this.sourceNode.buffer = buffer;
     this.sourceNode.playbackRate.value = this.playbackRate;
     this.sourceNode.loop = true; // Loop for continuous DJ mixing
+    this.loop = null; // a new source starts without a beat loop
 
     this.sourceGain = this.ctx.createGain();
     if (fadeIn) {
@@ -203,6 +271,7 @@ export class VirtualDeck {
   public pause() {
     if (!this.isPlaying) return;
     this.pausedAt = this.getCurrentTime();
+    this.loop = null;
     this.stopSource();
     this.isPlaying = false;
     this.notifyUpdate();
@@ -297,11 +366,44 @@ export class VirtualDeck {
     this.notifyUpdate();
   }
 
+  /**
+   * Loops [start, end) (song seconds, normally whole bars) on the playing source. The clock keeps
+   * counting through the loop, so anything locked to this song's beat grid stays on the beat.
+   */
+  public setLoop(start: number, end: number): boolean {
+    if (!this.isPlaying || !this.sourceNode || !this.track || end <= start || end > this.track.duration) return false;
+    this.sourceNode.loopStart = start;
+    this.sourceNode.loopEnd = end;
+    this.loop = { start, end };
+    this.notifyUpdate();
+    return true;
+  }
+
+  /** Leaves the loop and plays on from where the loop is now. */
+  public exitLoop() {
+    if (!this.loop) return;
+    const position = this.getCurrentTime();
+    if (this.sourceNode) {
+      this.sourceNode.loopStart = 0;
+      this.sourceNode.loopEnd = 0; // back to looping the whole buffer (the default)
+    }
+    this.loop = null;
+    this.startedAt = this.ctx.currentTime - position / this.playbackRate;
+    this.notifyUpdate();
+  }
+
+  public getLoop(): { start: number; end: number } | null {
+    return this.loop;
+  }
+
   public getCurrentTime(): number {
     if (!this.track) return 0;
     if (this.isPlaying) {
       // Clamped at 0 while a scheduled start is still in the future
       const elapsed = Math.max(0, (this.ctx.currentTime - this.startedAt) * this.playbackRate);
+      if (this.loop && elapsed > this.loop.end) {
+        return this.loop.start + ((elapsed - this.loop.start) % (this.loop.end - this.loop.start));
+      }
       return elapsed % this.track.duration;
     }
     return this.pausedAt;

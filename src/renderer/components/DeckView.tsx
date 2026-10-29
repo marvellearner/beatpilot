@@ -1,5 +1,7 @@
 import React, { useRef } from 'react';
 import { VirtualDeck } from '../../audio/VirtualDeck';
+import type { AudioEngine } from '../../audio/AudioEngine';
+import { shiftKey } from '../../audio/KeyDetector';
 import { DeckId } from '../../types';
 import { WaveformCanvas } from './WaveformCanvas';
 import { Play, Pause, FolderPlus, Disc3, RotateCcw, Square } from 'lucide-react';
@@ -7,12 +9,21 @@ import { Play, Pause, FolderPlus, Disc3, RotateCcw, Square } from 'lucide-react'
 interface DeckViewProps {
   deck: VirtualDeck;
   deckId: DeckId;
+  engine: AudioEngine; // hot cues and loops go through the engine (it re-syncs the mix and drums)
 }
 
-export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
+const LOOP_BARS = [1, 2, 4];
+
+export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const state = deck.getPlaybackState();
   const track = state.track;
+
+  // The key as heard: without key lock, speed shifts pitch (6 % = a semitone)
+  const heardKey = track?.key ? shiftKey(track.key, state.playbackRate) : null;
+  const keySure = (track?.keyConfidence ?? 0) >= 0.3;
+  const hotCues = engine.getHotCues(deckId);
+  const loopBars = engine.getLoopBars(deckId);
 
   const isA = deckId === 'A';
   const primaryColor = isA ? '#00f2fe' : '#ff8c00';
@@ -123,8 +134,15 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
         </div>
         <div>
           <div className="text-[10px] text-slate-400">KEY</div>
-          <div className="text-base font-bold text-cyan-400">
-            {track?.key || '8A'}
+          <div
+            className={`text-base font-bold ${keySure ? 'text-cyan-400' : 'text-slate-500'}`}
+            title={
+              heardKey
+                ? `${keySure ? 'Detected key' : 'Uncertain key (not used for mixing)'}${heardKey !== track?.key ? `; ${track?.key} at normal speed` : ''}`
+                : 'Key not detected yet'
+            }
+          >
+            {heardKey ?? '—'}
           </div>
         </div>
         <div>
@@ -138,6 +156,56 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId }) => {
           <div className="text-sm font-semibold text-slate-400">
             -{formatTime(Math.max(0, state.duration - state.currentTime))}
           </div>
+        </div>
+      </div>
+
+      {/* Hot cues (tap an empty pad to save the spot, tap a saved one to jump) & beat loops */}
+      <div id={`deck-${deckId.toLowerCase()}-cues`} className="flex items-center gap-1.5">
+        {hotCues.map((cue, slot) => (
+          <div key={slot} className="relative flex-1">
+            <button
+              id={`deck-${deckId.toLowerCase()}-cue-${slot + 1}`}
+              onClick={() => engine.hotCue(deckId, slot)}
+              disabled={!track}
+              className={`w-full py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all disabled:opacity-40 ${
+                cue !== null
+                  ? isA
+                    ? 'bg-cyan-500/25 border-cyan-400/60 text-cyan-100'
+                    : 'bg-amber-500/25 border-amber-400/60 text-amber-100'
+                  : 'bg-white/5 border-white/10 text-slate-500 hover:text-slate-300'
+              }`}
+              title={cue !== null ? `Jump to ${formatTime(cue)}` : 'Save the current spot (on the beat)'}
+            >
+              {cue !== null ? `${slot + 1} · ${formatTime(cue)}` : `${slot + 1} · Set`}
+            </button>
+            {cue !== null && (
+              <button
+                onClick={() => engine.clearHotCue(deckId, slot)}
+                className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-black border border-white/20 text-[9px] leading-none text-slate-300 hover:text-red-300"
+                aria-label={`Clear hot cue ${slot + 1}`}
+                title="Clear"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+        <div className="flex items-center gap-1 pl-1.5 border-l border-white/10">
+          {LOOP_BARS.map((bars) => (
+            <button
+              key={bars}
+              id={`deck-${deckId.toLowerCase()}-loop-${bars}`}
+              onClick={() => engine.toggleBeatLoop(deckId, bars)}
+              disabled={!state.isPlaying}
+              className={`px-2 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all disabled:opacity-40 ${
+                loopBars === bars ? 'bg-emerald-500/30 border-emerald-400 text-emerald-100 animate-pulse' : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+              }`}
+              title={loopBars === bars ? 'Leave the loop' : `Loop ${bars} bar${bars > 1 ? 's' : ''} from the current bar`}
+              aria-pressed={loopBars === bars}
+            >
+              ⟲{bars}
+            </button>
+          ))}
         </div>
       </div>
 

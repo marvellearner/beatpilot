@@ -25,6 +25,12 @@
 - Avoid overlapping melodies that create noticeable dissonance.
 - Treat harmonic compatibility as a guideline, not a strict rule.
 
+**In this app** (`src/audio/KeyDetector.ts`): each song's key comes from a chroma profile (120 spectra across the song) matched to KeyFinder's key profiles, in Camelot notation. Tested on 40 cached songs: at a confidence of 0.3 or more (19 songs), the key from the first half and second half of every song agreed; below that, results weren't stable, so **the app only uses keys from 0.3 up** and ignores the rest. Two of three songs with published keys came out as a compatible neighbour (Despacito: relative major; Titanium: one step), one was off (Blinding Lights), so the key is a guideline:
+- Keys are compared **as heard**: without key lock a deck's speed shifts pitch (6 % ≈ one semitone), so the incoming song is judged at its beatmatch speed.
+- **Compatible** (same, ±1 on the wheel, or relative major/minor): the mood's normal blend length.
+- **Two steps apart, or clashing:** the blend is kept to **4 bars**, and the AI DJ is told to prefer a cut or a short blend.
+- **Next song:** the AI DJ sees which ready songs' keys fit. Without the AI, if the next song clashes and one of the two after it fits, that one plays first (guest requests are never skipped).
+
 ## 5. Avoid Bass Clashes
 - Avoid playing two strong kick drums and basslines together for too long.
 - Reduce the incoming track's bass during the initial transition.
@@ -51,6 +57,8 @@
 - Reduce or remove the outgoing vocals before introducing prominent vocals from the incoming track.
 - Consider vocal separation when an instrumental transition is needed.
 
+**In this app** (`planMix` in `src/audio/MixPointPlanner.ts`): each candidate exit and entry gets a vocal-activity value: the 300 Hz–3 kHz band's share of the loudness over the blend window, relative to the song's own average share (so a loud chorus without singing doesn't count). The exit and entry are chosen **as a pair**, and pairs where both sides sing lose 3 points (an 8-bar phrase start is worth 1). On 24 real song pairs this halved the blends with two vocals at once (10 → 5) while giving up 0.08 points of phrase/energy score on average; the remaining 5 had vocals in every candidate window. The status line says *"chosen so the two vocals don't overlap"* when it made a difference. This is a vocal/lead *proxy* from the frequency band, not true vocal separation.
+
 ## 9. Choose the Right Entry and Exit Points
 - **Never start from the hook because buildup is also important:** Incoming and first songs must build up naturally from where the music begins (skipping initial dialogue/conversation skits). Do not jump straight into the hook or chorus drop.
 - Identify suitable intro, outro, breakdown, and instrumental sections.
@@ -64,6 +72,10 @@
 - Prevent clipping and distortion at the master output.
 - Maintain a consistent listening level throughout the transition.
 - Do not rely on the master volume alone to fix an unbalanced mix.
+
+**In this app** (`src/audio/Loudness.ts`): each song's loudness is the RMS level of its loud parts (75th percentile of its 0.1 s frames). On 40 cached songs it tracked the EBU R128 meter (LUFS) with a correlation of 0.89. Every deck has a trim stage before its volume fader that brings the song to the library median (−9.5 dB, about −8.3 LUFS): at most +4 dB of boost (more would just drive the limiter) and −6 dB of cut. It is set when a song loads and glides in over half a second if the song is analysed later.
+
+**Cuts:** when two songs can't be beatmatched (or the AI DJ chooses a cut), the outgoing song **echoes out**: its last beat feeds a dotted-eighth echo at its own tempo, the repeats fade over about 3 s through a high-pass sweep (300 Hz → 3 kHz) so they thin out under the new song's bass. The echo goes straight to the master bus, so it rings on after the crossfader has cut the dry signal.
 
 ---
 

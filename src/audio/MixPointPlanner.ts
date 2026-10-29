@@ -9,6 +9,9 @@
  * with a calm, vocal-light intro, timed so the energy rise (drop / hook) lands right
  * when the blend finishes.
  *
+ * Pair: the exit and the entry are chosen together, so the stretches that overlap in the blend
+ * don't both carry vocals (two singers at once is the clearest sign of a bad mix).
+ *
  * All times are in each song's own seconds. Rules: DJ_KNOWLEDGE_AND_MIXING_RULES.md §5, §7.
  */
 
@@ -31,6 +34,25 @@ export interface MixOption {
   time: number;
   why: string;
   score: number;
+  vocals?: number; // 0 = instrumental, 1 = vocal-heavy, over the blend window (see vocalActivity)
+}
+
+// Pairs where both songs sing during the blend lose this much (an 8-bar phrase start is worth 1).
+// On 24 real song pairs it halved the blends with two vocals at once (10 -> 5); higher removed
+// no more (the rest had vocals in every candidate window) and cost more phrase/energy score.
+const VOCAL_OVERLAP_PENALTY = 3;
+
+/**
+ * Vocal activity over [from, to]: the 300 Hz–3 kHz band's share of the loudness there, relative
+ * to the song's own average share, mapped to 0 (clearly below: instrumental, breakdown, drums)
+ * … 1 (well above: vocals or a lead on top). Relative to the song's share rather than its level,
+ * so a loud chorus without singing doesn't count as vocal.
+ */
+function vocalActivity(profile: EnergyProfile, from: number, to: number, songShare: number): number {
+  const full = average(profile.full, profile.rate, from, to);
+  if (full <= 0) return 0;
+  const share = average(profile.mid, profile.rate, from, to) / full / (songShare || 1);
+  return Math.max(0, Math.min(1, (share - 0.85) / 0.35));
 }
 
 export interface MixPlan {
@@ -129,6 +151,7 @@ export function planMix(params: {
   // --- Exit point in the outgoing song ---
   const outMean = songMean(out.profile.full) || 1;
   const outMidMean = songMean(out.profile.mid) || 1;
+  const outShare = outMidMean / outMean;
   const exitLatest = Math.min(outPosition + params.lookAheadSeconds, out.duration - outBlend - 0.5);
   const exits = barStarts(out, outPosition + params.minLeadSeconds, exitLatest);
   if (exits.length === 0) return null;
@@ -165,12 +188,13 @@ export function planMix(params: {
           : phraseBonus(candidate.index) > 0
             ? 'start of a 4-bar phrase'
             : 'bar boundary') + (vocals > 1.2 ? ', vocal-heavy' : vocals < 0.8 ? ', few vocals' : '');
-    exitOptions.push({ time: t, why, score });
+    exitOptions.push({ time: t, why, score, vocals: vocalActivity(out.profile, t, t + outBlend, outShare) });
   }
 
   // --- Entry point in the incoming song ---
   const incMean = songMean(inc.profile.full) || 1;
   const incMidMean = songMean(inc.profile.mid) || 1;
+  const incShare = incMidMean / incMean;
   const minEntry = inc.musicStartTime && inc.musicStartTime > 0 ? inc.musicStartTime : 0;
   // Never start from hook because build up is also important!
   // Entry point must stay within the intro/build-up (first 4-8 bars of music start)
@@ -201,16 +225,29 @@ export function planMix(params: {
         : dropAtEnd > 0.3
           ? 'on an intro rise'
           : 'on a phrase start (intro build-up)';
-    entryOptions.push({ time: e, why, score });
+    entryOptions.push({ time: e, why, score, vocals: vocalActivity(inc.profile, e, e + incBlend, incShare) });
   }
   if (entryOptions.length === 0) entryOptions.push({ time: minEntry, why: 'from the music start (full build-up)', score: 0 });
 
-  const bestExits = topOptions(exitOptions, 3);
-  const bestEntries = topOptions(entryOptions, 3);
+  // Best pair: each side's own score, minus the penalty when both sing during the blend
+  let best = { exit: exitOptions[0], entry: entryOptions[0], total: -Infinity };
+  for (const x of exitOptions) {
+    for (const n of entryOptions) {
+      const total = x.score + n.score - VOCAL_OVERLAP_PENALTY * (x.vocals ?? 0) * (n.vocals ?? 0);
+      if (total > best.total) best = { exit: x, entry: n, total };
+    }
+  }
+  // The chosen pair first, then the best alternatives (for the AI DJ to choose from)
+  const withFirst = (first: MixOption, all: MixOption[]) => [first, ...topOptions(all.filter((o) => o !== first), 2)];
+  const bestExits = withFirst(best.exit, exitOptions);
+  const bestEntries = withFirst(best.entry, entryOptions);
+  const naive = (topOptions(exitOptions, 1)[0].vocals ?? 0) * (topOptions(entryOptions, 1)[0].vocals ?? 0);
+  const overlap = (best.exit.vocals ?? 0) * (best.entry.vocals ?? 0);
+  const vocalNote = naive > 0.25 && overlap < naive ? '; chosen so the two vocals don\'t overlap' : '';
   return {
-    exitTime: bestExits[0].time,
-    entryTime: bestEntries[0].time,
-    reason: `${bestExits[0].why}; new song enters ${bestEntries[0].why}`,
+    exitTime: best.exit.time,
+    entryTime: best.entry.time,
+    reason: `${best.exit.why}; new song enters ${best.entry.why}${vocalNote}`,
     exitOptions: bestExits,
     entryOptions: bestEntries,
   };

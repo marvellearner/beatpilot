@@ -114,6 +114,30 @@ function getGeminiConfig(): GeminiConfig | null {
   return { apiKey, model };
 }
 
+// Whether Gemini answers with this key and model: a models.get call (no tokens used), cached
+// so the once-a-minute health checks don't call Google every time
+let geminiCheck: { key: string; at: number; online: boolean; error?: string } | null = null;
+const GEMINI_CHECK_TTL_MS = 5 * 60_000;
+
+async function checkGemini(cfg: GeminiConfig): Promise<{ online: boolean; error?: string }> {
+  const key = `${cfg.model}|${cfg.apiKey.slice(-6)}`;
+  if (geminiCheck && geminiCheck.key === key && Date.now() - geminiCheck.at < GEMINI_CHECK_TTL_MS) return geminiCheck;
+  let online = false;
+  let error: string | undefined;
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}?key=${encodeURIComponent(cfg.apiKey)}`,
+      { signal: AbortSignal.timeout(3000) }
+    );
+    online = resp.ok;
+    if (!resp.ok) error = resp.status === 400 || resp.status === 403 ? 'API key rejected' : resp.status === 404 ? `model ${cfg.model} not found` : `HTTP ${resp.status}`;
+  } catch (err) {
+    error = (err as Error)?.name === 'TimeoutError' ? 'no response (offline?)' : 'unreachable (offline?)';
+  }
+  geminiCheck = { key, at: Date.now(), online, error };
+  return geminiCheck;
+}
+
 /** One JSON-mode completion from Google Gemini API (cloud backup, ~300ms latency). */
 async function geminiGenerate(prompt: string, maxTokens: number, timeoutMs: number): Promise<string> {
   const cfg = getGeminiConfig();
@@ -258,7 +282,7 @@ export function aiDjApiPlugin(): Plugin {
   let host: WebSocket | null = null;
   const standbyHosts: WebSocket[] = [];
   const remotes = new Set<WebSocket>();
-  let lastHostState: string | null = null; // sent to a phone as soon as it connects
+  let lastHostState: Record<string, unknown> | null = null; // sent to a phone as soon as it connects
   const alive = new WeakMap<WebSocket, boolean>();
 
   const send = (ws: WebSocket, msg: string | object) => {
@@ -325,7 +349,13 @@ export function aiDjApiPlugin(): Plugin {
             }
           } else if (data.type === 'SYNC_STATE') {
             if (ws === host) {
-              lastHostState = text;
+              lastHostState = data as Record<string, unknown>;
+              sendToRemotes(text);
+            }
+          } else if (data.type === 'SYNC_LIVE') {
+            // The small, frequent part: merge it so a phone that connects now gets a complete, current state
+            if (ws === host) {
+              if (lastHostState) Object.assign(lastHostState, data, { type: 'SYNC_STATE' });
               sendToRemotes(text);
             }
           } else if (data.type?.startsWith('CMD_')) {
@@ -650,10 +680,12 @@ export function aiDjApiPlugin(): Plugin {
             ollamaOnline = false;
           }
 
-          const hasAny = Boolean(ollamaOnline || geminiCfg);
+          const gemini = geminiCfg ? await checkGemini(geminiCfg) : null;
+          const geminiOnline = Boolean(gemini?.online);
+          const hasAny = ollamaOnline || geminiOnline;
           // 1st preference: Local Ollama. 2nd preference: Google Gemini cloud backup.
-          const activeProvider = ollamaOnline ? 'ollama' : geminiCfg ? 'gemini' : 'none';
-          const activeModel = ollamaOnline ? OLLAMA_MODEL : geminiCfg ? geminiCfg.model : null;
+          const activeProvider = ollamaOnline ? 'ollama' : geminiOnline ? 'gemini' : 'none';
+          const activeModel = ollamaOnline ? OLLAMA_MODEL : geminiOnline ? geminiCfg!.model : null;
 
           res.end(
             JSON.stringify({
@@ -666,7 +698,9 @@ export function aiDjApiPlugin(): Plugin {
               },
               gemini: {
                 configured: Boolean(geminiCfg),
+                online: geminiOnline,
                 model: geminiCfg?.model || null,
+                error: gemini?.error ?? null,
               },
               ollama: {
                 online: ollamaOnline,
@@ -1100,6 +1134,44 @@ Badshah - Kar Gayi Chull
             }
             return;
           }
+        }
+
+        // 7. System & RAM Usage Telemetry (GET /api/system/memory)
+        if (url.pathname === '/api/system/memory') {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const total = os.totalmem();
+            const free = os.freemem();
+            const used = total - free;
+            const percent = total > 0 ? Math.round((used / total) * 100) : 0;
+            const proc = process.memoryUsage();
+
+            res.end(
+              JSON.stringify({
+                system: {
+                  totalBytes: total,
+                  freeBytes: free,
+                  usedBytes: used,
+                  usedPercent: percent,
+                  totalGb: (total / (1024 ** 3)).toFixed(1),
+                  usedGb: (used / (1024 ** 3)).toFixed(1),
+                  freeGb: (free / (1024 ** 3)).toFixed(1),
+                },
+                process: {
+                  rssBytes: proc.rss,
+                  rssMb: (proc.rss / (1024 ** 2)).toFixed(0),
+                  heapUsedMb: (proc.heapUsed / (1024 ** 2)).toFixed(0),
+                  heapTotalMb: (proc.heapTotal / (1024 ** 2)).toFixed(0),
+                },
+                timestamp: Date.now(),
+              })
+            );
+          } catch (err) {
+            console.error('Error fetching system memory:', err);
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: 'Failed to read memory' }));
+          }
+          return;
         }
 
         next();

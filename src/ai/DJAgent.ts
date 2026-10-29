@@ -17,7 +17,7 @@ export interface AgentHealthStatus {
   online: boolean;
   provider?: 'gemini' | 'ollama' | 'none';
   model?: string | null;
-  gemini?: { configured: boolean; model: string | null };
+  gemini?: { configured: boolean; online?: boolean; model: string | null; error?: string | null };
   ollama?: { online: boolean; model: string | null };
 }
 
@@ -28,16 +28,24 @@ export interface MixDecisionContext {
   current: { title: string; artist: string; bpm: number; position: number; duration: number };
   next: { title: string; artist: string; bpm: number; keyLocked: boolean };
   canBlend: boolean; // false when tempos are too far apart: only a cut is allowed
+  keyFit: 'good' | 'ok' | 'clash' | 'unknown'; // harmonic fit of the two songs as they'll be heard
   exitOptions: Array<{ inSeconds: number; at: number; why: string }>;
   entryOptions: Array<{ at: number; why: string }>;
 }
+
+const KEY_FIT_LINE: Record<MixDecisionContext['keyFit'], string> = {
+  good: 'KEYS: the two songs are in compatible keys, so a long blend sounds good.\n',
+  ok: 'KEYS: the keys are close; keep a blend short (4 bars).\n',
+  clash: 'KEYS: the keys clash; prefer a "cut" or a 4-bar blend so the harmonies never overlap long.\n',
+  unknown: '',
+};
 
 export interface NextSongContext {
   mood: string;
   sessionBpm: number | null;
   current: { title: string; artist: string; bpm: number };
   recentlyPlayed: string[];
-  options: Array<{ title: string; artist: string; bpm: number; requested: boolean }>;
+  options: Array<{ title: string; artist: string; bpm: number; requested: boolean; keyFit: 'good' | 'ok' | 'clash' | 'unknown' }>;
 }
 
 const MixDecisionSchema = z.object({
@@ -156,7 +164,7 @@ export class DJAgent {
     const prompt = `You are an expert ${ctx.mood} DJ deciding how to mix into the next song.
 NOW PLAYING: "${ctx.current.title}" by ${ctx.current.artist}, ${Math.round(ctx.current.bpm)} BPM, at ${formatTime(ctx.current.position)} of ${formatTime(ctx.current.duration)}.
 NEXT SONG: "${ctx.next.title}" by ${ctx.next.artist}, ${Math.round(ctx.next.bpm)} BPM${ctx.next.keyLocked ? ' (tempo-matched, key-locked)' : ''}.
-${ctx.sessionBpm ? `The whole set is locked to ${ctx.sessionBpm} BPM for dancing.\n` : ''}WHERE TO START MIXING OUT OF THE CURRENT SONG:
+${ctx.sessionBpm ? `The whole set is locked to ${ctx.sessionBpm} BPM for dancing.\n` : ''}${KEY_FIT_LINE[ctx.keyFit]}WHERE TO START MIXING OUT OF THE CURRENT SONG:
 ${ctx.exitOptions.map((o, i) => `${i + 1}) in ${Math.round(o.inSeconds)}s at ${formatTime(o.at)}: ${o.why}`).join('\n')}
 WHERE THE NEXT SONG STARTS:
 ${ctx.entryOptions.map((o, i) => `${i + 1}) at ${formatTime(o.at)}: ${o.why}`).join('\n')}
@@ -194,8 +202,8 @@ Reply ONLY with JSON: {"language": "..."}`;
 NOW PLAYING: "${ctx.current.title}" by ${ctx.current.artist}, ${Math.round(ctx.current.bpm)} BPM.
 RECENTLY PLAYED: ${ctx.recentlyPlayed.length ? ctx.recentlyPlayed.map((t) => `"${t}"`).join(', ') : 'none'}.
 ${ctx.sessionBpm ? `The set is locked to ${ctx.sessionBpm} BPM.\n` : ''}READY SONGS:
-${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round(o.bpm)} BPM${o.requested ? ' (requested by a guest)' : ''}`).join('\n')}
-Consider energy flow, genre and language continuity, and the mood. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
+${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round(o.bpm)} BPM${o.keyFit === 'good' ? ', key fits' : o.keyFit === 'clash' ? ', key clashes' : ''}${o.requested ? ' (requested by a guest)' : ''}`).join('\n')}
+Consider energy flow, genre and language continuity, and the mood. Prefer songs whose key fits; avoid a key clash unless it's a guest request. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
 Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
 
     const res = await this.askJson(prompt, 40, 12_000);

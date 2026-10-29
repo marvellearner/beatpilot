@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AudioEngine } from '../../audio/AudioEngine';
 import { RhythmPanel } from './RhythmPanel';
 import { MoodEqPanel } from './MoodEqPanel';
@@ -120,7 +120,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
   const playbackState = activeDeck.getPlaybackState();
   const currentTrack = playbackState.track;
   const isPlaying = playbackState.isPlaying;
-  const pendingMix = engine.getSyncState().pendingMix;
+  const pendingMix = engine.getPendingMixInfo();
 
   // Now Playing card
   const duration = playbackState.duration || 0;
@@ -223,6 +223,592 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued'}: "${displayTitle}"`);
     await engine.acquireTrack(targetQuery, autoMix, 'back', 'request', autoMix);
   };
+
+  // The queue / history / favourites column is the biggest part of the page and changes far less
+  // often than the player above it, which re-renders several times a second. It is rebuilt only
+  // when its own data changes (getSyncSignature covers the queue, history, favourites and bans).
+  const rightColumnKey = engine.getSyncSignature();
+  const rightColumn = useMemo(
+    () => (
+      <>
+          {/* Right Column (27.5% width): Up Next Party Queue + Previously Played + Most Played Bangers */}
+          <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
+            {/* Up Next Party Queue & Instant Song Search */}
+            <div id="party-console-queue" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl flex flex-col gap-2">
+              <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
+                <div className="flex items-center gap-1.5">
+                  <Music className="w-3.5 h-3.5 text-cyan-400" />
+                  <h3 className="font-extrabold text-xs text-white">
+                    UP NEXT QUEUE ({engine.queue.length})
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {engine.diskCacheCount > 0 && (
+                    <span
+                      className="text-[9px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 rounded flex items-center gap-1"
+                      title={`Audio saved to disk at cache/audio: ${engine.diskCacheCount} songs (~${engine.diskCacheMb} MB)`}
+                    >
+                      💾 {engine.diskCacheCount} on disk
+                    </span>
+                  )}
+                  <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-400">
+                    <Radio className="w-2.5 h-2.5 animate-pulse" />
+                    <span>Auto-Mix</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Easy Song Request Input with Matching Songs Dropdown */}
+              <div ref={searchContainerRef} className="relative z-30">
+                <form id="party-console-song-request-form" onSubmit={(e) => handleSearchSubmit(e, false)} className="flex gap-1.5">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search song name or YouTube link..."
+                      value={searchQuery}
+                      onFocus={() => {
+                        if (searchQuery.trim().length >= 2) setIsDropdownOpen(true);
+                      }}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full pl-8 pr-12 py-1.5 bg-black/50 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 transition-colors"
+                    />
+                    {isSearching && (
+                      <Loader2 className="w-3.5 h-3.5 absolute right-6 top-1/2 -translate-y-1/2 text-cyan-400 animate-spin" />
+                    )}
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setSearchResults([]);
+                          setIsDropdownOpen(false);
+                        }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white p-0.5 rounded transition-colors"
+                        title="Clear search"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={!searchQuery.trim()}
+                    className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
+                    title="Queue at back"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <span>Queue</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => handleSearchSubmit(e, true)}
+                    disabled={!searchQuery.trim()}
+                    className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-orange-500/20"
+                    title="Search & Play: AI reads mood and pushes top 5 matching songs to top of queue"
+                  >
+                    <Play className="w-3 h-3 fill-current" />
+                    <span>Play & Sync Mood</span>
+                  </button>
+                </form>
+
+                {/* Matching Songs Dropdown */}
+                {isDropdownOpen && searchQuery.trim().length >= 2 && (
+                  <div
+                    id="party-console-search-dropdown"
+                    className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[360px] overflow-y-auto animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
+                  >
+                    <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
+                      <span className="flex items-center gap-1.5 font-bold text-cyan-300">
+                        <Sparkles className="w-3 h-3 text-cyan-400" />
+                        MATCHING SONGS {searchResults.length > 0 ? `(${searchResults.length})` : ''}
+                      </span>
+                      <span className="text-[9px] text-slate-400">Click row or button to add</span>
+                    </div>
+
+                    {isSearching && searchResults.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-7 text-xs text-slate-400">
+                        <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+                        <span>Searching song catalog...</span>
+                      </div>
+                    ) : searchResults.length === 0 ? (
+                      <div className="py-6 text-center text-xs text-slate-400 flex flex-col gap-1">
+                        <span>No direct matches found for &quot;{searchQuery}&quot;</span>
+                        <span className="text-[10px] text-slate-500">Press Enter or click Queue to auto-search & fetch.</span>
+                      </div>
+                    ) : (
+                      searchResults.map((song, idx) => (
+                        <div
+                          id={`party-console-search-item-${idx}`}
+                          key={song.url || idx}
+                          onClick={() => handleSelectSong(song, false)}
+                          className="group/item flex items-center justify-between gap-2.5 p-2 rounded-xl bg-black/30 hover:bg-white/10 border border-white/5 hover:border-cyan-500/40 cursor-pointer transition-all shrink-0"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1 truncate">
+                            <div className="relative w-10 h-10 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
+                              {song.thumbnail ? (
+                                <img src={song.thumbnail} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-slate-900">
+                                  <Music className="w-4 h-4 text-slate-400" />
+                                </div>
+                              )}
+                              {song.timestamp && (
+                                <span className="absolute bottom-0.5 right-0.5 text-[8px] font-mono font-bold bg-black/85 px-1 rounded text-white/90">
+                                  {song.timestamp}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex flex-col min-w-0 flex-1">
+                              <span
+                                className="text-xs font-bold text-white group-hover/item:text-cyan-300 transition-colors truncate"
+                                title={song.title}
+                              >
+                                {song.title}
+                              </span>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                                <span className="truncate">{song.author}</span>
+                                {song.highlightTime !== undefined && (
+                                  <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0" title="Viral hook moment">
+                                    🔥 Hook {formatTime(song.highlightTime)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectSong(song, false)}
+                              className="py-1 px-2.5 bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-black border border-cyan-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                              title="Add to Up Next Queue"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>Queue</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectSong(song, true)}
+                              className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                              title="Play/Mix now: AI will read mood and push top 5 songs to top of queue"
+                            >
+                              <Play className="w-2.5 h-2.5 fill-current" />
+                              <span>Play & Sync Mood</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable Queue List (Expanded to display 8 songs without scroll) */}
+              <div id="party-console-queue-list" className="flex flex-col gap-1.5 max-h-[380px] overflow-y-auto pr-1">
+                {engine.queue.length === 0 ? (
+                  <div id="party-console-queue-empty" className="text-center py-8 text-[11px] text-slate-500 font-medium">
+                    Queue empty. AI will auto-curate bangers when track plays!
+                  </div>
+                ) : (
+                  engine.queue.map((item, idx) => (
+                    <div id={`party-console-queue-item-${item.id}`}
+                      key={item.id}
+                      className="p-1.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between gap-2 text-xs hover:border-white/20 transition-all"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                        <span className="font-mono text-[9px] text-slate-500 w-3 shrink-0">#{idx + 1}</span>
+                        <div className="relative w-7 h-7 rounded-lg overflow-hidden shrink-0 group/qthumb">
+                          {item.thumbnail ? (
+                            <img src={item.thumbnail} alt="Thumb" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full bg-slate-800 flex items-center justify-center">
+                              <Music className="w-3 h-3 text-slate-400" />
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              engine.toggleFavorite(item);
+                            }}
+                            className={`absolute inset-0 flex items-center justify-center bg-black/60 transition-opacity ${
+                              engine.isFavorite(item) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/qthumb:opacity-100'
+                            }`}
+                            title={engine.isFavorite(item) ? 'Saved in Favourites (Click to remove)' : 'Save to Favourites'}
+                          >
+                            <Heart
+                              className={`w-3.5 h-3.5 transition-transform ${
+                                engine.isFavorite(item) ? 'fill-rose-500 text-rose-500 scale-110' : 'text-white hover:text-rose-400'
+                              }`}
+                            />
+                          </button>
+                        </div>
+                        <div className="flex flex-col truncate min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 truncate">
+                            <span className="font-bold text-white text-[11px] truncate" title={item.title}>
+                              {item.title}
+                            </span>
+                            {idx === 0 && engine.topSongAvoidCount > 0 && (
+                              <span
+                                className="text-[8px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.5 rounded shrink-0 animate-pulse"
+                                title={`Avoided ${engine.topSongAvoidCount}/7 times. Will be automatically removed if other songs are played 7 times.`}
+                              >
+                                ⚠️ Skipped {engine.topSongAvoidCount}/7
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[9px] text-slate-400 truncate">
+                            {item.artist}
+                            {item.lastPlayedAt !== undefined && (
+                              <span className="text-violet-300" title="You asked for it, so it was added even though it played within the last hour">
+                                {' '}• 🔁 played {timeAgo(item.lastPlayedAt)}
+                              </span>
+                            )}
+                            {item.bpm !== undefined && item.bpmConfidence !== undefined && (
+                              <span className="font-mono text-slate-300">
+                                {' '}• {Math.round(item.bpm)} BPM
+                                {item.tempoLockedTo !== undefined && item.original && (
+                                  <span className="text-emerald-300" title={`Tuned from ${Math.round(item.original.bpm)} BPM, key-locked`}>
+                                    {' '}🔒
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {item.isDiskCached && (
+                          <span
+                            className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold"
+                            title="Audio saved on laptop disk in cache/audio"
+                          >
+                            DISK
+                          </span>
+                        )}
+                        <span
+                          className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
+                            item.status === 'ready'
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : item.status === 'failed'
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                          }`}
+                        >
+                          {item.status.toUpperCase()}
+                        </span>
+                        {item.status === 'ready' && (
+                          <button
+                            onClick={() => engine.mixQueuedTrack(item.id)}
+                            disabled={engine.isTransitioning}
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded transition-colors disabled:opacity-40 ${
+                              pendingMix?.id === item.id
+                                ? 'text-cyan-950 bg-cyan-400 hover:bg-cyan-300 font-extrabold animate-pulse'
+                                : 'text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/30'
+                            }`}
+                            title={
+                              pendingMix?.id === item.id
+                                ? 'Mix now immediately (skip 45s wait)'
+                                : 'Plan mix within next 45s (following MIXING_RULES.md)'
+                            }
+                          >
+                            {pendingMix?.id === item.id ? 'MIX NOW' : 'MIX'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => engine.toggleDontPlayAgain(item)}
+                          className="text-slate-500 hover:text-red-400 p-0.5 rounded transition-colors"
+                          title="Don't play again ever (Thumbs Down)"
+                        >
+                          <ThumbsDown className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => engine.removeFromQueue(item.id)}
+                          className="text-slate-500 hover:text-white p-0.5 rounded transition-colors"
+                          title="Remove from queue"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Previously played songs (newest first); the last hour's are kept out of Up Next */}
+            <PreviouslyPlayedPanel
+              entries={engine.playLog.slice(0, 30)}
+              onQueueAgain={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false)}
+            />
+
+            {/* Favourites & Most Played Bangers (Quick Starters) */}
+            <div id="party-console-most-played" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#131926]/95 to-[#0b0e17]/95 shadow-xl flex flex-col gap-2">
+              <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
+                {/* Tab Selector */}
+                <div className="flex items-center gap-1 bg-black/40 p-0.5 rounded-xl border border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => setBangersTab('favorites')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      bangersTab === 'favorites'
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Heart className={`w-3 h-3 ${engine.favorites.length > 0 ? 'fill-rose-500 text-rose-500' : ''}`} />
+                    <span>Favourites</span>
+                    <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                      {engine.favorites.length}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setBangersTab('most_played')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      bangersTab === 'most_played'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                    <span>Top Bangers</span>
+                    <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                      {engine.mostPlayedSongs.length}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setBangersTab('banned')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      bangersTab === 'banned'
+                        ? 'bg-red-500/20 text-red-300 border border-red-500/40 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                    title="Songs saved in Don't Play Again Ever"
+                  >
+                    <ThumbsDown className="w-3 h-3 text-red-400" />
+                    <span>Don&apos;t Play</span>
+                    <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
+                      {engine.bannedSongs.length}
+                    </span>
+                  </button>
+                </div>
+
+                <span className="text-[10px] text-slate-400 hidden sm:inline">1-Click Play</span>
+              </div>
+
+              {/* Favourites Tab View */}
+              {bangersTab === 'favorites' ? (
+                <div id="party-console-favorites-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                  {engine.favorites.length === 0 ? (
+                    <div id="party-console-favorites-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
+                      <div className="p-2.5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400/80">
+                        <Heart className="w-5 h-5" />
+                      </div>
+                      <p className="text-[11px] font-medium leading-relaxed">
+                        No favourites saved yet.<br />
+                        Click the <span className="text-rose-400 font-bold">❤️ heart</span> on any song image to save it here!
+                      </p>
+                    </div>
+                  ) : (
+                    engine.favorites.map((song) => (
+                      <div
+                        id={`party-console-favorite-item-${song.id}`}
+                        key={song.id}
+                        className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-rose-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                          <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/favthumb">
+                            {song.thumbnail ? (
+                              <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-rose-950 to-slate-900">
+                                <Music className="w-3.5 h-3.5 text-rose-400" />
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                engine.toggleFavorite(song);
+                              }}
+                              className="absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity opacity-0 group-hover/favthumb:opacity-100"
+                              title="Remove from Favourites"
+                            >
+                              <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
+                            </button>
+                          </div>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="text-xs font-bold text-white truncate group-hover:text-rose-300 transition-colors" title={song.title}>
+                              {song.title}
+                            </span>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                              <span className="truncate">{song.artist}</span>
+                              {song.bpm && (
+                                <span className="font-mono text-cyan-300/90 font-bold shrink-0">
+                                  {Math.round(song.bpm)} BPM
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => engine.acquireTrack(song.url || `${song.title} ${song.artist}`, false)}
+                            className="p-1 hover:bg-white/10 text-slate-400 hover:text-cyan-300 rounded-lg text-[10px] font-bold transition-all"
+                            title="Add to Up Next Queue"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => engine.playStarterSong(song.id)}
+                            className="py-1 px-2.5 bg-gradient-to-r from-rose-500/20 to-orange-500/20 hover:from-rose-500 hover:to-orange-500 text-rose-300 hover:text-black border border-rose-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
+                            title="Start playing now"
+                          >
+                            <Play className="w-2.5 h-2.5 fill-current" />
+                            <span>Start</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : (
+                /* Top Bangers Tab View */
+                <div id="party-console-most-played-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                  {engine.mostPlayedSongs.length === 0 ? (
+                    <div id="party-console-most-played-empty" className="text-center py-6 text-[11px] text-slate-500 font-medium">
+                      {engine.rawMostPlayedSongsList.length > 0
+                        ? 'All top bangers are currently queued or already played.'
+                        : 'No play history yet. Play songs to see your top party bangers here!'}
+                    </div>
+                  ) : (
+                    engine.mostPlayedSongs.map((song) => (
+                      <div id={`party-console-most-played-item-${song.id}`}
+                        key={song.id}
+                        className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-amber-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                          <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/bangerthumb">
+                            {song.thumbnail ? (
+                              <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-purple-900 to-indigo-900">
+                                <Music className="w-3.5 h-3.5 text-amber-400" />
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                engine.toggleFavorite(song);
+                              }}
+                              className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
+                                engine.isFavorite(song) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/bangerthumb:opacity-100'
+                              }`}
+                              title={engine.isFavorite(song) ? 'Saved in Favourites' : 'Save to Favourites'}
+                            >
+                              <Heart
+                                className={`w-3.5 h-3.5 transition-transform ${
+                                  engine.isFavorite(song) ? 'fill-rose-500 text-rose-500' : 'text-white hover:text-rose-400'
+                                }`}
+                              />
+                            </button>
+                          </div>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition-colors" title={song.title}>
+                              {song.title}
+                            </span>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                              <span className="truncate">{song.artist}</span>
+                              <span className="font-mono text-amber-400/90 font-bold shrink-0">
+                                ⭐ {song.playCount}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => engine.playStarterSong(song.id)}
+                          className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
+                        >
+                          <Play className="w-2.5 h-2.5 fill-current" />
+                          <span>Start</span>
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* Don't Play Again Ever Tab View */}
+              {bangersTab === 'banned' && (
+                <div id="party-console-banned-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
+                  {engine.bannedSongs.length === 0 ? (
+                    <div id="party-console-banned-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
+                      <div className="p-2.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400/80">
+                        <ThumbsDown className="w-5 h-5" />
+                      </div>
+                      <p className="text-[11px] font-medium leading-relaxed">
+                        No blocked songs.<br />
+                        Click the <span className="text-red-400 font-bold">👎 thumbs down</span> on any song to permanently block it from playing!
+                      </p>
+                    </div>
+                  ) : (
+                    engine.bannedSongs.map((song) => (
+                      <div
+                        id={`party-console-banned-item-${song.id}`}
+                        key={song.id}
+                        className="group bg-black/40 hover:bg-black/60 border border-red-500/20 hover:border-red-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                          <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
+                            {song.thumbnail ? (
+                              <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-red-950 to-slate-900">
+                                <Music className="w-3.5 h-3.5 text-red-400" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="text-xs font-bold text-white truncate group-hover:text-red-300 transition-colors" title={song.title}>
+                              {song.title}
+                            </span>
+                            <span className="text-[10px] text-slate-400 truncate">{song.artist}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => engine.toggleDontPlayAgain(song)}
+                          className="py-1 px-2.5 bg-red-500/20 hover:bg-red-500 text-red-300 hover:text-white border border-red-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
+                          title="Remove from Don't Play Again Ever (Unblock)"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                          <span>Unblock</span>
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+      </>
+    ),
+    [rightColumnKey, searchQuery, searchResults, isSearching, isDropdownOpen, bangersTab, pendingMix?.id,
+      engine.isTransitioning, engine.topSongAvoidCount, engine.diskCacheCount, engine.diskCacheMb]
+  );
 
   return (
     <div id="party-console" className="flex flex-col gap-2.5 max-w-[1440px] mx-auto w-full relative">
@@ -719,579 +1305,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           />
         </div>
 
-        {/* Right Column (27.5% width): Up Next Party Queue + Previously Played + Most Played Bangers */}
-        <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
-          {/* Up Next Party Queue & Instant Song Search */}
-          <div id="party-console-queue" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl flex flex-col gap-2">
-            <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
-              <div className="flex items-center gap-1.5">
-                <Music className="w-3.5 h-3.5 text-cyan-400" />
-                <h3 className="font-extrabold text-xs text-white">
-                  UP NEXT QUEUE ({engine.queue.length})
-                </h3>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {engine.diskCacheCount > 0 && (
-                  <span
-                    className="text-[9px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 rounded flex items-center gap-1"
-                    title={`Audio saved to disk at cache/audio: ${engine.diskCacheCount} songs (~${engine.diskCacheMb} MB)`}
-                  >
-                    💾 {engine.diskCacheCount} on disk
-                  </span>
-                )}
-                <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-400">
-                  <Radio className="w-2.5 h-2.5 animate-pulse" />
-                  <span>Auto-Mix</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Easy Song Request Input with Matching Songs Dropdown */}
-            <div ref={searchContainerRef} className="relative z-30">
-              <form id="party-console-song-request-form" onSubmit={(e) => handleSearchSubmit(e, false)} className="flex gap-1.5">
-                <div className="relative flex-1">
-                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search song name or YouTube link..."
-                    value={searchQuery}
-                    onFocus={() => {
-                      if (searchQuery.trim().length >= 2) setIsDropdownOpen(true);
-                    }}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-8 pr-12 py-1.5 bg-black/50 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                  />
-                  {isSearching && (
-                    <Loader2 className="w-3.5 h-3.5 absolute right-6 top-1/2 -translate-y-1/2 text-cyan-400 animate-spin" />
-                  )}
-                  {searchQuery && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchQuery('');
-                        setSearchResults([]);
-                        setIsDropdownOpen(false);
-                      }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white p-0.5 rounded transition-colors"
-                      title="Clear search"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-                <button
-                  type="submit"
-                  disabled={!searchQuery.trim()}
-                  className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
-                  title="Queue at back"
-                >
-                  <Plus className="w-3 h-3" />
-                  <span>Queue</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => handleSearchSubmit(e, true)}
-                  disabled={!searchQuery.trim()}
-                  className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-orange-500/20"
-                  title="Search & Play: AI reads mood and pushes top 5 matching songs to top of queue"
-                >
-                  <Play className="w-3 h-3 fill-current" />
-                  <span>Play & Sync Mood</span>
-                </button>
-              </form>
-
-              {/* Matching Songs Dropdown */}
-              {isDropdownOpen && searchQuery.trim().length >= 2 && (
-                <div
-                  id="party-console-search-dropdown"
-                  className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[360px] overflow-y-auto animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
-                >
-                  <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
-                    <span className="flex items-center gap-1.5 font-bold text-cyan-300">
-                      <Sparkles className="w-3 h-3 text-cyan-400" />
-                      MATCHING SONGS {searchResults.length > 0 ? `(${searchResults.length})` : ''}
-                    </span>
-                    <span className="text-[9px] text-slate-400">Click row or button to add</span>
-                  </div>
-
-                  {isSearching && searchResults.length === 0 ? (
-                    <div className="flex items-center justify-center gap-2 py-7 text-xs text-slate-400">
-                      <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
-                      <span>Searching song catalog...</span>
-                    </div>
-                  ) : searchResults.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-slate-400 flex flex-col gap-1">
-                      <span>No direct matches found for &quot;{searchQuery}&quot;</span>
-                      <span className="text-[10px] text-slate-500">Press Enter or click Queue to auto-search & fetch.</span>
-                    </div>
-                  ) : (
-                    searchResults.map((song, idx) => (
-                      <div
-                        id={`party-console-search-item-${idx}`}
-                        key={song.url || idx}
-                        onClick={() => handleSelectSong(song, false)}
-                        className="group/item flex items-center justify-between gap-2.5 p-2 rounded-xl bg-black/30 hover:bg-white/10 border border-white/5 hover:border-cyan-500/40 cursor-pointer transition-all shrink-0"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1 truncate">
-                          <div className="relative w-10 h-10 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
-                            {song.thumbnail ? (
-                              <img src={song.thumbnail} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center bg-slate-900">
-                                <Music className="w-4 h-4 text-slate-400" />
-                              </div>
-                            )}
-                            {song.timestamp && (
-                              <span className="absolute bottom-0.5 right-0.5 text-[8px] font-mono font-bold bg-black/85 px-1 rounded text-white/90">
-                                {song.timestamp}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex flex-col min-w-0 flex-1">
-                            <span
-                              className="text-xs font-bold text-white group-hover/item:text-cyan-300 transition-colors truncate"
-                              title={song.title}
-                            >
-                              {song.title}
-                            </span>
-                            <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                              <span className="truncate">{song.author}</span>
-                              {song.highlightTime !== undefined && (
-                                <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0" title="Viral hook moment">
-                                  🔥 Hook {formatTime(song.highlightTime)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            onClick={() => handleSelectSong(song, false)}
-                            className="py-1 px-2.5 bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-black border border-cyan-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                            title="Add to Up Next Queue"
-                          >
-                            <Plus className="w-3 h-3" />
-                            <span>Queue</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleSelectSong(song, true)}
-                            className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                            title="Play/Mix now: AI will read mood and push top 5 songs to top of queue"
-                          >
-                            <Play className="w-2.5 h-2.5 fill-current" />
-                            <span>Play & Sync Mood</span>
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Scrollable Queue List (Expanded to display 8 songs without scroll) */}
-            <div id="party-console-queue-list" className="flex flex-col gap-1.5 max-h-[380px] overflow-y-auto pr-1">
-              {engine.queue.length === 0 ? (
-                <div id="party-console-queue-empty" className="text-center py-8 text-[11px] text-slate-500 font-medium">
-                  Queue empty. AI will auto-curate bangers when track plays!
-                </div>
-              ) : (
-                engine.queue.map((item, idx) => (
-                  <div id={`party-console-queue-item-${item.id}`}
-                    key={item.id}
-                    className="p-1.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between gap-2 text-xs hover:border-white/20 transition-all"
-                  >
-                    <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
-                      <span className="font-mono text-[9px] text-slate-500 w-3 shrink-0">#{idx + 1}</span>
-                      <div className="relative w-7 h-7 rounded-lg overflow-hidden shrink-0 group/qthumb">
-                        {item.thumbnail ? (
-                          <img src={item.thumbnail} alt="Thumb" className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full bg-slate-800 flex items-center justify-center">
-                            <Music className="w-3 h-3 text-slate-400" />
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            engine.toggleFavorite(item);
-                          }}
-                          className={`absolute inset-0 flex items-center justify-center bg-black/60 transition-opacity ${
-                            engine.isFavorite(item) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/qthumb:opacity-100'
-                          }`}
-                          title={engine.isFavorite(item) ? 'Saved in Favourites (Click to remove)' : 'Save to Favourites'}
-                        >
-                          <Heart
-                            className={`w-3.5 h-3.5 transition-transform ${
-                              engine.isFavorite(item) ? 'fill-rose-500 text-rose-500 scale-110' : 'text-white hover:text-rose-400'
-                            }`}
-                          />
-                        </button>
-                      </div>
-                      <div className="flex flex-col truncate min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 truncate">
-                          <span className="font-bold text-white text-[11px] truncate" title={item.title}>
-                            {item.title}
-                          </span>
-                          {idx === 0 && engine.topSongAvoidCount > 0 && (
-                            <span
-                              className="text-[8px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.5 rounded shrink-0 animate-pulse"
-                              title={`Avoided ${engine.topSongAvoidCount}/7 times. Will be automatically removed if other songs are played 7 times.`}
-                            >
-                              ⚠️ Skipped {engine.topSongAvoidCount}/7
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-[9px] text-slate-400 truncate">
-                          {item.artist}
-                          {item.lastPlayedAt !== undefined && (
-                            <span className="text-violet-300" title="You asked for it, so it was added even though it played within the last hour">
-                              {' '}• 🔁 played {timeAgo(item.lastPlayedAt)}
-                            </span>
-                          )}
-                          {item.bpm !== undefined && item.bpmConfidence !== undefined && (
-                            <span className="font-mono text-slate-300">
-                              {' '}• {Math.round(item.bpm)} BPM
-                              {item.tempoLockedTo !== undefined && item.original && (
-                                <span className="text-emerald-300" title={`Tuned from ${Math.round(item.original.bpm)} BPM, key-locked`}>
-                                  {' '}🔒
-                                </span>
-                              )}
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {item.isDiskCached && (
-                        <span
-                          className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold"
-                          title="Audio saved on laptop disk in cache/audio"
-                        >
-                          DISK
-                        </span>
-                      )}
-                      <span
-                        className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
-                          item.status === 'ready'
-                            ? 'bg-emerald-500/20 text-emerald-300'
-                            : item.status === 'failed'
-                            ? 'bg-red-500/20 text-red-300'
-                            : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                        }`}
-                      >
-                        {item.status.toUpperCase()}
-                      </span>
-                      {item.status === 'ready' && (
-                        <button
-                          onClick={() => engine.mixQueuedTrack(item.id)}
-                          disabled={engine.isTransitioning}
-                          className={`text-[9px] font-bold px-1.5 py-0.5 rounded transition-colors disabled:opacity-40 ${
-                            pendingMix?.id === item.id
-                              ? 'text-cyan-950 bg-cyan-400 hover:bg-cyan-300 font-extrabold animate-pulse'
-                              : 'text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/30'
-                          }`}
-                          title={
-                            pendingMix?.id === item.id
-                              ? 'Mix now immediately (skip 45s wait)'
-                              : 'Plan mix within next 45s (following MIXING_RULES.md)'
-                          }
-                        >
-                          {pendingMix?.id === item.id ? 'MIX NOW' : 'MIX'}
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => engine.toggleDontPlayAgain(item)}
-                        className="text-slate-500 hover:text-red-400 p-0.5 rounded transition-colors"
-                        title="Don't play again ever (Thumbs Down)"
-                      >
-                        <ThumbsDown className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => engine.removeFromQueue(item.id)}
-                        className="text-slate-500 hover:text-white p-0.5 rounded transition-colors"
-                        title="Remove from queue"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          {/* Previously played songs (newest first); the last hour's are kept out of Up Next */}
-          <PreviouslyPlayedPanel
-            entries={engine.playLog.slice(0, 30)}
-            onQueueAgain={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false)}
-          />
-
-          {/* Favourites & Most Played Bangers (Quick Starters) */}
-          <div id="party-console-most-played" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#131926]/95 to-[#0b0e17]/95 shadow-xl flex flex-col gap-2">
-            <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
-              {/* Tab Selector */}
-              <div className="flex items-center gap-1 bg-black/40 p-0.5 rounded-xl border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setBangersTab('favorites')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                    bangersTab === 'favorites'
-                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Heart className={`w-3 h-3 ${engine.favorites.length > 0 ? 'fill-rose-500 text-rose-500' : ''}`} />
-                  <span>Favourites</span>
-                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
-                    {engine.favorites.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setBangersTab('most_played')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                    bangersTab === 'most_played'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                  <span>Top Bangers</span>
-                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
-                    {engine.mostPlayedSongs.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setBangersTab('banned')}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                    bangersTab === 'banned'
-                      ? 'bg-red-500/20 text-red-300 border border-red-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                  title="Songs saved in Don't Play Again Ever"
-                >
-                  <ThumbsDown className="w-3 h-3 text-red-400" />
-                  <span>Don&apos;t Play</span>
-                  <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
-                    {engine.bannedSongs.length}
-                  </span>
-                </button>
-              </div>
-
-              <span className="text-[10px] text-slate-400 hidden sm:inline">1-Click Play</span>
-            </div>
-
-            {/* Favourites Tab View */}
-            {bangersTab === 'favorites' ? (
-              <div id="party-console-favorites-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
-                {engine.favorites.length === 0 ? (
-                  <div id="party-console-favorites-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
-                    <div className="p-2.5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400/80">
-                      <Heart className="w-5 h-5" />
-                    </div>
-                    <p className="text-[11px] font-medium leading-relaxed">
-                      No favourites saved yet.<br />
-                      Click the <span className="text-rose-400 font-bold">❤️ heart</span> on any song image to save it here!
-                    </p>
-                  </div>
-                ) : (
-                  engine.favorites.map((song) => (
-                    <div
-                      id={`party-console-favorite-item-${song.id}`}
-                      key={song.id}
-                      className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-rose-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
-                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/favthumb">
-                          {song.thumbnail ? (
-                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-rose-950 to-slate-900">
-                              <Music className="w-3.5 h-3.5 text-rose-400" />
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              engine.toggleFavorite(song);
-                            }}
-                            className="absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity opacity-0 group-hover/favthumb:opacity-100"
-                            title="Remove from Favourites"
-                          >
-                            <Heart className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
-                          </button>
-                        </div>
-                        <div className="flex flex-col min-w-0 flex-1">
-                          <span className="text-xs font-bold text-white truncate group-hover:text-rose-300 transition-colors" title={song.title}>
-                            {song.title}
-                          </span>
-                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                            <span className="truncate">{song.artist}</span>
-                            {song.bpm && (
-                              <span className="font-mono text-cyan-300/90 font-bold shrink-0">
-                                {Math.round(song.bpm)} BPM
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => engine.acquireTrack(song.url || `${song.title} ${song.artist}`, false)}
-                          className="p-1 hover:bg-white/10 text-slate-400 hover:text-cyan-300 rounded-lg text-[10px] font-bold transition-all"
-                          title="Add to Up Next Queue"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => engine.playStarterSong(song.id)}
-                          className="py-1 px-2.5 bg-gradient-to-r from-rose-500/20 to-orange-500/20 hover:from-rose-500 hover:to-orange-500 text-rose-300 hover:text-black border border-rose-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                          title="Start playing now"
-                        >
-                          <Play className="w-2.5 h-2.5 fill-current" />
-                          <span>Start</span>
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            ) : (
-              /* Top Bangers Tab View */
-              <div id="party-console-most-played-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
-                {engine.mostPlayedSongs.length === 0 ? (
-                  <div id="party-console-most-played-empty" className="text-center py-6 text-[11px] text-slate-500 font-medium">
-                    {engine.rawMostPlayedSongsList.length > 0
-                      ? 'All top bangers are currently queued or already played.'
-                      : 'No play history yet. Play songs to see your top party bangers here!'}
-                  </div>
-                ) : (
-                  engine.mostPlayedSongs.map((song) => (
-                    <div id={`party-console-most-played-item-${song.id}`}
-                      key={song.id}
-                      className="group bg-black/40 hover:bg-black/60 border border-white/10 hover:border-amber-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
-                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 group/bangerthumb">
-                          {song.thumbnail ? (
-                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-purple-900 to-indigo-900">
-                              <Music className="w-3.5 h-3.5 text-amber-400" />
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              engine.toggleFavorite(song);
-                            }}
-                            className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
-                              engine.isFavorite(song) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/bangerthumb:opacity-100'
-                            }`}
-                            title={engine.isFavorite(song) ? 'Saved in Favourites' : 'Save to Favourites'}
-                          >
-                            <Heart
-                              className={`w-3.5 h-3.5 transition-transform ${
-                                engine.isFavorite(song) ? 'fill-rose-500 text-rose-500' : 'text-white hover:text-rose-400'
-                              }`}
-                            />
-                          </button>
-                        </div>
-                        <div className="flex flex-col min-w-0 flex-1">
-                          <span className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition-colors" title={song.title}>
-                            {song.title}
-                          </span>
-                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                            <span className="truncate">{song.artist}</span>
-                            <span className="font-mono text-amber-400/90 font-bold shrink-0">
-                              ⭐ {song.playCount}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => engine.playStarterSong(song.id)}
-                        className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
-                      >
-                        <Play className="w-2.5 h-2.5 fill-current" />
-                        <span>Start</span>
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-
-            {/* Don't Play Again Ever Tab View */}
-            {bangersTab === 'banned' && (
-              <div id="party-console-banned-list" className="flex flex-col gap-1.5 max-h-[240px] overflow-y-auto pr-1">
-                {engine.bannedSongs.length === 0 ? (
-                  <div id="party-console-banned-empty" className="text-center py-6 px-3 flex flex-col items-center gap-2 text-slate-500">
-                    <div className="p-2.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400/80">
-                      <ThumbsDown className="w-5 h-5" />
-                    </div>
-                    <p className="text-[11px] font-medium leading-relaxed">
-                      No blocked songs.<br />
-                      Click the <span className="text-red-400 font-bold">👎 thumbs down</span> on any song to permanently block it from playing!
-                    </p>
-                  </div>
-                ) : (
-                  engine.bannedSongs.map((song) => (
-                    <div
-                      id={`party-console-banned-item-${song.id}`}
-                      key={song.id}
-                      className="group bg-black/40 hover:bg-black/60 border border-red-500/20 hover:border-red-400/40 rounded-xl p-2 flex items-center justify-between gap-2.5 transition-all shadow-sm shrink-0"
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
-                        <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
-                          {song.thumbnail ? (
-                            <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-tr from-red-950 to-slate-900">
-                              <Music className="w-3.5 h-3.5 text-red-400" />
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex flex-col min-w-0 flex-1">
-                          <span className="text-xs font-bold text-white truncate group-hover:text-red-300 transition-colors" title={song.title}>
-                            {song.title}
-                          </span>
-                          <span className="text-[10px] text-slate-400 truncate">{song.artist}</span>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => engine.toggleDontPlayAgain(song)}
-                        className="py-1 px-2.5 bg-red-500/20 hover:bg-red-500 text-red-300 hover:text-white border border-red-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
-                        title="Remove from Don't Play Again Ever (Unblock)"
-                      >
-                        <X className="w-2.5 h-2.5" />
-                        <span>Unblock</span>
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+        {rightColumn}
       </div>
 
       {/* In-App Editor Modal for my_songs.txt */}

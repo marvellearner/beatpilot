@@ -316,6 +316,7 @@ $T_{\text{raw}} = T_{\text{hook}} - 16 \cdot \frac{60}{\text{BPM}}$. If $T_{\tex
 - A "Play World's Favorite Part" button and the Hook Cue toggle.
 - A **Live Rhythm Enhancer** card (`RhythmPanel`, shared with the Pro view and the phone): on/off, 🤖 AI decides (the per-song plan and why) or Choose myself (8 styles, Follows song / Steady), volume, mute.
 - An **Up Next** queue with song/URL search, the most-played "Start With This" bangers, and the `my_songs.txt` loader and editor.
+- A **Real-Time RAM Usage Meter** in the top navigation bar with dynamic load coloring, mini progress bar, live heartbeat pulse, and expandable telemetry popover (system physical RAM, server process RSS, V8 heap, and browser audio memory).
 - A header switch for **🎛️ Pro Decks**: `DeckView` (waveforms, pitch, EQ kills), `MixerSection` (crossfader) and the `RhythmPanel`.
 
 ### 10.2 iPhone Remote (`src/remote/RemoteClient.tsx` + `MobileRemoteView.tsx`)

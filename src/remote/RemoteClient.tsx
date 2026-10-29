@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { HostSyncState, MobileAction } from '../types';
+import { HostSyncState, LiveSyncState, MobileAction } from '../types';
 import { MobileRemoteView } from './MobileRemoteView';
 
 /**
@@ -33,6 +33,10 @@ export const RemoteClient: React.FC = () => {
           if (data.type === 'SYNC_STATE') {
             setHostState(data as HostSyncState);
             setHostGone(false);
+          } else if (data.type === 'SYNC_LIVE') {
+            // The frequent small update: merged into the last full state (queue, history… stay as they were)
+            const live = data as LiveSyncState;
+            setHostState((prev) => (prev ? { ...prev, ...live, type: 'SYNC_STATE' } : prev));
           } else if (data.type === 'HOST_GONE') {
             // Don't keep showing the last song as if it were still playing
             setHostState(null);

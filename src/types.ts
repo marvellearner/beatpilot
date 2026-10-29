@@ -12,7 +12,9 @@ export interface TrackMetadata {
   duration: number;
   bpm: number;
   bpmConfidence?: number;
-  key?: string;
+  key?: string;                    // Camelot key, e.g. "8A" (see KeyDetector)
+  keyConfidence?: number;          // 0-1; the key is only used from MIN_KEY_CONFIDENCE up
+  loudnessDb?: number;             // RMS level of the loud parts (see Loudness.ts)
   audioBuffer?: AudioBuffer;
   waveformPeaks?: number[];
   sourceType: 'local' | 'demo' | 'download';
@@ -96,6 +98,10 @@ export interface QueuedTrack {
   status: 'queued' | 'downloading' | 'decoding' | 'tuning' | 'ready' | 'failed';
   audioBuffer?: AudioBuffer;
   isDiskCached?: boolean;
+  waveformPeaks?: number[]; // cached overview, computed once (see AudioEngine.queuedItemPeaks)
+  key?: string;
+  keyConfidence?: number;
+  loudnessDb?: number;
   isAiRecommended?: boolean;
   // Where the song came from: automatic sources ('ai', 'playlist') skip songs played in the
   // last hour; a song the user asked for ('request') is allowed but flagged
@@ -144,6 +150,12 @@ export interface HostSyncState {
   lastAiDecision: string;
   tempo: TempoInfo | null;
 }
+
+/** The big, slowly changing parts of HostSyncState: sent only when they change. */
+export type SlowSyncKey = 'currentTrack' | 'queue' | 'mostPlayedSongs' | 'favorites' | 'bannedSongs' | 'recentlyPlayed' | 'introAnalysis';
+
+/** The rest, sent to the phone several times a second; the phone merges it into its last full state. */
+export type LiveSyncState = Omit<HostSyncState, 'type' | SlowSyncKey> & { type: 'SYNC_LIVE' };
 
 /** One play of a song, for "Previously played" and the no-repeat-within-an-hour rule. */
 export interface PlayLogEntry {

@@ -4,6 +4,7 @@ import { DeckView } from './components/DeckView';
 import { RhythmPanel } from './components/RhythmPanel';
 import { MixerSection } from './components/MixerSection';
 import { PartyConsoleView } from './components/PartyConsoleView';
+import { RamUsageMeter } from './components/RamUsageMeter';
 import { DJAgent, AIResponseResult } from '../ai/DJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
@@ -25,6 +26,11 @@ import {
   Radio,
   Zap,
 } from 'lucide-react';
+
+// Phone updates: at most this often (the engine can change many times per frame during a mix)
+const SYNC_THROTTLE_MS = 150;
+// The full state is resent at least this often, in case a change slipped past the signature
+const FULL_SYNC_EVERY_MS = 5000;
 
 export const App: React.FC = () => {
   const engineRef = useRef<AudioEngine | null>(null);
@@ -154,6 +160,18 @@ export const App: React.FC = () => {
     [engine]
   );
 
+  // What the phone last received in full (see broadcastSyncState)
+  const lastSyncSigRef = useRef('');
+  const lastFullSyncAtRef = useRef(0);
+  const sendFullSync = useCallback(
+    (ws: WebSocket) => {
+      lastSyncSigRef.current = engine.getSyncSignature();
+      lastFullSyncAtRef.current = performance.now();
+      ws.send(JSON.stringify(engine.getSyncState()));
+    },
+    [engine]
+  );
+
   // Setup WebSocket connection to Vite backend hub
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -179,7 +197,7 @@ export const App: React.FC = () => {
           if (data.type === 'ROLE') {
             isHostRef.current = data.role === 'host';
             setHostRole(data.role);
-            if (isHostRef.current) ws.send(JSON.stringify(engine.getSyncState()));
+            if (isHostRef.current) sendFullSync(ws);
           } else if (data.type?.startsWith('CMD_')) {
             handleMobileAction(data as MobileAction);
           }
@@ -201,7 +219,7 @@ export const App: React.FC = () => {
       window.clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, [engine, handleMobileAction]);
+  }, [engine, handleMobileAction, sendFullSync]);
 
   // Phone pairing: fetch the laptop's Wi-Fi link and draw it as a QR code
   useEffect(() => {
@@ -223,25 +241,52 @@ export const App: React.FC = () => {
     };
   }, [showRemoteModal]);
 
-  // Broadcast sync state to WebSocket on engine updates
+  // Phone sync: the full state (~50 KB) only when its big parts change, otherwise the small live part
   const broadcastSyncState = useCallback(() => {
-    if (isHostRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(engine.getSyncState()));
-    }
-  }, [engine]);
+    const ws = wsRef.current;
+    if (!isHostRef.current || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const stale = performance.now() - lastFullSyncAtRef.current > FULL_SYNC_EVERY_MS;
+    if (stale || engine.getSyncSignature() !== lastSyncSigRef.current) sendFullSync(ws);
+    else ws.send(JSON.stringify(engine.getLiveSyncState()));
+  }, [engine, sendFullSync]);
 
   useEffect(() => {
-    engine.onEngineUpdate = () => {
-      setTick((t) => t + 1);
-      broadcastSyncState();
+    // Engine changes come in bursts (many per frame during a mix): re-render at most once per
+    // animation frame, and update the phone at most every SYNC_THROTTLE_MS
+    let frame = 0;
+    let syncTimer: number | undefined;
+    const render = () => {
+      if (!frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          setTick((t) => t + 1);
+        });
+      }
     };
-
+    const sync = () => {
+      if (syncTimer === undefined) {
+        syncTimer = window.setTimeout(() => {
+          syncTimer = undefined;
+          broadcastSyncState();
+        }, SYNC_THROTTLE_MS);
+      }
+    };
+    engine.onEngineUpdate = () => {
+      render();
+      sync();
+    };
+    // Keeps the clock, progress bar and phone moving between engine changes
     const interval = setInterval(() => {
-      setTick((t) => t + 1);
-      broadcastSyncState();
+      render();
+      sync();
     }, 250);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      cancelAnimationFrame(frame);
+      window.clearTimeout(syncTimer);
+      engine.onEngineUpdate = undefined;
+    };
   }, [engine, broadcastSyncState]);
 
   // Natural Language DJ Command execution
@@ -379,17 +424,63 @@ export const App: React.FC = () => {
             <Cpu className={`w-3.5 h-3.5 ${engine.aiStatus === 'online' ? 'text-purple-400' : 'text-slate-500'}`} />
             <span>
               {engine.aiStatus === 'online'
-                ? '🤖 AI DJ: Qwen 2.5 3B online'
+                ? '🤖 AI DJ online'
                 : engine.aiStatus === 'checking'
                   ? 'Checking AI DJ…'
                   : 'AI DJ offline (rule-based)'}
             </span>
           </div>
 
+          {/* One light per AI backend: green = answering, red = not available, grey = not set up */}
+          <div id="app-ai-backends" className="flex items-center gap-2.5 bg-black/40 px-3 py-1.5 rounded-xl border border-white/10 text-xs font-mono text-slate-300">
+            {(() => {
+              const b = engine.aiBackends;
+              const lights = [
+                {
+                  id: 'ollama',
+                  label: 'Ollama',
+                  state: !b ? 'checking' : b.ollama.online ? 'on' : 'off',
+                  title: !b
+                    ? 'Checking Ollama…'
+                    : b.ollama.online
+                      ? `Ollama is running with ${b.ollama.model} (used first)`
+                      : 'Ollama is not running, or the qwen2.5:3b model is missing. Start Ollama to use the local AI.',
+                },
+                {
+                  id: 'gemini',
+                  label: 'Gemini',
+                  state: !b ? 'checking' : !b.gemini.configured ? 'unset' : b.gemini.online ? 'on' : 'off',
+                  title: !b
+                    ? 'Checking Gemini…'
+                    : !b.gemini.configured
+                      ? 'Gemini is not set up: add GEMINI_API_KEY to .env to use it as the cloud backup'
+                      : b.gemini.online
+                        ? `Gemini (${b.gemini.model}) is reachable (backup when Ollama is unavailable)`
+                        : `Gemini is not available: ${b.gemini.error ?? 'no answer'}`,
+                },
+              ];
+              const color: Record<string, string> = {
+                on: 'bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/80',
+                off: 'bg-red-500 shadow-[0_0_6px] shadow-red-500/70',
+                unset: 'bg-slate-500',
+                checking: 'bg-slate-500 animate-pulse',
+              };
+              return lights.map((l) => (
+                <span key={l.id} id={`app-ai-backend-${l.id}`} className="flex items-center gap-1.5" title={l.title}>
+                  <span className={`w-2.5 h-2.5 rounded-full ${color[l.state]}`} aria-hidden="true" />
+                  <span>{l.label}</span>
+                  <span className="sr-only">{l.state === 'on' ? 'available' : l.state === 'off' ? 'not available' : l.state === 'unset' ? 'not set up' : 'checking'}</span>
+                </span>
+              ));
+            })()}
+          </div>
+
           <div className="hidden sm:flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-xl border border-white/5 text-xs font-mono text-slate-400">
             <Laptop className="w-3.5 h-3.5 text-slate-300" />
-            <span>i7-9750H • 24 GB RAM</span>
+            <span>i7-9750H</span>
           </div>
+
+          <RamUsageMeter />
 
           <button
             onClick={() => setShowHelp(!showHelp)}
@@ -511,7 +602,7 @@ export const App: React.FC = () => {
           <main id="app-pro-decks" className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             {/* Deck A (Left) */}
             <div id="app-pro-deck-a-column" className="lg:col-span-4">
-              <DeckView deck={engine.deckA} deckId="A" />
+              <DeckView deck={engine.deckA} deckId="A" engine={engine} />
             </div>
 
             {/* Master Center Mixer & AI Transition (Middle) */}
@@ -521,7 +612,7 @@ export const App: React.FC = () => {
 
             {/* Deck B (Right) */}
             <div id="app-pro-deck-b-column" className="lg:col-span-4">
-              <DeckView deck={engine.deckB} deckId="B" />
+              <DeckView deck={engine.deckB} deckId="B" engine={engine} />
             </div>
           </main>
         </>
