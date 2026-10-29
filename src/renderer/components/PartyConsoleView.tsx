@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AudioEngine } from '../../audio/AudioEngine';
-import { PERCUSSION_PATTERNS } from '../../audio/PercussionDeck';
+import { RhythmPanel } from './RhythmPanel';
 import { MoodEqPanel } from './MoodEqPanel';
 import { TempoControl } from './TempoControl';
 import { PreviouslyPlayedPanel, timeAgo } from './PreviouslyPlayedPanel';
@@ -20,7 +20,6 @@ import {
   Plus,
   Radio,
   Sliders,
-  CheckCircle2,
   Star,
   Heart,
   ThumbsDown,
@@ -33,7 +32,6 @@ import {
   Lock,
   Scissors,
   Loader2,
-  Bot,
 } from 'lucide-react';
 
 interface PartyConsoleViewProps {
@@ -147,8 +145,6 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           ? { label: 'PAUSED', className: 'text-amber-200 bg-amber-500/10 border-amber-500/30', dotClassName: 'bg-amber-400' }
           : { label: 'IDLE', className: 'text-slate-400 bg-white/5 border-white/10', dotClassName: 'bg-slate-500' };
 
-  const percussion = engine.percussionDeck.getState();
-  const activePattern = PERCUSSION_PATTERNS.find((p) => p.id === percussion.activePatternId);
 
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
@@ -709,156 +705,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
 
         {/* Middle Column (27.5% width): Live Rhythm Enhancer + Mood & Equalizer */}
         <div id="party-console-middle-column" className="flex flex-col gap-3 min-w-0">
-          {/* Compact Live Rhythm Enhancer (Deck P - Cherry on Top) */}
-          <div id="party-console-rhythm-enhancer" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#14101e]/95 to-[#0c0914]/95 shadow-xl flex flex-col gap-2.5">
-            <div className="flex items-center justify-between pb-2 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <span className="text-base">🥁</span>
-                <div>
-                  <h3 className="font-extrabold text-xs text-white">LIVE RHYTHM ENHANCER</h3>
-                  <span className="text-[10px] text-purple-300">
-                    {activePattern ? activePattern.name : 'Dhol'} • Cherry on top
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <div
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-mono font-bold border ${
-                    percussion.isPlaying
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                      : 'bg-white/5 text-slate-400 border-white/10'
-                  }`}
-                >
-                  <CheckCircle2 className="w-2.5 h-2.5 text-slate-400" />
-                  <span>{percussion.isPlaying ? 'Live Rhythm Active' : 'Drums Stopped (Silent)'}</span>
-                </div>
-                <span className="text-[10px] font-mono text-purple-300 font-bold">
-                  {Math.round(percussion.currentBpm)} BPM
-                </span>
-              </div>
-            </div>
-
-            {/* Compact 4-Style Drum Selector */}
-            <div id="party-console-drum-styles" className="grid grid-cols-2 gap-1.5">
-              {PERCUSSION_PATTERNS.map((p) => (
-                <button id={`party-console-drum-style-${p.id}`}
-                  key={p.id}
-                  onClick={() => engine.percussionDeck.switchPattern(p.id)}
-                  className={`p-2 rounded-xl border text-left flex flex-col gap-0.5 transition-all ${
-                    percussion.activePatternId === p.id
-                      ? 'bg-rose-500/20 border-rose-500 text-rose-200 font-bold shadow-sm'
-                      : 'bg-white/5 border-white/5 text-slate-300 hover:bg-white/10'
-                  }`}
-                >
-                  <span className="text-xs truncate">{p.name}</span>
-                  <span className="text-[9px] text-slate-400 font-mono">{p.defaultBpm} BPM Base</span>
-                </button>
-              ))}
-            </div>
-
-            {/* AI Rhythm Sync Telemetry & Reasoning */}
-            {engine.percussionDecisionReason && (
-              <div
-                id="party-console-drum-reason"
-                className="bg-black/50 px-2.5 py-1.5 rounded-xl border border-white/5 font-mono text-[10px] text-purple-300 flex items-center gap-2 shadow-inner"
-                title={engine.percussionDecisionReason}
-              >
-                <Bot className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                <span className="truncate flex-1">{engine.percussionDecisionReason}</span>
-                <button
-                  id="party-console-drum-resync-mini"
-                  onClick={() => engine.resyncPercussionToActiveDeck()}
-                  className="px-1.5 py-0.5 text-[9px] font-sans font-bold bg-purple-500/20 hover:bg-purple-500/40 text-purple-200 border border-purple-400/30 rounded shrink-0 transition-colors"
-                  title="Re-run AI rhythmic sync and snap downbeat phase lock to current track"
-                >
-                  AI Sync
-                </button>
-              </div>
-            )}
-
-            {/* Groove Energy Level & Start/Stop Controls Row */}
-            <div id="party-console-drum-controls" className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/5">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] text-slate-400 font-medium">Energy:</span>
-                <button
-                  onClick={() => {
-                    engine.percussionDeck.setVolume(0.5);
-                    engine.percussionDeck.setIntensity(0.7);
-                  }}
-                  className={`py-1 px-2 rounded-lg text-[10px] font-bold border transition-all ${
-                    percussion.volume < 0.6
-                      ? 'bg-purple-600/30 border-purple-500 text-white'
-                      : 'bg-white/5 border-white/5 text-slate-400'
-                  }`}
-                >
-                  Subtle
-                </button>
-                <button
-                  onClick={() => {
-                    engine.percussionDeck.setVolume(0.8);
-                    engine.percussionDeck.setIntensity(1.0);
-                  }}
-                  className={`py-1 px-2 rounded-lg text-[10px] font-bold border transition-all ${
-                    percussion.volume >= 0.6 && percussion.volume <= 0.85
-                      ? 'bg-purple-600/30 border-purple-500 text-white'
-                      : 'bg-white/5 border-white/5 text-slate-400'
-                  }`}
-                >
-                  Bounce
-                </button>
-                <button
-                  onClick={() => {
-                    engine.percussionDeck.setVolume(1.0);
-                    engine.percussionDeck.setIntensity(1.3);
-                  }}
-                  className={`py-1 px-2 rounded-lg text-[10px] font-bold border transition-all ${
-                    percussion.volume > 0.85
-                      ? 'bg-purple-600/30 border-purple-500 text-white'
-                      : 'bg-white/5 border-white/5 text-slate-400'
-                  }`}
-                >
-                  Peak 🔥
-                </button>
-              </div>
-
-              {/* Start/Stop Drums & Auto-Pilot */}
-              <div id="party-console-drum-buttons" className="flex items-center gap-1.5">
-                <button
-                  id="party-console-drum-resync"
-                  onClick={() => engine.resyncPercussionToActiveDeck()}
-                  className="px-2.5 py-1 rounded-xl text-[10px] font-bold bg-purple-600/20 hover:bg-purple-600/40 text-purple-200 border border-purple-500/30 transition-all flex items-center gap-1"
-                  title="AI syncs rhythm enhancer pattern, BPM, and downbeat phase to song"
-                >
-                  <Bot className="w-3 h-3 text-purple-400" />
-                  <span>AI Sync</span>
-                </button>
-
-                <button
-                  onClick={() => engine.togglePercussion()}
-                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shadow-sm ${
-                    percussion.isPlaying
-                      ? 'bg-rose-500 text-white shadow-rose-500/30'
-                      : 'bg-white/10 hover:bg-white/20 text-slate-200'
-                  }`}
-                >
-                  {percussion.isPlaying ? 'STOP DRUMS' : 'START DRUMS'}
-                </button>
-
-                <button
-                  onClick={() => engine.toggleAutoPercussion()}
-                  className={`px-2.5 py-1 rounded-xl text-[10px] font-semibold border transition-all ${
-                    engine.autoPercussionEnabled
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-white/5 text-slate-400 border-white/10'
-                  }`}
-                  title="Automatically switches drums and tempos based on playing track"
-                >
-                  AI Drums: {engine.autoPercussionEnabled ? 'ON' : 'OFF'}
-                </button>
-              </div>
-            </div>
-          </div>
+          {/* Live Rhythm Enhancer (Deck P) */}
+          <RhythmPanel rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
 
           {/* Mood tabs + master equalizer (bass control) */}
           <MoodEqPanel

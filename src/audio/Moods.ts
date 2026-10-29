@@ -41,7 +41,7 @@ export interface Mood {
   eq: EqGains;
   blendBars: number; // length of a beatmatched blend
   hookCue: boolean; // start incoming songs just before their hook
-  autoDrums: boolean; // turn on AI drums (dhol) when this mood is chosen
+  autoDrums: boolean; // switch the Live Rhythm Enhancer on when this mood is chosen
   // Lock the whole set to one tempo inside this range, time-stretching songs with key lock
   // (tempo changes, pitch doesn't). Undefined = songs keep their natural tempo.
   tempoLock?: { min: number; max: number; preferred: number };

@@ -13,8 +13,12 @@ const OLLAMA_MODEL = 'qwen2.5:3b';
 // Keep the model in RAM: a cold load takes ~3–12 s on this laptop, a warm answer ~4 s
 const OLLAMA_KEEP_ALIVE = '30m';
 
-/** One JSON-mode completion from the local model (CPU only, see SETUP_AND_OPERATIONS.md §2). */
-async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number): Promise<string> {
+/**
+ * One JSON-mode completion from the local model (CPU only, see SETUP_AND_OPERATIONS.md §2).
+ * With a JSON schema the answer is constrained to it (e.g. one value from an enum), which a
+ * small model needs for reliable classification; such answers also use temperature 0.
+ */
+async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number, schema?: object): Promise<string> {
   const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -22,9 +26,9 @@ async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: numb
       model: OLLAMA_MODEL,
       prompt,
       stream: false,
-      format: 'json',
+      format: schema ?? 'json',
       keep_alive: OLLAMA_KEEP_ALIVE,
-      options: { num_gpu: 0, temperature: 0.2, num_predict: maxTokens },
+      options: { num_gpu: 0, temperature: schema ? 0 : 0.2, num_predict: maxTokens },
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -686,7 +690,8 @@ export function aiDjApiPlugin(): Plugin {
             try {
               // If Gemini is available as backup, cap Ollama at 12s so it fails over quickly instead of hanging
               const ollamaTimeout = geminiCfg ? Math.min(12_000, timeoutMs) : timeoutMs;
-              const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, ollamaTimeout);
+              const schema = body?.schema && typeof body.schema === 'object' ? body.schema : undefined;
+              const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, ollamaTimeout, schema);
               res.end(
                 JSON.stringify({
                   response,

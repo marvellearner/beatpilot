@@ -15,20 +15,25 @@
 **AI DJ** transforms your Windows laptop into a pro-grade, autonomous DJ system that can be remotely operated from an iPhone across the room. It solves the biggest limitation of amateur and traditional DJ software: **awkward transitions, clashing basslines, and silence between tracks**.
 
 ### Core Differentiating Features:
-1. **Deck P — The Continuous Percussion & Live Dhol Layer:**
-   * Runs on an independent timeline that **never stops, restarts, or glitches** across song transitions.
-   * Bundles authentic procedural loops: *Punjabi Dhol Live (Chaap & Dagga)*, *Bhangra Dholak & Chimta*, *Club 4-on-the-Floor (909/808)*, and *Afrobeat Congas & Shakers*.
-2. **Autonomous Drum Decision & Beat-Sync Advisor:**
-   * Analyzes raw audio PCM samples using an IIR low-pass filter (40Hz–180Hz) to detect real BPM and beat confidence.
-   * **Strict Sync Invariant:** If rhythmic sync confidence is below 60% or the track is an acoustic ballad, percussion is automatically held/muted to prevent clashing.
-   * Automatically locks Dhol tempo precisely to the detected song tempo.
-3. **5-Song Autonomous Internet Auto-Queue:**
-   * Never runs out of music. If the queue has fewer than 5 songs, the AI autonomously queries the internet for culturally and energetically compatible bangers.
-   * Pre-downloads and decodes the audio stream of the next song in the background before the current song finishes.
+1. **Deck P — Live Rhythm Enhancer (real dhol & percussion):**
+   * Real recorded dhol, dholak, tambourine, shaker, conga and more (CC0 samples), in 8 styles from *Dhol Chaal* and *Dholak Keherwa* to *Club Tops* and *Afro Groove*.
+   * Decides per song by itself: the AI DJ identifies the song, and the style and level follow from it, the mood and the song's own sound (lighter on songs with heavy drums or vocals, none on devotional songs).
+   * Every hit is scheduled on the playing song's own beat grid, so it can't drift and follows tempo changes without changing pitch.
+2. **Plays like a drummer, not a loop:**
+   * Rests in intros and breakdowns, plays a light groove in verses and the full groove in choruses, with fills into big moments, all worked out from the song's audio.
+   * Steps back during mixes, and rests when the beat isn't clear enough to lock on (below 50% confidence).
+3. **50-Song Autonomous Queue & Multi-Tier Curation:**
+   * Proactively maintains up to **50 songs** in the Up Next queue, auto-seeded from your Favorites, Most Played Bangers, `my_songs.txt`, and context-aware AI recommendations.
+   * **5-Minute Duration Limit:** Never auto-adds songs longer than 5 minutes to the queue. (Explicit user searches can be any length).
+   * **AI Mood Reading:** On search & play, AI reads current vibe/genre and pushes the top 5 compatible tracks to index 0 (`unshift`) so they play next.
+   * **Top Queue 7-Skip Avoidance:** If song #1 is avoided 7 times in a row, it is automatically dropped from the queue with visual feedback.
+   * **Thumbs Down ("Don't Play Again Ever"):** Permanently bans unwanted songs locally and on server (`/api/banned`), removing them immediately.
+   * **Previously Played Strict Integrity:** Songs in Previously Played are strictly excluded from Up Next, and **no 2 consecutive songs in previously played can ever be the same**.
    * **Outro Auto-Mix:** About 22 seconds before the end, it mixes into the next song. It ramps the tempo to meet, starts the new song exactly on the beat, and does a bass swap. Songs too far apart in tempo get a clean cut on the beat.
-4. **Wireless iPhone Remote Control:**
+4. **Wireless iPhone Remote Control & Expanded Tempo Controls:**
    * Touch-optimized web app running in Safari on your iPhone over local Wi-Fi (`ws://` duplex WebSocket synchronization).
-   * Play, Pause, Rewind 10s, Forward 10s, Previous, Next/Mix, live timeline scrubber, and Dhol intensity controls.
+   * Play, Pause, Rewind 10s, Forward 10s, Previous, Next/Mix, live timeline scrubber, Thumbs Down, and Dhol intensity controls.
+   * Playback rate presets: **0.5x, 0.9x, 1.0x, 1.1x, 1.2x, 1.5x**, with key lock (preserving pitch) or vinyl mode.
 5. **Instant Song Acquisition by Name or YouTube Link:**
    * Type any song name (e.g., *"Sidhu Moose Wala 295"*, *"Diljit Dosanjh Lover"*) or paste any YouTube / YouTube Music URL.
    * Tap **MIX NOW** to stream, decode, and mix into the current set with an automated bass-swap transition!
@@ -86,8 +91,9 @@
 | Document | Purpose & Contents |
 | :--- | :--- |
 | [**`USER_GUIDE.md`**](USER_GUIDE.md) | **Start here:** step-by-step guide to running a party, the controls, iPhone remote, and troubleshooting. |
+| [**`MIXING_RULES.md`**](MIXING_RULES.md) | Core rules for mixing, Deck P rhythm engine, 50-song queue, previously played exclusion & consecutive deduplication, AI mood top-5 insertion, and 7-skip avoidance. |
 | [**`context.md`**](context.md) | Original project brief: requirements, roadmap, and definition of success. |
-| [**`ARCHITECTURE.md`**](ARCHITECTURE.md) | System topology, 3-deck audio engine, BPM detection, Dhol synthesis & sync, transitions, auto-curation, viral-hook detection, UI, and WebSocket protocol. |
+| [**`ARCHITECTURE.md`**](ARCHITECTURE.md) | System topology, 3-deck audio engine, BPM detection, Live Rhythm Enhancer (Deck P), transitions, auto-curation, viral-hook detection, UI, and WebSocket protocol. |
 | [**`DJ_KNOWLEDGE_AND_MIXING_RULES.md`**](DJ_KNOWLEDGE_AND_MIXING_RULES.md) | Musical judgement: set flow, beatmatching, phrasing, harmonic mixing, transitions, percussion and vocal rules. |
 | [**`SETUP_AND_OPERATIONS.md`**](SETUP_AND_OPERATIONS.md) | Hardware audit, CPU-only Ollama decision, memory budget, iPhone/LAN setup & troubleshooting, storage policy, dependencies & licenses. |
 
@@ -99,6 +105,7 @@
 Ai-DJ/
 ├── README.md                              # This master documentation
 ├── USER_GUIDE.md                          # Step-by-step guide for party hosts
+├── MIXING_RULES.md                        # Master DJ mixing rules, Deck P & queue algorithms
 ├── context.md                             # Original project brief & requirements
 ├── ARCHITECTURE.md                        # Architecture & engine specification
 ├── DJ_KNOWLEDGE_AND_MIXING_RULES.md       # Musical rules and mixing principles
@@ -117,23 +124,21 @@ Ai-DJ/
 │   ├── types.ts                           # Global TypeScript interfaces and Zod types
 │   ├── ai/
 │   │   ├── schema.ts                      # Zod validation schema for mixing commands
-│   │   ├── OllamaDJAgent.ts               # Local Qwen 2.5 3B client with heuristic fallback
-│   │   └── PercussionAdvisor.ts           # Autonomous drum selection and sync evaluator
+│   │   ├── DJAgent.ts                     # AI DJ client: Ollama (Qwen 2.5 3B), then Gemini, then rules
 │   │
 │   ├── audio/
 │   │   ├── AudioEngine.ts                 # Master 3-deck coordinator and auto-DJ scheduler
 │   │   ├── VirtualDeck.ts                 # Virtual Deck A & B (3-band EQ, pitch fader, waveform)
-│   │   ├── PercussionDeck.ts              # Continuous Dhol & drum player (Deck P)
+│   │   ├── rhythm/                        # Live Rhythm Enhancer (Deck P): sample kit, styles, arrangement, scheduler
 │   │   ├── BpmDetector.ts                 # Web Audio PCM tempo & sync confidence analyzer
 │   │   ├── HighlightDetector.ts           # World's favorite viral hook & pre-roll cue detector
-│   │   └── SynthesizedSamples.ts          # Procedural high-fidelity Dhol & drum buffer generator
 │   │
 │   ├── renderer/
 │   │   ├── App.tsx                        # Main desktop DJ console and state hub
 │   │   ├── components/
 │   │   │   ├── PartyConsoleView.tsx       # User-friendly Party Master console (Default)
 │   │   │   ├── DeckView.tsx               # Dual deck UI with waveforms and 3-band EQ kills
-│   │   │   ├── PercussionBar.tsx          # Continuous Dhol deck controls and AI advisor banner
+│   │   │   ├── RhythmPanel.tsx            # Live Rhythm Enhancer controls (laptop and phone)
 │   │   │   ├── MixerSection.tsx           # Equal-power crossfader and smart transition buttons
 │   │   │   └── WaveformCanvas.tsx         # 60fps real-time spectrum and waveform scrubber
 │   │   └── styles/

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HostSyncState, MobileAction, SearchResult, TempoInfo } from '../types';
 import { MoodEqPanel } from '../renderer/components/MoodEqPanel';
+import { RhythmPanel } from '../renderer/components/RhythmPanel';
 import { TempoControl } from '../renderer/components/TempoControl';
 import { PreviouslyPlayedPanel } from '../renderer/components/PreviouslyPlayedPanel';
 import {
@@ -10,9 +11,6 @@ import {
   SkipForward,
   RotateCcw,
   RotateCw,
-  Flame,
-  Volume2,
-  VolumeX,
   Search,
   Plus,
   Zap,
@@ -21,7 +19,6 @@ import {
   Sparkles,
   ListMusic,
   ArrowRightLeft,
-  Bot,
   Radio,
   Star,
   Heart,
@@ -58,7 +55,6 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
 
   const currentTrack = syncState.currentTrack;
   const isPlaying = syncState.isPlaying;
-  const perc = syncState.percussion;
 
   const fallbackBpm = (syncState.bpm && syncState.bpm > 0)
     ? syncState.bpm
@@ -458,107 +454,8 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
         onResetEq={() => onSendAction({ type: 'CMD_RESET_EQ' })}
       />
 
-      {/* Autonomous Percussion Advisor Card */}
-      <div id="remote-drums-card"
-        className={`dj-panel rounded-2xl p-4 border transition-all ${
-          perc.isPlaying
-            ? 'border-rose-500/40 glow-deck-p bg-gradient-to-r from-[#191124] to-[#120f1c]'
-            : 'border-white/10'
-        }`}
-      >
-        <div id="remote-drums-header" className="flex items-center justify-between pb-2.5 border-b border-white/10">
-          <div id="remote-drums-title-group" className="flex items-center gap-2">
-            <div
-              id="remote-drums-icon"
-              className={`p-1.5 rounded-lg ${
-                perc.isPlaying ? 'bg-rose-500 text-white pulse-percussion' : 'bg-white/10 text-slate-400'
-              }`}
-            >
-              <Flame className="w-4 h-4 fill-current" />
-            </div>
-            <div id="remote-drums-labels">
-              <div id="remote-drums-heading" className="font-extrabold text-xs text-white flex items-center gap-1.5">
-                <span>AI DRUM ADVISOR & LIVE DHOL</span>
-                <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                  AUTO-PILOT
-                </span>
-              </div>
-              <div id="remote-drums-subheading" className="text-[10px] text-slate-400 font-mono">
-                Decides drum style & tempo; holds if sync unproven
-              </div>
-            </div>
-          </div>
-
-          <div id="remote-drums-actions" className="flex items-center gap-1.5">
-            <button
-              id="remote-drums-resync"
-              onClick={() => onSendAction({ type: 'CMD_RESYNC_PERCUSSION' })}
-              className="p-1.5 px-2 rounded-lg border bg-purple-500/20 border-purple-500/40 text-purple-200 hover:bg-purple-500/30 flex items-center gap-1 text-[10px] font-bold"
-              title="Snap live rhythm enhancer to song tempo and downbeat phase using AI"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-purple-300" />
-              <span>AI Sync</span>
-            </button>
-
-            <button
-              onClick={() => onSendAction({ type: 'CMD_PERCUSSION_MUTE' })}
-              className={`p-1.5 rounded-lg border ${
-                perc.isMuted
-                  ? 'bg-red-500/30 border-red-500/50 text-red-300'
-                  : 'bg-white/5 border-white/10 text-slate-400'
-              }`}
-            >
-              {perc.isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-            </button>
-
-            <button
-              onClick={() => onSendAction({ type: 'CMD_PERCUSSION_TOGGLE' })}
-              className={`px-3 py-1.5 rounded-xl font-bold text-xs tracking-wide transition-all ${
-                perc.isPlaying
-                  ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/30'
-                  : 'bg-white/10 text-slate-300'
-              }`}
-            >
-              {perc.isPlaying ? 'STOP' : 'START'}
-            </button>
-          </div>
-        </div>
-
-        {/* AI Drum Reasoning Telemetry */}
-        <div id="remote-drums-reason" className="bg-black/50 p-2 rounded-xl border border-white/5 font-mono text-[10px] text-rose-300 my-2 flex items-center gap-2">
-          <Bot className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-          <span className="truncate flex-1">{syncState.percussionDecisionReason}</span>
-          <button
-            onClick={() => onSendAction({ type: 'CMD_RESYNC_PERCUSSION' })}
-            className="px-1.5 py-0.5 text-[9px] font-sans font-bold bg-purple-500/20 hover:bg-purple-500/40 text-purple-200 border border-purple-400/30 rounded shrink-0"
-            title="Snap live rhythm enhancer to song tempo and downbeat phase using AI"
-          >
-            Sync
-          </button>
-        </div>
-
-        {/* 4 Quick Rhythm Pattern Switches */}
-        <div id="remote-drum-patterns" className="grid grid-cols-2 gap-2 pt-1">
-          {[
-            { id: 'punjabi_dhol', name: 'Punjabi Dhol Live' },
-            { id: 'bhangra_groove', name: 'Bhangra Dholak' },
-            { id: 'electronic_drums', name: 'Club 4-on-Floor' },
-            { id: 'afrobeat', name: 'Afrobeat Shakers' },
-          ].map((item) => (
-            <button id={`remote-drum-pattern-${item.id}`}
-              key={item.id}
-              onClick={() => onSendAction({ type: 'CMD_PERCUSSION_PATTERN', patternId: item.id })}
-              className={`text-xs font-bold py-2 px-2.5 rounded-xl border text-left transition-all ${
-                perc.activePatternId === item.id
-                  ? 'bg-rose-500/20 border-rose-500 text-rose-300 shadow-md shadow-rose-500/20'
-                  : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-              }`}
-            >
-              {item.name}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Live Rhythm Enhancer */}
+      <RhythmPanel compact rhythm={syncState.rhythm} onCommand={(cmd) => onSendAction({ type: 'CMD_RHYTHM', cmd })} />
 
       {/* Song Request & YouTube Download Card */}
       <div id="remote-song-request" className="dj-panel rounded-2xl p-4 border border-cyan-500/30 bg-cyan-950/10 flex flex-col gap-3">

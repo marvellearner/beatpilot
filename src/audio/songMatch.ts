@@ -5,6 +5,7 @@
  */
 
 export interface SongRef {
+  id?: string;
   title: string;
   artist?: string;
   url?: string;
@@ -50,7 +51,12 @@ export function titleSegments(raw: string): string[] {
 /** Comparable forms of a song: its YouTube video id, and normalised "title" / "artist title". */
 export function songKeys(song: SongRef): string[] {
   const keys: string[] = [];
-  const videoId = song.url?.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1];
+  if (song.id) {
+    keys.push(`id:${song.id.toLowerCase().trim()}`);
+  }
+  const videoId =
+    song.url?.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1] ||
+    song.id?.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1];
   if (videoId) keys.push(`yt:${videoId}`);
   const normTitle = normalize(song.title);
   if (normTitle) keys.push(normTitle);
@@ -61,15 +67,12 @@ export function songKeys(song: SongRef): string[] {
   }
   if (song.artist && !/searching|^artist$/i.test(song.artist)) {
     keys.push(normalize(`${song.artist} ${song.title}`));
-    for (const seg of titleSegments(song.artist)) {
-      keys.push(seg);
+    if (coreTitle) {
+      keys.push(normalize(`${song.artist} ${coreTitle}`));
     }
   }
   if (song.url && !videoId) {
     keys.push(normalize(song.url));
-    for (const seg of titleSegments(song.url)) {
-      keys.push(seg);
-    }
   }
   return Array.from(new Set(keys.filter((k) => k.length >= 3)));
 }
@@ -80,7 +83,32 @@ export function isSameSong(a: string[], b: string[]): boolean {
     b.some(
       (y) =>
         x === y ||
-        (!x.startsWith('yt:') && !y.startsWith('yt:') && Math.min(x.length, y.length) >= 6 && (x.includes(y) || y.includes(x)))
+        (!x.startsWith('yt:') && !x.startsWith('id:') && !y.startsWith('yt:') && !y.startsWith('id:') && Math.min(x.length, y.length) >= 6 && (x.includes(y) || y.includes(x)))
     )
   );
 }
+
+/**
+ * Checks whether two song references are the same song.
+ * Used strictly to enforce that in "Previously Played", no 2 consecutive songs can ever be the same.
+ */
+export function areSongsConsecutivelySame(a?: SongRef | null, b?: SongRef | null): boolean {
+  if (!a || !b) return false;
+  if (a.id && b.id && a.id === b.id) return true;
+  if (a.url && b.url && a.url === b.url) return true;
+
+  const aTitle = (a.title || '').trim().toLowerCase();
+  const bTitle = (b.title || '').trim().toLowerCase();
+  if (aTitle && bTitle && aTitle === bTitle) return true;
+
+  const aNorm = normalize(a.title || '');
+  const bNorm = normalize(b.title || '');
+  if (aNorm && bNorm && aNorm === bNorm) return true;
+
+  const aCore = cleanCoreTitle(a.title || '');
+  const bCore = cleanCoreTitle(b.title || '');
+  if (aCore && bCore && aCore === bCore && aCore.length >= 3) return true;
+
+  return isSameSong(songKeys(a), songKeys(b));
+}
+

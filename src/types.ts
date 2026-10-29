@@ -1,6 +1,7 @@
 import type { EnergyProfile } from './audio/MixPointPlanner';
 import type { EqBandId, EqGains, MoodId } from './audio/Moods';
 import type { IntroAnalysisResult } from './audio/IntroSkitDetector';
+import type { RhythmState, RhythmCommand } from './audio/rhythm/RhythmEnhancer';
 
 export type DeckId = 'A' | 'B';
 
@@ -67,33 +68,11 @@ export interface DeckState {
   isCue: boolean;
 }
 
-export type PercussionCategory = 'punjabi_dhol' | 'bhangra' | 'electronic' | 'afrobeat';
-
-export interface PercussionPattern {
-  id: string;
-  name: string;
-  category: PercussionCategory;
-  defaultBpm: number;
-  description: string;
-  bars: number;
-}
-
-export interface PercussionState {
-  isPlaying: boolean;
-  activePatternId: string;
-  volume: number;       // 0.0 - 1.0
-  intensity: number;    // 0.5 - 1.5
-  currentBpm: number;
-  syncToDeck: DeckId | 'manual';
-  isMuted: boolean;
-}
-
 export interface TransitionConfig {
   sourceDeck: DeckId;
   targetDeck: DeckId;
   durationSeconds?: number; // omitted: engine picks 8 bars when beatmatched, a short cut when not
   style: 'smooth_crossfade' | 'bass_swap' | 'drop_cut' | 'tempo_ramp';
-  syncPercussion: boolean;
   sourceExitTime?: number; // planned outgoing position to start the blend at (otherwise the next beat)
   targetEntryTime?: number; // planned incoming start position (otherwise hook cue / first beat)
 }
@@ -145,13 +124,11 @@ export interface HostSyncState {
   duration: number;
   bpm: number;
   crossfader: number;
-  percussion: PercussionState;
+  rhythm: RhythmState;
   queue: QueuedTrack[];
   isTransitioning: boolean;
   transitionProgress: number;
-  percussionDecisionReason: string;
   autoCurationEnabled: boolean;
-  autoPercussionEnabled: boolean;
   autoCueViralHook: boolean;
   mostPlayedSongs?: SongHistoryItem[];
   favorites?: FavoriteSong[];
@@ -231,15 +208,10 @@ export type MobileAction =
   | { type: 'CMD_SEEK_TO'; targetSeconds: number }
   | { type: 'CMD_PREV' }
   | { type: 'CMD_NEXT' }
-  | { type: 'CMD_PERCUSSION_TOGGLE' }
-  | { type: 'CMD_PERCUSSION_PATTERN'; patternId: string }
-  | { type: 'CMD_PERCUSSION_VOLUME'; volume: number }
-  | { type: 'CMD_PERCUSSION_MUTE' }
-  | { type: 'CMD_RESYNC_PERCUSSION' }
+  | { type: 'CMD_RHYTHM'; cmd: RhythmCommand }
   | { type: 'CMD_ADD_QUEUE'; query: string }
   | { type: 'CMD_MIX_NOW'; query: string }
   | { type: 'CMD_TOGGLE_AUTOCURATION' }
-  | { type: 'CMD_AUTO_PERCUSSION' }
   | { type: 'CMD_JUMP_TO_HOOK'; deckId?: DeckId }
   | { type: 'CMD_TOGGLE_AUTO_CUE_HOOK' }
   | { type: 'CMD_MIX_QUEUED'; itemId: string }

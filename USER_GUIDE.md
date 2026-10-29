@@ -56,7 +56,12 @@ The first song plays from the beginning. While it loads you'll see **Searching �
 
 Once a song is playing, the app looks after the party:
 
-- **Keeps the queue full:** it always tries to have 5 songs lined up, adding similar songs automatically.
+- **Keeps the queue full:** it proactively maintains up to 50 songs lined up in the Up Next queue, auto-seeded from your favourites, most played bangers, past history, and AI recommendations.
+- **5-Minute Song Cap:** The engine will never automatically add any song longer than 5 minutes to the queue. (Explicit searches and plays by you can be any length).
+- **AI Mood Reading:** Whenever you search and play a song, the AI reads your current vibe/genre and pushes the top 5 matching songs to the front of the queue so they play next.
+- **7-Skip Auto-Removal:** If the song at the top (#1) of Up Next is avoided 7 times while other songs are played, the app automatically drops it from the queue with an on-screen warning badge (`⚠️ Skipped X/7`).
+- **Thumbs Down ("Don't Play Again Ever"):** Every queue item has a Thumbs Down (👎) button. Clicking it permanently bans the song, instantly drops it, and prevents it from ever being auto-queued again.
+- **Previously Played history:** songs appear in the Previously Played list as they finish mixing in. **No two consecutive songs in previously played can ever be the same**, and songs present in previously played are strictly prevented from appearing in the Up Next queue.
 - **Mixes automatically:** about 20 seconds before a song ends, it blends into the next one with the beats lined up. In the final stretch it gently nudges the tempo toward the next song, so the two meet at the same BPM. If two songs' tempos are too far apart, it does a quick, clean cut on the beat instead of a messy blend.
 - **Plays the best part:** with **Auto-Cue: ON**, the next songs start just before their most popular part. Turn it **OFF** if you'd rather every song play from the start.
 - **Never goes silent while loading:** if the next song isn't ready yet, the current song keeps playing.
@@ -91,15 +96,40 @@ The display shows **Original** BPM and **Current** BPM side by side, plus the sp
 
 ---
 
-## 6. Add Dhol or Drums (Optional)
+## 6. Dhol and Drums (Automatic)
 
-In the **Live Rhythm Enhancer** card:
+The **Live Rhythm Enhancer** card adds real dhol, dholak and percussion on top of the song that's playing. It's on the laptop (Party and Pro views) and on the iPhone remote.
 
-1. Pick a style: **Punjabi Dhol**, **Bhangra**, **Club Drums** or **Afrobeat**.
-2. Pick a feel: **Subtle**, **Party Bounce** or **Peak**.
-3. Press **Start** to play the drums, or **Mute** to silence them.
+**You don't have to choose anything.** It's on by default with **🤖 AI decides**: for each song the AI DJ works out what kind of song it is, and the app picks the drums to suit it and your mood. For example, dhol for Punjabi songs, dholak for Bollywood, claps and tambourine for English pop, a club groove for EDM. It stays lighter on songs that already have heavy drums or lots of vocals, and adds nothing to devotional songs or songs with an unclear beat. The card shows what it chose for the song and why.
 
-**Auto mode:** turn it on and the app chooses the drum style for each song and keeps the drums in time with it. It stays quiet on slow songs, or when it can't detect the beat clearly, so the drums never clash with the music.
+All you might want to touch:
+
+- **ON / OFF** for the whole layer.
+- **Volume** slider and the speaker button (mute).
+
+**Choose myself** is there if you ever want one fixed style for every song:
+
+| Style | Best for |
+| :--- | :--- |
+| **Dhol Chaal** | Punjabi, bhangra, wedding songs |
+| **Dhol Dhamaal** | The biggest Punjabi and Bollywood bangers |
+| **Dholak Keherwa** | Bollywood, sangeet, folk |
+| **Clap & Tambourine** | Almost anything, especially songs with strong drums already |
+| **Club Tops** | House, EDM, remixes |
+| **Club Drive (with kick)** | Songs with soft or no drums |
+| **Afro Groove** | Afrobeats, amapiano, reggaeton, Latin |
+| **Light Shaker** | Chill and romantic songs |
+
+**What it does during each song:**
+
+- It plays exactly on the song's beat, even when the tempo changes. Very fast songs get the groove at half speed, like a real dhol player.
+- It sits out the intro and quiet parts, plays a **light groove** in verses and the **full groove** in choruses, with a **fill** leading into big moments.
+- During a mix it plays lighter, or rests if the two songs are cut together.
+- If it can't hear a clear beat, it rests rather than play out of time. The card says why.
+
+The card's grey line always says what it's doing, e.g. *"🤖 Dhol Chaal: chorus energy: full groove"*.
+
+It can't yet tell a slow love song from an upbeat one in the same language. If drums come in on a ballad, mute them for that song.
 
 ---
 
@@ -113,7 +143,7 @@ The **Mood & Equalizer** card is below the drums card on the laptop, and also on
 | :--- | :--- | :--- | :--- |
 | 🎵 Normal | Flat | 8-bar blends | Popular mix |
 | 🎉 Party | Punchy bass, crisp highs | **Every song tuned to one dance tempo (120–130 BPM)** without changing its pitch, so every mix is at the exact same BPM. 8-bar blends, starts at the hook. | Upbeat bangers |
-| 🥁 Bhangra | Heavy bass + **AI dhol switched on** | Short 4-bar mixes | Punjabi / bhangra |
+| 🥁 Bhangra | Heavy bass + **dhol switched on** (Dhol Chaal) | Short 4-bar mixes | Punjabi / bhangra |
 | 🌙 Chill | Warm, soft highs | Long 16-bar blends, songs from the start | Mellow songs |
 | 💕 Romantic | Warm vocals | Long 16-bar blends, songs from the start | Love songs |
 

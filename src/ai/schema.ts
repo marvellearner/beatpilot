@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RHYTHM_STYLE_IDS } from '../audio/rhythm/styles';
 
 export const AICommandSchema = z.object({
   action: z.enum([
@@ -15,15 +16,14 @@ export const AICommandSchema = z.object({
       target_deck: z.enum(['A', 'B']),
       style: z.enum(['bass_swap', 'smooth_crossfade', 'drop_cut']).default('bass_swap'),
       duration_seconds: z.number().min(2).max(32).default(8),
-      sync_percussion: z.boolean().default(true),
     })
     .optional(),
+  // Live Rhythm Enhancer: on/off, style and level (it follows the song on air by itself)
   percussion: z
     .object({
       active: z.boolean(),
-      pattern_id: z.enum(['punjabi_dhol', 'bhangra_groove', 'electronic_drums', 'afrobeat']).optional(),
-      volume: z.number().min(0).max(1).optional(),
-      sync_to_deck: z.enum(['A', 'B', 'manual']).optional(),
+      style_id: z.enum(RHYTHM_STYLE_IDS).optional(),
+      level: z.number().min(0).max(1).optional(),
     })
     .optional(),
   eq: z

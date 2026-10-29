@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { AICommandSchema, type AICommandPlan } from './schema';
 import type { AudioEngine } from '../audio/AudioEngine';
+import { RHYTHM_STYLES, type RhythmStyleId } from '../audio/rhythm/styles';
+import { SONG_LANGUAGES, type SongLanguage } from '../audio/rhythm/rhythmPlan';
 
 export interface AIResponseResult {
   plan: AICommandPlan;
@@ -53,29 +55,25 @@ const NextSongSchema = z.object({
 });
 export type NextSongDecision = z.infer<typeof NextSongSchema>;
 
-export interface PercussionSyncContext {
-  mood: string;
-  track: {
-    title: string;
-    artist: string;
-    bpm: number;
-    effectiveBpm: number;
-    confidence: number;
-    highlightTime?: number;
-    duration?: number;
-    currentTime?: number;
-  };
-}
+// A song's language, constrained to one value: the way a 3B model answers it reliably
+const SongIdSchema = z.object({ language: z.enum(SONG_LANGUAGES) });
+const SONG_ID_JSON_SCHEMA = {
+  type: 'object',
+  properties: { language: { type: 'string', enum: [...SONG_LANGUAGES] } },
+  required: ['language'],
+};
 
-export const PercussionSyncSchema = z.object({
-  shouldPlay: z.boolean(),
-  patternId: z.enum(['punjabi_dhol', 'bhangra_groove', 'electronic_drums', 'afrobeat', 'none']),
-  intensity: z.coerce.number().min(0.5).max(1.5).default(1.0),
-  volume: z.coerce.number().min(0.3).max(1.0).default(0.85),
-  duckDuringVerse: z.boolean().default(true),
-  reason: z.string().max(250),
-});
-export type AIPercussionSyncDecision = z.infer<typeof PercussionSyncSchema>;
+// Typed-command keywords for the rhythm styles, checked in order (dholak before dhol)
+const RHYTHM_KEYWORDS: Array<[RegExp, RhythmStyleId]> = [
+  [/\bdholak|keherwa|sangeet\b/, 'dholak_keherwa'],
+  [/\bdhamaal|peak|hard|heavy\b/, 'dhol_dhamaal'],
+  [/\bdhol|bhangra|chaal|punjabi\b/, 'dhol_chaal'],
+  [/\bkick|four on the floor|4 on the floor\b/, 'club_drive'],
+  [/\bhouse|club|edm|electronic\b/, 'club_tops'],
+  [/\bafro|amapiano|latin|reggaeton|conga\b/, 'afro_groove'],
+  [/\bclaps?|tambourine\b/, 'clap_tambourine'],
+  [/\bshaker|soft|light|gentle\b/, 'light_shaker'],
+];
 
 export interface MoodReadingResult {
   detectedMood: string;
@@ -108,17 +106,17 @@ interface LlmJsonResponse {
   model?: string;
 }
 
-export class OllamaDJAgent {
+export class DJAgent {
   // Proxied by the dev server (server/apiPlugin.ts), which handles Gemini & Ollama seamlessly
   private endpoint: string = '/api/llm';
 
   /** Sends a prompt to the AI server and parses its JSON reply; null if unavailable or too slow. */
-  private async askJson(prompt: string, maxTokens: number, timeoutMs: number): Promise<LlmJsonResponse | null> {
+  private async askJson(prompt: string, maxTokens: number, timeoutMs: number, schema?: object): Promise<LlmJsonResponse | null> {
     try {
       const response = await fetch(this.endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, maxTokens, timeoutMs }),
+        body: JSON.stringify({ prompt, maxTokens, timeoutMs, schema }),
         signal: AbortSignal.timeout(timeoutMs + 1000),
       });
       if (!response.ok) return null;
@@ -176,6 +174,20 @@ Reply ONLY with JSON: {"exit": <number>, "entry": <number>, "style": "blend"|"cu
     return d;
   }
 
+  /**
+   * Asks the AI DJ which language a song is in, from its title and artist (the model's own
+   * knowledge of the song). The rhythm layer's style follows from it (see rhythmPlan.ts).
+   */
+  public async identifySong(title: string, artist: string): Promise<SongLanguage | null> {
+    const prompt = `Song: "${title}" by ${artist}.
+What language is this song in: punjabi, hindi, english, spanish, other, or unknown if you do not know the song?
+Reply ONLY with JSON: {"language": "..."}`;
+    const res = await this.askJson(prompt, 20, 15_000, SONG_ID_JSON_SCHEMA);
+    if (!res) return null;
+    const parsed = SongIdSchema.safeParse(res.data);
+    return parsed.success ? parsed.data.language : null;
+  }
+
   /** Asks the AI DJ which ready song should play next for the best energy flow. */
   public async chooseNextSong(ctx: NextSongContext): Promise<NextSongDecision | null> {
     const prompt = `You are an expert ${ctx.mood} DJ picking the next song to keep the dance floor flowing.
@@ -191,50 +203,6 @@ Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
     const parsed = NextSongSchema.safeParse(res.data);
     if (!parsed.success || parsed.data.pick > ctx.options.length) return null;
     return parsed.data;
-  }
-
-  /**
-   * Asks the AI DJ (Ollama primary / Gemini backup) to evaluate and synchronize
-   * live percussion enhancement (Deck P) for the active song.
-   */
-  public async syncPercussion(ctx: PercussionSyncContext): Promise<AIPercussionSyncDecision | null> {
-    const prompt = `You are an expert club DJ and live percussionist.
-Analyze this active track on air and decide how to sync live percussion (Deck P) to enhance the party energy.
-
-ACTIVE TRACK:
-- Title: "${ctx.track.title}" by ${ctx.track.artist}
-- Tempo: ${Math.round(ctx.track.effectiveBpm)} BPM (natural: ${Math.round(ctx.track.bpm)} BPM)
-- Beat Confidence: ${Math.round(ctx.track.confidence * 100)}%
-- Mood: ${ctx.mood}
-${ctx.track.highlightTime ? `- Viral Hook / Chorus Drop at: ${Math.round(ctx.track.highlightTime)}s\n` : ''}
-AVAILABLE LIVE PERCUSSION PATTERNS:
-1) "punjabi_dhol" - Authentic Punjabi Dhol Chaap (heavy curved Dagga + sharp Thapi slap, ideal for high-energy Punjabi/Desi/Bollywood club bangers >= 126 BPM)
-2) "bhangra_groove" - Traditional Bhangra Dholak & Chimta (bouncy swing groove, ideal for Bhangra, folk, or medium tempo Desi hits 90-125 BPM)
-3) "electronic_drums" - Club 4-on-the-Floor (punchy 909 kick, snappy 808 clap on 2 & 4, 16th hats, ideal for EDM, house, club dance, techno)
-4) "afrobeat" - Syncopated wooden congas, organic shakers, and deep polyrhythmic bounce (ideal for Afrobeat, Amapiano, Latin, Reggaeton)
-5) "none" - Muted/silent (use when track is acoustic, ballad, ambient, classical, vocal breakdown, or beat confidence is low)
-
-RULES:
-- If acoustic, slow/mellow ballad, or beat confidence < 60%, set shouldPlay: false, patternId: "none".
-- For high-energy Punjabi bangers (Sidhu Moosewala, Diljit, Karan Aujla, AP Dhillon, etc.), lock onto "punjabi_dhol" or "bhangra_groove".
-- For House, EDM, Club Remixes, lock onto "electronic_drums".
-- For Burna Boy, Rema, Wizkid, Amapiano, Latin, lock onto "afrobeat".
-- Set duckDuringVerse: true so drums sit quietly in verses and unleash full punch right when the viral hook drops.
-
-Respond ONLY with valid JSON in this exact schema:
-{
-  "shouldPlay": true,
-  "patternId": "punjabi_dhol",
-  "intensity": 1.0,
-  "volume": 0.85,
-  "duckDuringVerse": true,
-  "reason": "short explanation of the rhythmic sync choice and energy arrangement"
-}`;
-
-    const res = await this.askJson(prompt, 180, 5000);
-    if (!res) return null;
-    const parsed = PercussionSyncSchema.safeParse(res.data);
-    return parsed.success ? parsed.data : null;
   }
 
   /**
@@ -405,7 +373,7 @@ Reply ONLY with valid JSON in this exact structure:
     // Extract current DJ system context
     const stateA = engine.deckA.getPlaybackState();
     const stateB = engine.deckB.getPlaybackState();
-    const stateP = engine.percussionDeck.getState();
+    const rhythm = engine.rhythm.getState();
     const crossfader = engine.getCrossfader();
 
     const currentContext = {
@@ -423,11 +391,11 @@ Reply ONLY with valid JSON in this exact structure:
         volume: stateB.volume,
         lowGain: stateB.lowGain,
       },
-      percussionDeckP: {
-        pattern: stateP.activePatternId,
-        bpm: stateP.currentBpm,
-        isPlaying: stateP.isPlaying,
-        volume: stateP.volume,
+      rhythmEnhancer: {
+        on: rhythm.enabled,
+        style: rhythm.styleId,
+        level: rhythm.level,
+        playingNow: rhythm.section,
       },
       crossfader: crossfader < -0.3 ? 'Deck A (Left)' : crossfader > 0.3 ? 'Deck B (Right)' : 'Center',
     };
@@ -435,7 +403,7 @@ Reply ONLY with valid JSON in this exact structure:
     const systemPrompt = `You are an expert club & wedding AI DJ mixing agent governed by strict musical principles:
 1. Music first, effects second. Protect the listening experience and maintain set flow.
 2. Bass management: Never play two competing basslines or kicks at full volume; use 'bass_swap' to cut outgoing bass before bringing in the incoming bass.
-3. Continuous Percussion (Deck P): Punjabi Dhol and drum grooves must continue playing underneath transitions without restarting the loop timeline.
+3. Live Rhythm Enhancer (Deck P): real dhol/percussion that follows the song on air by itself (beat, arrangement, mixes). Only change it when the user asks for drums, a style or a level.
 4. Transitions: Choose musically appropriate durations (4s for drop cuts, 8s for standard phrase blends, 16s/32s for smooth harmonic blends).
 5. User Intent: Always honor explicit user requests (e.g. cutting bass, specific percussion styles).
 
@@ -450,14 +418,12 @@ Interpret the user's natural language instruction and output a STRICT JSON objec
   "transition": {
     "target_deck": "A" | "B",
     "style": "bass_swap" | "smooth_crossfade" | "drop_cut",
-    "duration_seconds": 4 | 8 | 16 | 32,
-    "sync_percussion": true
+    "duration_seconds": 4 | 8 | 16 | 32
   },
   "percussion": {
     "active": true | false,
-    "pattern_id": "punjabi_dhol" | "bhangra_groove" | "electronic_drums" | "afrobeat",
-    "volume": 0.0 to 1.0,
-    "sync_to_deck": "A" | "B" | "manual"
+    "style_id": ${RHYTHM_STYLES.map((st) => `"${st.id}"`).join(' | ')},
+    "level": 0.0 to 1.0
   },
   "eq": {
     "deck": "A" | "B",
@@ -471,6 +437,9 @@ Interpret the user's natural language instruction and output a STRICT JSON objec
   },
   "explanation": "Brief DJ reason for the action"
 }
+
+RHYTHM STYLES:
+${RHYTHM_STYLES.map((st) => `- ${st.id}: ${st.name}, ${st.description} Suits: ${st.suits}.`).join('\n')}
 
 USER INSTRUCTION: "${userInput}"
 
@@ -514,26 +483,16 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
   private heuristicFallback(input: string, _context: Record<string, unknown>): AICommandPlan {
     const text = input.toLowerCase();
 
-    // 1. Percussion controls
-    if (text.includes('dhol') || text.includes('percussion') || text.includes('drum')) {
-      const isStop = text.includes('stop') || text.includes('pause') || text.includes('kill');
-      let pattern: 'punjabi_dhol' | 'bhangra_groove' | 'electronic_drums' | 'afrobeat' = 'punjabi_dhol';
-
-      if (text.includes('bhangra')) pattern = 'bhangra_groove';
-      else if (text.includes('house') || text.includes('club') || text.includes('electronic')) pattern = 'electronic_drums';
-      else if (text.includes('afro')) pattern = 'afrobeat';
-
+    // 1. Rhythm layer
+    if (/(dhol|dholak|percussion|drums?|rhythm|tambourine|claps?|shaker|congas?)/.test(text)) {
+      const isStop = /(stop|pause|kill|off|mute)/.test(text);
+      const styleId = RHYTHM_KEYWORDS.find(([pattern]) => pattern.test(text))?.[1];
+      const name = styleId ? RHYTHM_STYLES.find((st) => st.id === styleId)!.name : 'the rhythm layer';
       return {
         action: 'control_percussion',
         target_deck: 'none',
-        percussion: {
-          active: !isStop,
-          pattern_id: pattern,
-          volume: 0.85,
-        },
-        explanation: isStop
-          ? 'Paused continuous percussion deck.'
-          : `Activated ${pattern} rhythmic loop synced with master timeline.`,
+        percussion: { active: !isStop, style_id: styleId },
+        explanation: isStop ? 'Stopped the rhythm layer.' : `Playing ${name}, locked to the song on air.`,
       };
     }
 
@@ -550,7 +509,6 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
           target_deck: targetDeck,
           style: isDrop ? 'drop_cut' : isSmooth ? 'smooth_crossfade' : 'bass_swap',
           duration_seconds: isDrop ? 4 : isSmooth ? 16 : 8,
-          sync_percussion: true,
         },
         explanation: `Executing ${isDrop ? 'quick drop-cut' : isSmooth ? 'harmonic 16s crossfade' : '8s club bass-swap'} transition into Deck ${targetDeck}.`,
       };
@@ -583,9 +541,8 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
         target_deck: 'B',
         style: 'bass_swap',
         duration_seconds: 8,
-        sync_percussion: true,
       },
-      explanation: 'Interpreted request as standard 8-bar club bass-swap transition with continuous Dhol sync.',
+      explanation: 'Interpreted request as a standard 8-bar club bass-swap transition.',
     };
   }
 
@@ -606,26 +563,19 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
           targetDeck: plan.transition.target_deck,
           durationSeconds: plan.transition.duration_seconds,
           style: plan.transition.style === 'drop_cut' ? 'smooth_crossfade' : plan.transition.style,
-          syncPercussion: plan.transition.sync_percussion,
         });
       }
     }
 
-    // 2. Control Percussion
+    // 2. Rhythm layer
     if (plan.percussion) {
+      const rhythm = engine.rhythm.getState();
       if (plan.percussion.active) {
-        if (plan.percussion.pattern_id) {
-          engine.percussionDeck.switchPattern(plan.percussion.pattern_id);
-        }
-        if (plan.percussion.volume !== undefined) {
-          engine.percussionDeck.setVolume(plan.percussion.volume);
-        }
-        // Start locked to the beat of the song on air (no-op if already playing)
-        if (!engine.percussionDeck.getState().isPlaying) {
-          engine.togglePercussion();
-        }
-      } else {
-        engine.percussionDeck.pause();
+        if (plan.percussion.style_id) engine.rhythmCommand({ kind: 'style', styleId: plan.percussion.style_id });
+        if (plan.percussion.level !== undefined) engine.rhythmCommand({ kind: 'level', level: plan.percussion.level });
+        if (!rhythm.enabled) engine.rhythmCommand({ kind: 'toggle' });
+      } else if (rhythm.enabled) {
+        engine.rhythmCommand({ kind: 'toggle' });
       }
     }
 

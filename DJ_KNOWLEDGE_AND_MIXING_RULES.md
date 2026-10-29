@@ -416,8 +416,13 @@ Do not implement every advanced feature at once. Keep the system modular, test e
 | Blend length | 8 bars when beatmatched (clamped to 8–20 s) | ✅ |
 | Never two basslines | Bass swap: the outgoing low band ramps out over the first half, the incoming low band ramps in over the second half | ✅ |
 | Unreliable beats → no blend | Beatmatching and on-beat starts need BPM confidence ≥ 0.6 for both songs | ✅ |
-| Dhol locked to the beat | Deck P is re-phased to the on-air song after every mix, seek and play | ✅ |
-| No repeats | Auto-curation skips songs already played this session | ✅ |
+| Dhol locked to the beat | Deck P schedules every hit on the on-air song's beat grid (no loop, no drift), and follows its energy: rest / light / full / fills (MIXING_RULES.md) | ✅ |
+| No repeats & no consecutive duplicates | Auto-curation excludes songs in Previously Played; no 2 consecutive songs in previously played can ever be the same (`areSongsConsecutivelySame`) | ✅ |
+| Up Next queue capacity | Proactively maintains up to 50 songs seeded from favorites, most played, `my_songs.txt`, and AI recommendations | ✅ |
+| Auto-added duration cap | Auto-added songs capped at 5 minutes (300 s) to preserve fast party rotation | ✅ |
+| 7-skip top queue avoidance | Auto-purges song #1 if avoided 7 times while playing other tracks | ✅ |
+| Thumbs down ("Don't Play Again Ever") | Permanently bans track across sessions, immediately drops from queue | ✅ |
+| Speed presets | 0.5x, 0.9x, 1.0x, 1.1x, 1.2x, 1.5x presets with pitch-preserving WSOLA Key Lock | ✅ |
 | No dead air | Mixes only into a **ready** song; otherwise the current song keeps playing | ✅ |
 | Headroom | Master limiter at −1.5 dB threshold; per-track loudness matching not yet done | ⚠️ Partial |
 | Mix at the right moment, not immediately | Mix / Next plans the blend: the best **bar** in the next 30 s (phrase starts, a drop into a calmer section, avoiding the hook and vocals) and the best entry in the new song (calm intro, drop landing as the blend ends) (`MixPointPlanner.ts`) | ✅ |

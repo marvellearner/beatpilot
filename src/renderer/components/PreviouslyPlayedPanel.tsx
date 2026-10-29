@@ -1,6 +1,7 @@
 import React from 'react';
 import { History, Music, Plus } from 'lucide-react';
 import { PlayLogEntry } from '../../types';
+import { areSongsConsecutivelySame, songKeys, isSameSong } from '../../audio/songMatch';
 
 interface PreviouslyPlayedPanelProps {
   entries: PlayLogEntry[]; // newest first
@@ -24,7 +25,24 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
 /** Songs that played recently, newest first. Songs from the last hour won't be auto-queued again. */
 export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onQueueAgain, compact }) => {
   const now = Date.now();
-  const inLastHour = entries.filter((e) => now - e.playedAt < HOUR_MS).length;
+
+  // RULE: In previously played no 2 consecutive songs can be same
+  const displayEntries = React.useMemo(() => {
+    const list: PlayLogEntry[] = [];
+    for (const entry of entries) {
+      if (!entry) continue;
+      if (
+        list.length === 0 ||
+        (!areSongsConsecutivelySame(entry, list[list.length - 1]) &&
+         !isSameSong(songKeys(entry), songKeys(list[list.length - 1])))
+      ) {
+        list.push(entry);
+      }
+    }
+    return list;
+  }, [entries]);
+
+  const inLastHour = displayEntries.filter((e) => now - e.playedAt < HOUR_MS).length;
 
   return (
     <div
@@ -36,7 +54,7 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
           <History className="w-3.5 h-3.5 text-violet-400" />
           <h3 className="font-extrabold text-xs text-white tracking-wide">PREVIOUSLY PLAYED</h3>
           <span className="text-[9px] font-mono text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded-full border border-violet-500/20">
-            {entries.length}
+            {displayEntries.length}
           </span>
         </div>
         {inLastHour > 0 && (
@@ -46,13 +64,13 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
         )}
       </div>
 
-      {entries.length === 0 ? (
+      {displayEntries.length === 0 ? (
         <div id="previously-played-empty" className="text-center py-4 text-[11px] text-slate-500">
           Nothing played yet. Songs appear here as they finish mixing in.
         </div>
       ) : (
         <div id="previously-played-list" className={`flex flex-col gap-1.5 overflow-y-auto pr-1 ${compact ? 'max-h-56' : 'max-h-[200px]'}`}>
-          {entries.map((entry) => {
+          {displayEntries.map((entry) => {
             const recent = now - entry.playedAt < HOUR_MS;
             return (
               <div

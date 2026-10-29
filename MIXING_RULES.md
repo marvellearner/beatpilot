@@ -118,22 +118,103 @@ A good transition must sound natural, maintain musical timing, control competing
 
 ---
 
-# Live Rhythm Enhancer (Deck P) Synchronization
+# Live Rhythm Enhancer (Deck P)
 
-1. **AI Rhythmic Analysis & Pattern Selection:**
-   - The AI agent (Ollama primary / Gemini cloud backup) analyzes the active song's BPM, genre, beat confidence, and viral hook drop.
-   - Selects the matching pattern:
-     - `punjabi_dhol`: Authentic Punjabi Dhol Chaap (heavy curved Dagga + sharp Thapi slap, ideal for high-energy Punjabi club bangers >= 126 BPM)
-     - `bhangra_groove`: Traditional Bhangra Dholak & Chimta (bouncy swing groove, ideal for Bhangra & medium tempo hits 90-125 BPM)
-     - `electronic_drums`: Club 4-on-the-Floor (punchy 909 kick, snappy 808 clap on 2 & 4, 16th hats for EDM, House, Techno)
-     - `afrobeat`: Syncopated wooden congas, organic shakers, and deep polyrhythmic bounce for Afrobeat & Amapiano
-     - `none`: Silenced for acoustic tracks, ballads, classical, or low beat confidence (< 60%)
-2. **Phase Lock & Downbeat Grid Alignment:**
-   - Deck P phase-locks to the exact downbeat of the on-air deck: `(relativeTime % loopDuration) * rate`.
-   - Continuous BPM tracking follows any tempo adjustments in real time without drifting.
-3. **Dynamic Verse Ducking & Viral Hook Drops:**
-   - Ducks rhythm volume during vocal verses and builds up to maximum power (`1.3x` intensity) at the viral hook drop.
-   - On-demand "AI Sync" button instantly re-evaluates musical harmony and snaps phase lock.
+A layer of real dhol, dholak and percussion played on top of the song on air. It is on by default and needs no musical choices: for every song it decides by itself whether drums play, which style and how loud (§5). It is a supporting layer: it follows the song's beat and structure, steps back during mixes, and rests whenever it can't play in time. Code: `src/audio/rhythm/`.
+
+## 1. Sound: real recorded samples
+
+- Every hit is a real recording (CC0 one-shots, sources in `public/percussion/CREDITS.md`): dhol bass side (dagga), dhol stick crack, dholak bass and treble heads, stick, tambourine, shaker, maraca, clap, 909-style kick, conga and frame drum.
+- Most sounds have 3–4 takes, rotated so the same take never plays twice in a row.
+- Each hit varies by up to ±8 % in velocity and ±3 ms in timing (±1 ms on the downbeat) so it doesn't sound machine-made. Ghost notes play clearly softer than accents.
+- **Bass management:** the dhol and dholak bass are high-passed at 70–75 Hz, the tops (crack, tambourine, shaker) from 200–600 Hz, so the layer stays out of the song's kick and 808. Only **Club Drive** adds a kick, and it is meant for songs whose own kick is weak or missing.
+- Each sound has its own level and stereo position; a gentle compressor glues the layer before it joins the master bus (so the master EQ and limiter apply to it too).
+- There is no CC0 recording of a chimta, so the styles use tambourine and stick sounds instead.
+
+## 2. Timing: locked to the song's beat grid
+
+- Nothing loops. Every hit is scheduled individually on the audio clock about 0.2 s ahead, at the exact time its step falls in the **on-air song's own beat grid** (BPM and downbeat in song seconds, mapped through the deck's start time and playback rate).
+- So it **cannot drift**, follows tempo changes, key-lock re-timing and set-tempo glides, and never changes pitch. Hits land within the ±3 ms humanize window of the grid.
+- After a seek, pause or new song it drops the hits already scheduled and re-locks on the next beat step (within ~0.1 s).
+- Songs above 140 BPM (e.g. 170–180 BPM bhangra) get the groove at **half-time**, which is how a dhol player would play them.
+- **Rule:** if the song's beat confidence is below 50 %, or its tempo is outside 70–200 BPM, the layer **rests** and says why. Drums that aren't locked to the beat ruin the music.
+
+## 3. Arrangement: when it plays and how much
+
+With **Follows song** on (the default), each 4-bar phrase gets a level from the song's loudness, compared with the song's loud parts (90th percentile of its phrases, i.e. the choruses):
+
+| Phrase loudness vs. the choruses | Level | Typical part |
+| :--- | :--- | :--- |
+| Under 50 % | **Rest** (no drums) | Intro, breakdown, outro, spoken parts |
+| 50–88 % | **Light groove** | Verse, pre-chorus |
+| 88 % and up | **Full groove** | Chorus, drop |
+
+- A single phrase that differs from both neighbours is smoothed out, so a loud bar in a verse doesn't trigger the chorus groove.
+- Before the music starts (spoken intro skipped by the intro detector) it always rests.
+- The phrase holding the song's hook plays the full groove if it is at least 70 % as loud as the choruses.
+- The last phrase of the song drops to the light groove, leaving the ending to the mix.
+- **Fills:** the last bar before a bigger section (rest → groove, light → full) is a fill, and so is the end of every 8 bars of full groove. A fill keeps the full groove underneath.
+- Changes happen only on bar lines; a new style starts on the next bar line.
+- With **Steady** chosen instead, it plays the full groove wherever the music plays, with a fill every 8 bars.
+
+**During mixes:** in a beatmatched blend it drops to the light groove (no fills); in a cut between songs of different tempos it rests. When the new song is on air it locks onto that song's grid.
+
+## 4. Styles
+
+| Style | Feel | Suits |
+| :--- | :--- | :--- |
+| **Dhol Chaal** | The classic bhangra shuffle: boom on the beat, crack on the off-beats (swing 0.28) | Punjabi, bhangra, wedding songs |
+| **Dhol Dhamaal** | Peak-time: a boom on every beat and driving cracks | High-energy Punjabi and Bollywood bangers |
+| **Dholak Keherwa** | The 8-beat keherwa (dha ge na ti na ka dhi na) on dholak, lighter than dhol | Bollywood, sangeet, folk, mid-tempo desi |
+| **Clap & Tambourine** | Claps on 2 and 4 with a tambourine shuffle, no low end | Pop, Bollywood, songs with strong drums of their own |
+| **Club Tops** | House-style shaker and claps, no kick | House, EDM, dance remixes |
+| **Club Drive** | Four-on-the-floor kick, claps and shaker | Songs with soft or no drums |
+| **Afro Groove** | Congas, son clave on sticks, shaker, soft frame-drum pulse | Afrobeats, amapiano, reggaeton, Latin |
+| **Light Shaker** | Soft shaker and maraca | Chill, romantic, acoustic |
+
+Each style has a light, a full and a fill version (16-step bars in `src/audio/rhythm/styles.ts`).
+
+## 5. Who decides what plays on each song
+
+With **🤖 AI decides** (the default) every song gets its own plan when it is analysed, well before it plays (`src/audio/rhythm/rhythmPlan.ts`):
+
+1. **Which song is it?** The song's language (Punjabi, Hindi, English, Spanish, other) comes from:
+   - **Known artists and scripts first:** Gurmukhi or Devanagari in the title, or a well-known artist or title word (Diljit, Sidhu Moose Wala, Karan Aujla, Arijit, Badshah, bhangra, reggaeton…). These are certain, and the AI isn't asked.
+   - **Otherwise the AI DJ** (local Qwen 2.5 3B, or Gemini when it is the active backend), asked once per song with the answer limited to one of those languages. Answers are remembered across sessions.
+   - **Until the AI answers, or if it is offline:** a guess (a plain Latin-alphabet title counts as English).
+2. **Does it get drums?** No when the beat confidence is below 50 %, when the title marks it as devotional (chalisa, aarti, bhajan, shabad, gurbani, kirtan, naat…), or when it is slower than 75 BPM outside the Party and Bhangra moods.
+3. **Which style?**
+
+   | Mood | Punjabi | Hindi | Spanish | English / other |
+   | :--- | :--- | :--- | :--- | :--- |
+   | Party | Dhol Dhamaal | Dhol Chaal | Afro Groove | Club Tops at 118–132 BPM, otherwise Clap & Tambourine |
+   | Bhangra | Dhol Chaal | Dhol Chaal | Dhol Chaal | Dhol Chaal |
+   | Normal | Dhol Chaal | Dholak Keherwa | Afro Groove | Clap & Tambourine |
+   | Chill, Romantic | Dholak Keherwa | Dholak Keherwa | Light Shaker | Light Shaker |
+
+4. **How loud, from the song's own sound** (thresholds calibrated on 60 songs from the app's cache):
+   - **Hard-hitting drums already** (low-end punch above ~0.13, e.g. *295*, *Morni*, *Dope Shope*): level 0.5, and Dhol Dhamaal becomes the lighter Dhol Chaal, so the dhol doesn't pile on top of the song's own drums.
+   - **Vocal-heavy** (mid-band share above 0.58): at most 0.55.
+   - **Soft drums at a party** (punch below ~0.095, non-desi songs): **Club Drive**, adding a kick, at 0.8.
+   - Otherwise 0.7 (0.45 in Chill and Romantic).
+
+The card shows the plan, who identified the song (**🤖 AI**, **Known artist** or **Guess**) and why, e.g. *"Punjabi song, party mood: Dhol Chaal, kept light (its drums are already strong)"*. A plan that changes while a song plays (the AI answered late) switches on the next bar line. AI questions about songs wait while a mix or next-song question is in flight, because those are time-critical.
+
+**Why the AI identifies the song but doesn't pick the style.** Tested on 20 real songs with the app's local model, qwen2.5:3b:
+
+- Asked for the style directly, it put dhol on nearly every song, called *Blinding Lights* and *Titanium* "bhangra", gave every song the same level, ignored the audio facts, and took 15–38 s per song.
+- Asked only for the language, with the answer limited to one value, it was right for 17 of 20 songs in about 3 s. Its misses (*295*, *Mundian To Bach Ke* as Hindi) are songs the known-artist list already gets right.
+- With both combined, all 20 came out right, and the AI was only needed for 9 of them (about 1.2 s each).
+
+The style table and the audio rules above make the musical decision.
+
+**Known limitation:** slow love songs (e.g. *Tum Hi Ho*) aren't recognised as ballads. The model's answer to "is it a slow or sad song?" was unreliable, and there were no ballads in the cache to calibrate an audio test on. In Party mood such a song gets the mood's normal style.
+
+**Choose myself** switches to manual: one style (any of §4) for every song, with **Follows the song** or **Steady all song**.
+
+## 6. Controls
+
+On/off, **🤖 AI decides / Choose myself**, volume (0–100 %, multiplied by the plan's level in AI mode) and mute; the style list and Follows/Steady only in **Choose myself**. The same panel is on the laptop (Party and Pro views) and on the phone remote. Typed commands work too ("add dhol", "dholak", "stop the drums"; choosing a style this way switches to manual). Settings, including on/off, are remembered in this browser. The **Bhangra** mood also switches the layer on.
 
 ---
 
@@ -275,6 +356,12 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
    - Any matching song is immediately purged from the Up Next queue during queue sanitization, when a track finishes playing, and when restoring the queue from persistent storage.
    - When automatically replenishing or seeding Up Next (up to 50 songs), songs in the Previously Played history (`playLog`) are strictly excluded.
 
+2. **No Consecutive Identical Songs in Previously Played:**
+   - **In Previously Played, no 2 consecutive songs can ever be the same.**
+   - If a song finishes or is played again immediately, the engine updates the timestamp (`playedAt`) and metadata on the existing latest entry instead of appending an adjacent duplicate row.
+   - Storage hydration (`loadPlayLog`), runtime state emissions (`getSyncState`), and UI presentation components (`PreviouslyPlayedPanel.tsx` in Party Console and Mobile Remote) strictly deduplicate adjacent matching entries using multi-attribute song equivalence (`areSongsConsecutivelySame`).
+   - Non-consecutive plays (e.g. Song A -> Song B -> Song A) are preserved to maintain an accurate chronology of the mix set.
+
 ---
 
 # AI Mood Reading & Top 5 Queue Insertion
@@ -342,5 +429,27 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
 4. **Dedicated "Don't Play" Management Tab:**
    - In the Quick Starters panel, a **"Don't Play"** tab lists all blocked tracks with their title, artist, and thumbnail.
    - An **"Unblock"** button allows the user to easily remove any track from the blacklist at any time.
+
+---
+
+# Up Next Queue 50-Song Capacity & Multi-Tier Seeding Rules
+
+1. **50-Song Queue Target:**
+   - The engine actively maintains up to **50 songs** (`MAX_QUEUE_TARGET = 50`) in the Up Next queue.
+   - When the queue size drops below 50, the auto-curation loop periodically seeds new tracks to keep the playlist full.
+
+2. **Multi-Tier Seeding Precedence:**
+   - **Tier 1: User Favorites** (`favorites`) — Starred bangers that have not recently played.
+   - **Tier 2: Past Played & Most Played History** (`mostPlayedSongs`, `playLog`) — High-energy party favorites, strictly excluding songs played within the last hour.
+   - **Tier 3: Local Song Library** (`my_songs.txt`) — Curated local tracks.
+   - **Tier 4: Contextual AI Recommendations** (`/api/recommend`) — Dynamically fetched songs matching the current mood and tempo.
+
+3. **Combined Exclusion Filters:**
+   - Candidates are automatically rejected if they:
+     - Exceed the **5-minute duration limit** ($> 300\text{ seconds}$).
+     - Are already present in the **Up Next queue** or **currently on air**.
+     - Are present in **Previously Played** (`playLog`).
+     - Are in the **"Don't Play Again Ever"** blacklist (`bannedSongs`).
+
 
 

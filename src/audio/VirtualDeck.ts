@@ -307,6 +307,14 @@ export class VirtualDeck {
     return this.pausedAt;
   }
 
+  /**
+   * The audio-clock anchor of playback (position = (ctx.currentTime - startedAt) * rate),
+   * so other parts can schedule sounds exactly on this song's beats. Null when stopped.
+   */
+  public getClockAnchor(): { startedAt: number; rate: number } | null {
+    return this.isPlaying && this.track ? { startedAt: this.startedAt, rate: this.playbackRate } : null;
+  }
+
   public getTrack(): TrackMetadata | null {
     return this.track;
   }

@@ -9,7 +9,7 @@
  *    and no beat; a musical intro (pads, piano, vocals over strings) is smooth and sustained.
  *
  * Scans up to 150 s (music video intros can run past a minute, e.g. "Morni" starts at 1:07).
- * The AI DJ (Ollama) is consulted for unclear cases; see AudioEngine.analyzeIntro.
+ * Decided from the audio alone (no AI); the result is applied in AudioEngine.analyzeTrack.
  */
 
 export interface IntroAnalysisResult {

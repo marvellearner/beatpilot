@@ -1,5 +1,6 @@
 import { VirtualDeck } from './VirtualDeck';
-import { PercussionDeck } from './PercussionDeck';
+import { RhythmEnhancer, type SongClock, type RhythmCommand } from './rhythm/RhythmEnhancer';
+import { computeRhythmFeatures, guessLanguage, planRhythm, type RhythmPlan, type SongLanguage, type SongRhythmFeatures } from './rhythm/rhythmPlan';
 import {
   DeckId,
   TransitionConfig,
@@ -12,14 +13,13 @@ import {
   TempoInfo,
   PlayLogEntry,
 } from '../types';
-import { detectBpmFromBuffer, BpmAnalysisResult } from './BpmDetector';
-import { evaluatePercussionForTrack, PercussionDecision } from '../ai/PercussionAdvisor';
+import { detectBpmFromBuffer } from './BpmDetector';
 import { HighlightDetector } from './HighlightDetector';
 import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
-import { songKeys, isSameSong, cleanCoreTitle, type SongRef } from './songMatch';
-import { OllamaDJAgent } from '../ai/OllamaDJAgent';
+import { songKeys, isSameSong, cleanCoreTitle, areSongsConsecutivelySame, type SongRef } from './songMatch';
+import { DJAgent } from '../ai/DJAgent';
 import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
 
 const SOUND_SETTINGS_KEY = 'ai_dj_sound_settings';
@@ -42,6 +42,27 @@ const MIN_BEATMATCH_CONFIDENCE = 0.6;
 const UNMATCHED_TRANSITION_SECONDS = 2; // tempos too far apart: short cut on the beat, no long flam
 const MANUAL_MIX_LOOKAHEAD_SECONDS = 45; // Mix / Next: find the best blend point within the next 45 s per MIXING_RULES.md
 const OUTRO_PLAN_SECONDS = 45; // auto-mix: plan the blend point within the last 45 s
+// Ask the AI DJ this much earlier than that: on a CPU model the next-song pick plus the mix
+// choice can take ~20 s, which used to eat most of the outro window and come back too late
+const AI_PREP_LEAD_SECONDS = 45;
+
+/** An AI DJ mix choice: which exit/entry point to use (song seconds), and blend vs cut. */
+interface AiMixChoice {
+  exitTime: number;
+  entryTime: number;
+  style: 'blend' | 'cut';
+  bars: number;
+  reason: string;
+}
+
+/** The AI DJ's answers for the coming end-of-song mix, worked out before the outro window. */
+interface AiOutroPrep {
+  trackId: string;
+  candidateIds: string[]; // ready songs the pick was made from; a changed queue makes it stale
+  pick?: { itemId: string; reason: string };
+  mix?: AiMixChoice & { itemId: string; key: string };
+}
+const SONG_LANGUAGES_KEY = 'ai_dj_song_languages'; // the AI DJ's answer per song, so it's asked once
 const PLAN_STABLE_SECONDS = 2.5; // stop ramping tempo this close to a planned mix so timing is exact
 // Tempo glide speed for both the pre-mix ramp and the return to natural pitch (0.4% per second)
 const PITCH_RETURN_PER_SECOND = 0.004;
@@ -70,7 +91,8 @@ export class AudioEngine {
   // Decks
   public deckA: VirtualDeck;
   public deckB: VirtualDeck;
-  public percussionDeck: PercussionDeck;
+  // Live Rhythm Enhancer (Deck P): sample-based dhol/percussion locked to the on-air song
+  public rhythm: RhythmEnhancer;
 
   // Master Nodes: decks + drums -> masterBus -> EQ bands -> eqHeadroom -> limiter -> masterGain
   private masterBus: GainNode;
@@ -97,20 +119,17 @@ export class AudioEngine {
   public queue: QueuedTrack[] = [];
   public acquisitionStatus: string = '';
   public autoCurationEnabled: boolean = true;
-  public autoPercussionEnabled: boolean = false; // Stopped background music/drums per user preference
   public autoCueViralHook: boolean = false; // Never start from hook by default (buildup is important)
-  public percussionDecisionReason: string = 'Background drums/orchestra paused per user preference';
   private isFetchingRecommendations: boolean = false;
   private lastRefillAttemptAt: number = 0;
   private isPreloadingNext: boolean = false;
+  private isPopulatingQueue: boolean = false;
   // Songs already played this session, so auto-curation doesn't repeat them
   private playedUrls = new Set<string>();
   // Every play with its time (kept across reloads): "Previously played" + the 1-hour no-repeat rule
   public playLog: PlayLogEntry[] = [];
   // Recent intro-skip analyses by track id, for diagnosing songs on real audio
   private introAnalyses = new Map<string, IntroAnalysisResult>();
-  // Drums the user had running when they paused, restarted on play
-  private resumePercussionOnPlay: boolean = false;
   // Avoidance tracking for the first song in Up Next queue (remove after avoiding 7 times)
   public topSongAvoidKey: string | null = null;
   public topSongAvoidCount: number = 0;
@@ -151,8 +170,8 @@ export class AudioEngine {
     blendBars?: number; // set by the AI DJ
   } | null = null;
 
-  // AI DJ brain: Gemini cloud primary with local Ollama offline backup
-  public djAgent = new OllamaDJAgent();
+  // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
+  public djAgent = new DJAgent();
   public aiStatus: 'checking' | 'online' | 'offline' = 'checking';
   public aiProvider: 'gemini' | 'ollama' | 'none' = 'none';
   public aiModelName: string = '';
@@ -161,6 +180,18 @@ export class AudioEngine {
   public diskCacheCount: number = 0;
   public diskCacheMb: number = 0;
   private choosingNextSong = false;
+  private aiOutroPrep: AiOutroPrep | null = null;
+  // AI mix and next-song questions in flight; rhythm questions wait for them (they're time-critical)
+  private aiMixCalls = 0;
+  // Live Rhythm Enhancer decisions (see rhythm/rhythmPlan.ts): made from each song's language
+  // (asked of the AI DJ once per song, remembered across sessions), the mood and its audio
+  private songLanguages = new Map<string, SongLanguage>();
+  private songLanguagesLoaded = false;
+  private rhythmPlans = new Map<string, RhythmPlan>(); // by "<song>|<mood>|<language>"
+  private rhythmFeatures = new Map<string, SongRhythmFeatures>();
+  private songIdAsked = new Set<string>();
+  private songIdQueue: TrackMetadata[] = [];
+  private songIdBusy = false;
   private recentTitles: string[] = [];
   private loopTicks = 0;
 
@@ -246,9 +277,9 @@ export class AudioEngine {
     this.deckA = new VirtualDeck('A', this.ctx, this.crossfaderGainA);
     this.deckB = new VirtualDeck('B', this.ctx, this.crossfaderGainB);
 
-    // Percussion Deck joins the master bus directly (independent of crossfader!)
-    this.percussionDeck = new PercussionDeck(this.ctx, this.masterBus);
-    this.percussionDeck.stop(); // Ensure completely stopped and silent on startup
+    // The rhythm layer joins the master bus directly (independent of the crossfader) and
+    // follows whichever song is on air
+    this.rhythm = new RhythmEnhancer(this.ctx, this.masterBus, () => this.rhythmClock(), () => this.notify());
 
     // Set initial crossfader to 100% Deck A
     this.applyCrossfader(-1);
@@ -256,7 +287,6 @@ export class AudioEngine {
     // Forward deck updates
     this.deckA.onStateUpdate = () => this.handleDeckUpdate('A');
     this.deckB.onStateUpdate = () => this.handleDeckUpdate('B');
-    this.percussionDeck.onStateUpdate = () => this.notify();
 
     // Restore the last mood and EQ the user chose
     this.loadSoundSettings();
@@ -353,7 +383,11 @@ export class AudioEngine {
     this.mood = mood.id;
     this.applyEq(mood.eq);
     this.autoCueViralHook = mood.hookCue;
-    if (mood.autoDrums && !this.autoPercussionEnabled) this.toggleAutoPercussion();
+    if (mood.autoDrums) this.rhythm.setEnabled(true);
+    // Rhythm plans are per mood: decide again for the song on air first, then the ready songs
+    const onAir = this.onAirDeck().getTrack();
+    if (onAir) this.ensureRhythmPlan(onAir, true);
+    for (const q of this.queue) if (q.status === 'ready' && q.audioBuffer) this.ensureRhythmPlan(this.queuedItemToTrack(q));
     this.sessionBpm = this.pickSessionBpm();
 
     // Re-curate: drop AI picks that haven't started downloading, and search again for this mood
@@ -539,7 +573,6 @@ export class AudioEngine {
           Math.abs(newBpm - (this.sessionBpm ?? newBpm)) > 1 ? ` — as close to ${this.sessionBpm} as it can go cleanly` : ''
         }.`
       : `Tempo ${target.toFixed(2)}x (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%) = ${newBpm} BPM, ${this.keyLock ? 'key lock on' : 'vinyl mode (pitch follows speed)'}${this.sessionBpm !== null ? ', whole set follows' : ''}.`;
-    if (this.percussionDeck.getState().isPlaying) this.startPercussionInSync();
     this.replanPendingMix();
     this.notify();
   }
@@ -813,6 +846,16 @@ export class AudioEngine {
       nextReady.audioBuffer
     ) {
       this.planOutroMix(curState.track!);
+    } else if (
+      curState.isPlaying &&
+      curState.duration > 60 &&
+      !this.isTransitioning &&
+      this.aiStatus === 'online' &&
+      remaining <= OUTRO_PLAN_SECONDS + AI_PREP_LEAD_SECONDS &&
+      remaining > OUTRO_PLAN_SECONDS + 5 &&
+      this.aiOutroPrep?.trackId !== curState.track!.id
+    ) {
+      void this.prepareAiForOutro(curState.track!);
     }
 
     // Re-check the AI DJ every minute (Ollama may have been started or stopped)
@@ -832,37 +875,13 @@ export class AudioEngine {
       this.autoCurationEnabled &&
       usableQueueLength < MIN_QUEUE_TARGET &&
       !this.isFetchingRecommendations &&
+      !this.isPopulatingQueue &&
       Date.now() - this.lastRefillAttemptAt > 10_000
     ) {
-      const seedTrack = curTrack || (this.queue[0] ? this.queuedItemToTrack(this.queue[0]) : null);
-      if (seedTrack) {
-        this.refillQueueWithRecommendations(seedTrack);
-      }
+      void this.populateQueueTo50();
     }
 
-    // 3. Dynamic Arrangement & Real-time Beat/Phase Sync Guard
-    if (curState.isPlaying && curTrack) {
-      if (this.percussionDeck.getState().isPlaying) {
-        // Continuous BPM tracking across tempo glides / set tempo shifts
-        if (Math.abs(this.percussionDeck.getState().currentBpm - curState.effectiveBpm) > 0.05) {
-          this.percussionDeck.syncBpm(curState.effectiveBpm);
-        }
-      }
-
-      // Dynamic Arrangement ("Cherry on Top" Rule):
-      // Keep live percussion ducked/subtle during slow verses, and unleash full power right on the viral hook drop!
-      if (curTrack.highlightTime) {
-        const timeToHook = curTrack.highlightTime - curState.currentTime;
-        if (timeToHook > 4 && curState.currentTime < curTrack.highlightTime) {
-          this.percussionDeck.setDucked(true);
-        } else {
-          this.percussionDeck.setDucked(false);
-          if (curState.currentTime >= curTrack.highlightTime && curState.currentTime <= curTrack.highlightTime + 25) {
-            this.percussionDeck.setIntensity(1.3);
-          }
-        }
-      }
-    }
+    // 3. The rhythm layer runs its own scheduler off rhythmClock(); nothing to do here
 
     // 4. Preload the immediate next queued song so it's decoded and 100% ready
     if (this.queue.length > 0 && !this.isPreloadingNext) {
@@ -979,13 +998,14 @@ export class AudioEngine {
 
     const outInfo = outTrack ? this.mixSongInfo(outTrack) : null;
     const incInfo = this.mixSongInfo(incoming);
+    const blendBeats = outTrack && this.canBeatmatch(outTrack, incoming) ? this.blendBars() * 4 : 4;
     const plan =
       outTrack && outInfo && incInfo
         ? planMix({
             out: outInfo,
             inc: incInfo,
             outPosition: outState.currentTime,
-            blendBeats: this.canBeatmatch(outTrack, incoming) ? this.blendBars() * 4 : 4,
+            blendBeats,
             lookAheadSeconds,
             minLeadSeconds: 1.5,
             preferIncomingHook: false, // Never start from hook because build up is also important
@@ -1000,11 +1020,87 @@ export class AudioEngine {
     this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s (following MIXING_RULES.md): ${plan.reason}. Click Mix Now to mix immediately.`;
     this.notify();
 
-    // Let the AI DJ refine the choice in the background; the analysis' plan stands if it's slow
-    if (this.aiStatus === 'online' && outTrack && !durationSeconds) {
+    if (!outTrack || durationSeconds) return true;
+
+    // Use the AI DJ's choice made ahead of time, but only if that exact exit and entry are
+    // still among the rule-abiding options (the song, tempo or mood may have changed since)
+    const prepared = this.aiOutroPrep?.trackId === outTrack.id ? this.aiOutroPrep.mix : undefined;
+    if (
+      prepared &&
+      prepared.itemId === item.id &&
+      prepared.key === this.mixPrepKey(outTrack, incoming, blendBeats) &&
+      plan.exitOptions.some((o) => Math.abs(o.time - prepared.exitTime) < 0.01) &&
+      plan.entryOptions.some((o) => Math.abs(o.time - prepared.entryTime) < 0.01)
+    ) {
+      this.applyAiMix(this.pendingMix, prepared);
+    } else if (this.aiStatus === 'online') {
+      // Otherwise ask now, in the background; the analysis' plan stands if it's slow
       void this.askAiToRefineMix(outTrack, incoming);
     }
     return true;
+  }
+
+  /** What an ahead-of-time AI mix choice depends on, so a stale one is never applied. */
+  private mixPrepKey(out: TrackMetadata, inc: TrackMetadata, blendBeats: number): string {
+    return [out.id, out.bpm, out.duration, inc.id, inc.bpm, inc.duration, blendBeats, this.mood].join('|');
+  }
+
+  /**
+   * Runs before the outro window: the AI DJ picks the next song and the mix points for it,
+   * using the same plan the outro will compute OUTRO_PLAN_SECONDS before the end.
+   * planOutroMix and planMixInto then apply the answers at once instead of waiting for the model.
+   */
+  private async prepareAiForOutro(current: TrackMetadata) {
+    const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer).slice(0, 3);
+    const prep: AiOutroPrep = { trackId: current.id, candidateIds: ready.map((q) => q.id) };
+    this.aiOutroPrep = prep;
+    if (ready.length === 0) return;
+
+    let choice = ready[0];
+    if (ready.length > 1) {
+      const decision = await this.askAiForNextSong(current, ready);
+      if (this.aiOutroPrep !== prep) return;
+      if (decision) {
+        choice = ready[decision.pick - 1];
+        prep.pick = { itemId: choice.id, reason: decision.reason };
+      }
+    }
+
+    const state = this.onAirDeck().getPlaybackState();
+    const outTrack = state.track;
+    if (!outTrack || outTrack.id !== current.id || !this.queue.includes(choice) || !choice.audioBuffer) return;
+    const incoming = this.queuedItemToTrack(choice);
+    this.analyzeTrack(incoming);
+    this.copyAnalysisToQueueItem(incoming, choice);
+    this.analyzeTrack(outTrack);
+    const outInfo = this.mixSongInfo(outTrack);
+    const incInfo = this.mixSongInfo(incoming);
+    if (!outInfo || !incInfo) return;
+
+    const canBlend = this.canBeatmatch(outTrack, incoming);
+    const blendBeats = canBlend ? this.blendBars() * 4 : 4;
+    const plan = planMix({
+      out: outInfo,
+      inc: incInfo,
+      outPosition: state.duration - OUTRO_PLAN_SECONDS, // where the outro plan will start looking
+      blendBeats,
+      lookAheadSeconds: OUTRO_PLAN_SECONDS,
+      minLeadSeconds: 1.5,
+      preferIncomingHook: false,
+    });
+    if (!plan) return;
+
+    const decision = await this.askAiForMix(outTrack, incoming, choice, plan, canBlend);
+    if (!decision || this.aiOutroPrep !== prep) return;
+    prep.mix = {
+      itemId: choice.id,
+      key: this.mixPrepKey(outTrack, incoming, blendBeats),
+      exitTime: plan.exitOptions[decision.exit - 1].time,
+      entryTime: plan.entryOptions[decision.entry - 1].time,
+      style: decision.style,
+      bars: decision.bars,
+      reason: decision.reason,
+    };
   }
 
   /** Wakes up shortly before the blend point; the start itself is then scheduled sample-accurately. */
@@ -1025,66 +1121,100 @@ export class AudioEngine {
   private async askAiToRefineMix(outTrack: TrackMetadata, incoming: TrackMetadata) {
     const pending = this.pendingMix;
     if (!pending) return;
-    const outState = this.onAirDeck().getPlaybackState();
-    const canBlend = this.canBeatmatch(outTrack, incoming);
     const { plan } = pending;
+    const decision = await this.askAiForMix(outTrack, incoming, pending.item, plan, this.canBeatmatch(outTrack, incoming));
+    // Ignore a late answer: the mix may have started, been cancelled, or replaced
+    if (!decision || this.pendingMix !== pending || this.isTransitioning) return;
+    this.applyAiMix(pending, {
+      exitTime: plan.exitOptions[decision.exit - 1].time,
+      entryTime: plan.entryOptions[decision.entry - 1].time,
+      style: decision.style,
+      bars: decision.bars,
+      reason: decision.reason,
+    });
+  }
 
-    const decision = await this.djAgent.chooseMix({
+  private askAiForMix(outTrack: TrackMetadata, incoming: TrackMetadata, item: QueuedTrack, plan: MixPlan, canBlend: boolean) {
+    const outState = this.onAirDeck().getPlaybackState();
+    return this.countAiMixCall(this.djAgent.chooseMix({
       mood: getMood(this.mood).label.toLowerCase(),
       sessionBpm: this.sessionBpm,
       current: { title: outTrack.title, artist: outTrack.artist, bpm: outState.effectiveBpm, position: outState.currentTime, duration: outState.duration },
-      next: { title: incoming.title, artist: incoming.artist, bpm: incoming.bpm, keyLocked: pending.item.tempoLockedTo !== undefined },
+      next: { title: incoming.title, artist: incoming.artist, bpm: incoming.bpm, keyLocked: item.tempoLockedTo !== undefined },
       canBlend,
       exitOptions: plan.exitOptions.map((o) => ({ inSeconds: (o.time - outState.currentTime) / outState.playbackRate, at: o.time, why: o.why })),
       entryOptions: plan.entryOptions.map((o) => ({ at: o.time, why: o.why })),
-    });
-    // Ignore a late answer: the mix may have started, been cancelled, or replaced
-    if (!decision || this.pendingMix !== pending || this.isTransitioning) return;
+    }));
+  }
 
-    const exit = plan.exitOptions[decision.exit - 1];
-    const entry = plan.entryOptions[decision.entry - 1];
+  private askAiForNextSong(current: TrackMetadata, ready: QueuedTrack[]) {
+    return this.countAiMixCall(this.djAgent.chooseNextSong({
+      mood: getMood(this.mood).label.toLowerCase(),
+      sessionBpm: this.sessionBpm,
+      current: { title: current.title, artist: current.artist, bpm: current.bpm },
+      recentlyPlayed: this.recentTitles.slice(-3),
+      options: ready.map((q) => ({ title: q.title, artist: q.artist, bpm: q.bpm ?? 0, requested: !q.isAiRecommended })),
+    }));
+  }
+
+  private async countAiMixCall<T>(call: Promise<T>): Promise<T> {
+    this.aiMixCalls++;
+    try {
+      return await call;
+    } finally {
+      this.aiMixCalls--;
+    }
+  }
+
+  /** Switches a planned mix to the AI DJ's exit/entry points and style, if there's still time. */
+  private applyAiMix(pending: NonNullable<typeof this.pendingMix>, choice: AiMixChoice) {
     const now = this.onAirDeck().getPlaybackState();
-    const exitStillAhead = (exit.time - now.currentTime) / now.playbackRate > PLAN_STABLE_SECONDS + 0.5;
-    const currentStillAhead = (plan.exitTime - now.currentTime) / now.playbackRate > PLAN_STABLE_SECONDS + 0.5;
-    if (!currentStillAhead) return; // too close to the planned start to change anything safely
+    const stillAhead = (t: number) => (t - now.currentTime) / now.playbackRate > PLAN_STABLE_SECONDS + 0.5;
+    if (!stillAhead(pending.plan.exitTime)) return; // too close to the planned start to change anything safely
 
     pending.plan = {
-      ...plan,
-      exitTime: exitStillAhead ? exit.time : plan.exitTime,
-      entryTime: entry.time,
-      reason: `🤖 ${decision.reason}`,
+      ...pending.plan,
+      exitTime: stillAhead(choice.exitTime) ? choice.exitTime : pending.plan.exitTime,
+      entryTime: choice.entryTime,
+      reason: `🤖 ${choice.reason}`,
     };
-    pending.style = decision.style;
-    pending.blendBars = decision.bars;
+    pending.style = choice.style;
+    pending.blendBars = choice.bars;
     this.schedulePendingMix();
 
     const startsIn = Math.round(this.pendingMixStartsIn() ?? 0);
-    const how = decision.style === 'cut' ? 'cut on the beat' : `${decision.bars}-bar blend`;
-    this.lastAiDecision = `${decision.reason} (${how})`;
-    this.acquisitionStatus = `🤖 AI DJ: ${decision.reason} — ${how} into "${pending.item.title}" in ${startsIn}s (following MIXING_RULES.md). Click Mix Now to mix immediately.`;
+    const how = choice.style === 'cut' ? 'cut on the beat' : `${choice.bars}-bar blend`;
+    this.lastAiDecision = `${choice.reason} (${how})`;
+    this.acquisitionStatus = `🤖 AI DJ: ${choice.reason} — ${how} into "${pending.item.title}" in ${startsIn}s (following MIXING_RULES.md). Click Mix Now to mix immediately.`;
     this.notify();
   }
 
   /**
-   * End-of-song auto-mix. With several songs ready, the AI DJ picks the one that flows best;
-   * otherwise (or if it's slow/offline) the queue order is used.
+   * End-of-song auto-mix. With several songs ready, the AI DJ picks the one that flows best
+   * (usually already decided by prepareAiForOutro); otherwise, or if it's slow/offline, the
+   * queue order is used.
    */
   private async planOutroMix(current: TrackMetadata) {
     const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer).slice(0, 3);
     if (ready.length === 0) return;
     let choice = ready[0];
 
-    if (ready.length > 1 && this.aiStatus === 'online') {
+    const prep = this.aiOutroPrep;
+    const preparedPick =
+      prep?.trackId === current.id &&
+      prep.pick &&
+      prep.candidateIds.join() === ready.map((q) => q.id).join()
+        ? ready.find((q) => q.id === prep.pick!.itemId)
+        : undefined;
+
+    if (preparedPick) {
+      choice = preparedPick;
+      this.lastAiDecision = `Next: "${choice.title}" — ${prep!.pick!.reason}`;
+    } else if (ready.length > 1 && this.aiStatus === 'online') {
       this.choosingNextSong = true;
       this.acquisitionStatus = '🤖 AI DJ is choosing the next song…';
       this.notify();
-      const decision = await this.djAgent.chooseNextSong({
-        mood: getMood(this.mood).label.toLowerCase(),
-        sessionBpm: this.sessionBpm,
-        current: { title: current.title, artist: current.artist, bpm: current.bpm },
-        recentlyPlayed: this.recentTitles.slice(-3),
-        options: ready.map((q) => ({ title: q.title, artist: q.artist, bpm: q.bpm ?? 0, requested: !q.isAiRecommended })),
-      });
+      const decision = await this.askAiForNextSong(current, ready);
       this.choosingNextSong = false;
       if (decision) {
         choice = ready[decision.pick - 1];
@@ -1131,7 +1261,6 @@ export class AudioEngine {
       targetDeck: targetDeckId,
       durationSeconds,
       style: 'bass_swap',
-      syncPercussion: true,
       sourceExitTime: exitNow ? undefined : pending.plan.exitTime,
       targetEntryTime: pending.plan.entryTime,
     });
@@ -1159,43 +1288,65 @@ export class AudioEngine {
     this.isFetchingRecommendations = true;
     this.lastRefillAttemptAt = Date.now();
     try {
-      const res = await fetch(
-        `/api/recommend?title=${encodeURIComponent(current.title)}&artist=${encodeURIComponent(current.artist)}&mood=${this.mood}`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const recs: Array<{ title: string; url: string; author: string; duration: number; thumbnail: string }> =
-          data.recommendations || [];
-
-        for (const item of recs) {
-          if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
-          // RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue
-          if (item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
-
-          // Avoid duplicates of the queue, the current song, and songs already played this session
-          const isDuplicate =
-            this.playedUrls.has(item.url) ||
-            item.url === current.url ||
-            this.isDontPlayAgain({ title: item.title, artist: item.author, url: item.url }) ||
-            this.isSongInQueueOrPlayed({ title: item.title, artist: item.author, url: item.url }) ||
-            this.isTitleInQueue(item.title, item.author, item.url) ||
-            this.lastPlayedWithinHour({ title: item.title, artist: item.author, url: item.url }) !== null;
-          if (!isDuplicate) {
-            this.queue.push({
-              id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              title: item.title,
-              artist: item.author,
-              duration: item.duration,
-              url: item.url,
-              thumbnail: item.thumbnail,
-              status: 'queued',
-              isAiRecommended: true,
-              source: 'ai',
-            });
-          }
+      const seedList: Array<{ title: string; artist: string }> = [
+        { title: current.title, artist: current.artist },
+      ];
+      // Add backup seeds from favorites and past played if more recommendations are needed to reach 50
+      for (const f of this.favorites) {
+        if (seedList.length >= 4) break;
+        if (!seedList.some((s) => s.title.toLowerCase() === f.title.toLowerCase())) {
+          seedList.push({ title: f.title, artist: f.artist || '' });
         }
-        this.saveQueueToStorage();
-        this.notify();
+      }
+      for (const p of this.rawMostPlayedSongs) {
+        if (seedList.length >= 6) break;
+        if (!seedList.some((s) => s.title.toLowerCase() === p.title.toLowerCase())) {
+          seedList.push({ title: p.title, artist: p.artist || '' });
+        }
+      }
+
+      for (const seed of seedList) {
+        if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+
+        const res = await fetch(
+          `/api/recommend?title=${encodeURIComponent(seed.title)}&artist=${encodeURIComponent(seed.artist)}&mood=${this.mood}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const recs: Array<{ title: string; url: string; author: string; duration: number; thumbnail: string }> =
+            data.recommendations || [];
+
+          for (const item of recs) {
+            if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+            // RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue
+            if (item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
+
+            // Avoid duplicates of the queue, the current song, and songs already played this session
+            const isDuplicate =
+              this.playedUrls.has(item.url) ||
+              item.url === current.url ||
+              this.isDontPlayAgain({ title: item.title, artist: item.author, url: item.url }) ||
+              this.isSongInPlayLog({ title: item.title, artist: item.author, url: item.url }) ||
+              this.isSongInQueueOrPlayed({ title: item.title, artist: item.author, url: item.url }) ||
+              this.isTitleInQueue(item.title, item.author, item.url) ||
+              this.lastPlayedWithinHour({ title: item.title, artist: item.author, url: item.url }) !== null;
+            if (!isDuplicate) {
+              this.queue.push({
+                id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                title: item.title,
+                artist: item.author,
+                duration: item.duration,
+                url: item.url,
+                thumbnail: item.thumbnail,
+                status: 'queued',
+                isAiRecommended: true,
+                source: 'ai',
+              });
+            }
+          }
+          this.saveQueueToStorage();
+          this.notify();
+        }
       }
     } catch (err) {
       console.warn('Failed to fetch recommendations:', err);
@@ -1352,10 +1503,30 @@ export class AudioEngine {
 
   // --- Play log: "Previously played" and no repeats within an hour ---
 
+  public dedupeConsecutivePlayLog(entries: PlayLogEntry[]): PlayLogEntry[] {
+    const deduped: PlayLogEntry[] = [];
+    for (const entry of entries) {
+      if (!entry) continue;
+      if (
+        deduped.length === 0 ||
+        (!areSongsConsecutivelySame(entry, deduped[deduped.length - 1]) &&
+         !this.isSameSong(this.songKeys(entry), this.songKeys(deduped[deduped.length - 1])))
+      ) {
+        deduped.push(entry);
+      }
+    }
+    return deduped;
+  }
+
   private loadPlayLog() {
     try {
       const saved = JSON.parse(window.localStorage.getItem(PLAY_LOG_KEY) || '[]');
-      if (Array.isArray(saved)) this.playLog = saved.filter((e) => e && typeof e.playedAt === 'number');
+      if (Array.isArray(saved)) {
+        const valid = saved.filter((e) => e && typeof e.playedAt === 'number');
+        // RULE: In previously played no 2 consecutive songs can be same
+        this.playLog = this.dedupeConsecutivePlayLog(valid);
+        this.savePlayLog();
+      }
     } catch {
       // Ignore corrupt or unavailable storage
     }
@@ -1363,6 +1534,7 @@ export class AudioEngine {
 
   private savePlayLog() {
     try {
+      this.playLog = this.dedupeConsecutivePlayLog(this.playLog);
       window.localStorage.setItem(PLAY_LOG_KEY, JSON.stringify(this.playLog.slice(0, PLAY_LOG_MAX)));
     } catch {
       // Storage unavailable: the log just won't survive a reload
@@ -1953,9 +2125,97 @@ export class AudioEngine {
       console.warn('Could not restore queue from localStorage:', err);
     }
 
-    // 2. If queue has fewer than MIN_QUEUE_TARGET (12) songs (including on first boot or from a short saved queue),
-    // automatically top up from my_songs.txt so the queue ALWAYS has > 10 songs at any point of time!
-    if (this.queue.length < MIN_QUEUE_TARGET) {
+    // 2. Proactively populate queue to 50 songs based on favorites, past played, and recommendations
+    void this.populateQueueTo50();
+  }
+
+  /**
+   * Populates the Up Next queue up to 50 songs based on:
+   * 1. User's Favourites
+   * 2. Past Played & Most Played Bangers
+   * 3. Curated library (my_songs.txt)
+   * 4. Context-aware AI recommendations matching mood/vibe
+   */
+  public async populateQueueTo50(): Promise<void> {
+    if (this.isPopulatingQueue) return;
+    if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) return;
+
+    this.isPopulatingQueue = true;
+    this.lastRefillAttemptAt = Date.now();
+
+    try {
+      const onAirTrack = this.onAirDeck().getTrack();
+
+      // 1. User's Favourites (highest priority personal picks)
+      if (Array.isArray(this.favorites)) {
+        for (const fav of this.favorites) {
+          if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+          const title = fav.title;
+          const artist = fav.artist || 'Artist';
+          const url = fav.url || fav.title;
+          if (
+            this.isDontPlayAgain({ title, artist, url }) ||
+            this.isSongInPlayLog({ title, artist, url }) ||
+            this.isSongInQueueOrPlayed({ title, artist, url }) ||
+            this.isTitleInQueue(title, artist, url) ||
+            (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === url || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(title)))
+          ) {
+            continue;
+          }
+          if (fav.duration && fav.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
+
+          this.queue.push({
+            id: `fav_q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            title,
+            artist,
+            duration: fav.duration || 180,
+            url,
+            thumbnail: fav.thumbnail,
+            highlightTime: fav.highlightTime,
+            status: 'queued',
+            isAiRecommended: false,
+            source: 'playlist',
+          });
+        }
+      }
+
+      // 2. Past Played & Most Played Bangers (excluding last hour)
+      const pastList: Array<{ title: string; artist: string; url?: string; thumbnail?: string; duration?: number; highlightTime?: number }> = [
+        ...this.rawMostPlayedSongs,
+        ...this.playLog,
+      ];
+      for (const song of pastList) {
+        if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+        const title = song.title;
+        const artist = song.artist || 'Artist';
+        const url = song.url || song.title;
+        if (
+          this.isDontPlayAgain({ title, artist, url }) ||
+          this.isSongInPlayLog({ title, artist, url }) ||
+          this.isSongInQueueOrPlayed({ title, artist, url }) ||
+          this.isTitleInQueue(title, artist, url) ||
+          this.lastPlayedWithinHour({ title, artist, url }) !== null ||
+          (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === url || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(song.title)))
+        ) {
+          continue;
+        }
+        if (song.duration && song.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
+
+        this.queue.push({
+          id: `past_q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          title,
+          artist,
+          duration: song.duration || 180,
+          url,
+          thumbnail: song.thumbnail,
+          highlightTime: song.highlightTime,
+          status: 'queued',
+          isAiRecommended: false,
+          source: 'playlist',
+        });
+      }
+
+      // 3. Curated Library from my_songs.txt
       try {
         const res = await fetch('/api/my-songs');
         if (res.ok) {
@@ -1963,72 +2223,65 @@ export class AudioEngine {
           const songs: string[] = data.songs || [];
           if (songs.length > 0) {
             for (const songTitle of songs) {
-              if (this.queue.length >= MAX_QUEUE_TARGET) break;
+              if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
               const parts = songTitle.split(' - ');
               const artist = parts.length > 1 ? parts[0].trim() : 'Artist';
               const title = parts.length > 1 ? parts.slice(1).join(' - ').trim() : songTitle.trim();
-              const onAirTrack = this.onAirDeck().getTrack();
-              const isDuplicate =
+              if (
+                this.isDontPlayAgain({ title, artist, url: songTitle }) ||
+                this.isSongInPlayLog({ title, artist, url: songTitle }) ||
                 this.isSongInQueueOrPlayed({ title, artist, url: songTitle }) ||
                 this.isTitleInQueue(title, artist, songTitle) ||
-                (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === songTitle || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(title))) ||
-                this.lastPlayedWithinHour({ title, artist, url: songTitle }) !== null;
-              if (!isDuplicate) {
-                this.queue.push({
-                  id: `seed_q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                  title,
-                  artist,
-                  duration: 180,
-                  url: songTitle,
-                  status: 'queued',
-                  isAiRecommended: false,
-                  source: 'playlist',
-                });
+                this.lastPlayedWithinHour({ title, artist, url: songTitle }) !== null ||
+                (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === songTitle || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(title)))
+              ) {
+                continue;
               }
+              this.queue.push({
+                id: `seed_q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                title,
+                artist,
+                duration: 180,
+                url: songTitle,
+                status: 'queued',
+                isAiRecommended: false,
+                source: 'playlist',
+              });
             }
-            this.saveQueueToStorage();
-            this.notify();
           }
         }
       } catch (err) {
-        console.warn('Could not auto-seed queue from my_songs.txt:', err);
+        console.warn('Could not read my_songs for queue top-up:', err);
       }
-    }
 
-    // 3. If still under MIN_QUEUE_TARGET, trigger recommendations based on current track or top queue item
-    if (this.queue.length < MIN_QUEUE_TARGET && this.autoCurationEnabled) {
-      const curDeck = this.activeDeck === 'A' ? this.deckA : this.deckB;
-      const curTrack = curDeck.getTrack();
-      if (curTrack) {
-        void this.refillQueueWithRecommendations(curTrack);
-      } else if (this.queue.length > 0) {
-        const first = this.queue[0];
-        void this.refillQueueWithRecommendations({
-          id: first.id,
-          title: first.title,
-          artist: first.artist,
-          duration: first.duration,
-          url: first.url,
-          bpm: 128,
-          sourceType: 'download',
-        });
-      } else {
-        void this.refillQueueWithRecommendations({
+      // 4. Fill all remaining slots up to MAX_QUEUE_TARGET (50) using AI recommendations
+      if (this.queue.filter((q) => q.status !== 'failed').length < MAX_QUEUE_TARGET && this.autoCurationEnabled) {
+        const seed = onAirTrack || (this.queue[0] ? this.queuedItemToTrack(this.queue[0]) : null) || {
           id: 'seed_init',
           title: 'Bollywood Punjabi Party Banger',
           artist: 'Party Hits',
           duration: 180,
           bpm: 128,
-          sourceType: 'download',
-        });
+          sourceType: 'download' as const,
+        };
+        await this.refillQueueWithRecommendations(seed);
       }
+
+      this.deduplicateQueue();
+      if (this.queue.length > MAX_QUEUE_TARGET) {
+        this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
+      }
+      this.saveQueueToStorage();
+      this.notify();
+    } finally {
+      this.isPopulatingQueue = false;
     }
   }
 
-  // --- Autonomous Percussion Decision & Sync Logic ---
+  // --- Track Analysis & Rhythm Clock ---
 
   /**
-   * Detects BPM, downbeat and hook once per track. Runs regardless of the percussion
+   * Detects BPM, downbeat and hook once per track. Runs regardless of the rhythm layer
    * setting because beatmatching and hook cueing depend on it.
    */
   private analyzeTrack(track: TrackMetadata) {
@@ -2071,6 +2324,8 @@ export class AudioEngine {
       track.musicStartTime = intro.suggestedMusicStart;
       track.introSkipReason = intro.reason;
     }
+
+    this.ensureRhythmPlan(track);
   }
 
   private copyAnalysisToQueueItem(track: TrackMetadata, item: QueuedTrack) {
@@ -2084,122 +2339,137 @@ export class AudioEngine {
     item.energyProfile = track.energyProfile;
   }
 
-  public analyzeAndAutoApplyPercussion(track: TrackMetadata) {
-    this.analyzeTrack(track);
-    if (!this.autoPercussionEnabled) return;
-
-    if (!track.audioBuffer) {
-      this.percussionDecisionReason = 'Awaiting audio buffer decoding...';
-      this.notify();
-      return;
-    }
-
-    const confidence = track.bpmConfidence ?? 0;
-    const bpmResult: BpmAnalysisResult = {
+  /**
+   * The on-air song's beat grid and position for the rhythm layer. During a mix it reports
+   * whether the songs are beatmatched (a blend) or not (a cut), so the drums can step back.
+   */
+  private rhythmClock(): SongClock | null {
+    const deck = this.onAirDeck();
+    const track = deck.getTrack();
+    const anchor = deck.getClockAnchor();
+    if (!track) return null;
+    const other = deck === this.deckA ? this.deckB : this.deckA;
+    const otherTrack = other.getTrack();
+    const transition = !this.isTransitioning
+      ? 'none'
+      : otherTrack && this.canBeatmatch(track, otherTrack)
+        ? 'blend'
+        : 'cut';
+    return {
+      trackId: track.id,
+      isPlaying: anchor !== null,
       bpm: track.bpm,
-      confidence,
-      isRegularBeat: confidence >= 0.65,
-      firstDownbeatTime: track.firstDownbeatTime ?? 0,
+      bpmConfidence: track.bpmConfidence ?? 0,
+      downbeat: track.firstDownbeatTime ?? 0,
+      rate: anchor?.rate ?? 1,
+      startedAt: anchor?.startedAt ?? 0,
+      duration: track.duration,
+      energyProfile: track.energyProfile,
+      musicStartTime: track.musicStartTime,
+      hookTime: track.highlightTime,
+      transition,
+      plan: this.ensureRhythmPlan(track, true),
     };
+  }
 
-    // 1. Immediate zero-latency heuristic beat synchronization
-    const initialDecision: PercussionDecision = evaluatePercussionForTrack(track, bpmResult);
-    this.percussionDecisionReason = initialDecision.reason;
-
-    const deck = this.deckB.getTrack() === track ? this.deckB : this.deckA;
-    const deckState = deck.getPlaybackState();
-
-    if (initialDecision.shouldPlay) {
-      this.percussionDeck.switchPattern(initialDecision.patternId);
-      this.percussionDeck.setSyncDeck(deck.id);
-      this.percussionDeck.syncPhaseToTime(
-        deckState.currentTime / deckState.playbackRate,
-        deckState.effectiveBpm,
-        (track.firstDownbeatTime || 0) / deckState.playbackRate
-      );
-      if (!this.percussionDeck.getState().isPlaying && deckState.isPlaying) {
-        this.percussionDeck.play();
-      }
-    } else {
-      if (this.percussionDeck.getState().isPlaying) {
-        this.percussionDeck.pause();
-      }
-    }
-    this.notify();
-
-    // 2. Deep AI Rhythmic & Arrangement Sync (Ollama primary / Gemini backup)
-    void this.djAgent
-      .syncPercussion({
-        mood: this.mood,
-        track: {
-          title: track.title,
-          artist: track.artist,
-          bpm: track.bpm,
-          effectiveBpm: deckState.effectiveBpm,
-          confidence,
-          highlightTime: track.highlightTime,
-          duration: track.duration,
-          currentTime: deckState.currentTime,
-        },
-      })
-      .then((aiDecision) => {
-        if (!aiDecision) return;
-        // Verify track is still on air
-        if (this.onAirDeck().getTrack() !== track) return;
-
-        const latestState = deck.getPlaybackState();
-        if (aiDecision.shouldPlay && aiDecision.patternId !== 'none') {
-          this.percussionDeck.switchPattern(aiDecision.patternId as any);
-          this.percussionDeck.setVolume(aiDecision.volume);
-          this.percussionDeck.setIntensity(aiDecision.intensity);
-
-          // Lock to exact downbeat phase
-          this.percussionDeck.syncPhaseToTime(
-            latestState.currentTime / latestState.playbackRate,
-            latestState.effectiveBpm,
-            (track.firstDownbeatTime || 0) / latestState.playbackRate
-          );
-
-          if (!this.percussionDeck.getState().isPlaying && latestState.isPlaying) {
-            this.percussionDeck.play();
-          }
-
-          const providerLabel = this.aiProvider === 'gemini' ? 'Gemini' : 'Qwen';
-          this.percussionDecisionReason = `AI synced ${aiDecision.patternId.replace('_', ' ')} (${providerLabel}): ${aiDecision.reason}`;
-        } else {
-          if (this.percussionDeck.getState().isPlaying) {
-            this.percussionDeck.pause();
-          }
-          this.percussionDecisionReason = `AI held drums: ${aiDecision.reason}`;
-        }
-        this.notify();
-      })
-      .catch((err) => {
-        console.warn('AI percussion sync query failed:', err);
-      });
+  private songKey(track: { url?: string; title: string; artist: string }): string {
+    return track.url || `${track.title}|${track.artist}`;
   }
 
   /**
-   * One-touch AI Rhythm Sync: re-evaluates musical rhythm sync with AI and snaps phase
-   * lock to the active on-air deck immediately.
+   * The song's rhythm plan for the current mood, made on first use (cheap afterwards: the
+   * rhythm layer calls this every tick). Until the AI DJ has identified the song, the plan uses
+   * the built-in language guess; songs the guess isn't sure about are queued for the AI
+   * (urgent = the song on air, asked first).
    */
-  public resyncPercussionToActiveDeck() {
-    const deck = this.onAirDeck();
-    const track = deck.getTrack();
-    if (!track) return;
-    this.autoPercussionEnabled = true;
-    const state = deck.getPlaybackState();
-    this.percussionDeck.setSyncDeck(deck.id);
-    this.percussionDeck.syncPhaseToTime(
-      state.currentTime / state.playbackRate,
-      state.effectiveBpm,
-      (track.firstDownbeatTime || 0) / state.playbackRate
-    );
-    if (!this.percussionDeck.getState().isPlaying && state.isPlaying) {
-      this.percussionDeck.play();
+  private ensureRhythmPlan(track: TrackMetadata, urgent = false): RhythmPlan | null {
+    const song = this.songKey(track);
+    const guess = guessLanguage(track.title, track.artist);
+    const fromAi = guess.sure ? undefined : this.songLanguageFromAi(song);
+    const useAi = fromAi !== undefined && fromAi !== 'unknown';
+    const language = useAi ? fromAi! : guess.language;
+    const key = `${song}|${this.mood}|${useAi ? language : '-'}`;
+
+    let plan = this.rhythmPlans.get(key) ?? null;
+    if (!plan) {
+      let features = this.rhythmFeatures.get(song) ?? null;
+      if (!features && track.audioBuffer && track.energyProfile) {
+        features = computeRhythmFeatures(track.audioBuffer, track.energyProfile);
+        this.rhythmFeatures.set(song, features);
+      }
+      if (!features) return null; // not analysed yet
+      plan = planRhythm(
+        { title: track.title, artist: track.artist, bpm: track.bpm, bpmConfidence: track.bpmConfidence ?? 0 },
+        this.mood,
+        features,
+        language,
+        useAi ? 'ai' : guess.sure ? 'known' : 'guess'
+      );
+      this.rhythmPlans.set(key, plan);
     }
-    this.analyzeAndAutoApplyPercussion(track);
-    this.notify();
+
+    if (!guess.sure && fromAi === undefined && this.aiStatus === 'online') {
+      if (!this.songIdAsked.has(song)) {
+        this.songIdAsked.add(song);
+        if (urgent) this.songIdQueue.unshift(track);
+        else this.songIdQueue.push(track);
+        void this.processSongIdQueue();
+      } else if (urgent) {
+        // Already waiting behind other songs: the song on air goes first
+        const i = this.songIdQueue.findIndex((t) => this.songKey(t) === song);
+        if (i > 0) this.songIdQueue.unshift(...this.songIdQueue.splice(i, 1));
+      }
+    }
+    return plan;
+  }
+
+  /** Asks the AI DJ about one song at a time (~3 s each), after any time-critical mix question. */
+  private async processSongIdQueue() {
+    if (this.songIdBusy) return;
+    this.songIdBusy = true;
+    try {
+      while (this.songIdQueue.length) {
+        while (this.aiMixCalls > 0) await new Promise((r) => window.setTimeout(r, 500));
+        const track = this.songIdQueue.shift()!;
+        const song = this.songKey(track);
+        if (this.songLanguageFromAi(song) !== undefined) continue;
+        const language = await this.djAgent.identifySong(track.title, track.artist);
+        if (!language) continue; // no answer: the built-in guess stays (asked again next session)
+        this.songLanguages.set(song, language);
+        this.saveSongLanguages();
+        this.notify();
+      }
+    } finally {
+      this.songIdBusy = false;
+    }
+  }
+
+  private songLanguageFromAi(song: string): SongLanguage | undefined {
+    if (!this.songLanguagesLoaded) {
+      this.songLanguagesLoaded = true;
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(SONG_LANGUAGES_KEY) || '{}');
+        for (const [k, v] of Object.entries(saved)) if (typeof v === 'string') this.songLanguages.set(k, v as SongLanguage);
+      } catch {
+        // unreadable: start empty
+      }
+    }
+    return this.songLanguages.get(song);
+  }
+
+  private saveSongLanguages() {
+    try {
+      // Keep the newest 1000 songs (Map keeps insertion order)
+      const entries = [...this.songLanguages.entries()].slice(-1000);
+      window.localStorage.setItem(SONG_LANGUAGES_KEY, JSON.stringify(Object.fromEntries(entries)));
+    } catch {
+      // storage unavailable: songs are just asked about again next session
+    }
+  }
+
+  /** Every rhythm control (laptop UI, phone remote and typed commands) goes through here. */
+  public rhythmCommand(cmd: RhythmCommand) {
+    this.rhythm.command(cmd);
   }
 
   // --- Remote Mobile Control Commands ---
@@ -2231,12 +2501,6 @@ export class AudioEngine {
           } else {
             cur.play();
           }
-          if (this.autoPercussionEnabled) {
-            this.analyzeAndAutoApplyPercussion(track);
-          } else if (this.resumePercussionOnPlay) {
-            this.startPercussionInSync();
-          }
-          this.resumePercussionOnPlay = false;
           this.saveCurrentTrackToStorage();
           this.notify();
         }
@@ -2258,12 +2522,6 @@ export class AudioEngine {
       cur.play();
     }
 
-    if (this.autoPercussionEnabled) {
-      this.analyzeAndAutoApplyPercussion(cur.getTrack()!);
-    } else if (this.resumePercussionOnPlay) {
-      this.startPercussionInSync();
-    }
-    this.resumePercussionOnPlay = false;
     this.saveCurrentTrackToStorage();
     this.notify();
   }
@@ -2272,41 +2530,14 @@ export class AudioEngine {
     const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
     cur.pause();
     this.cancelPendingMix('Paused — planned mix cancelled.');
-    this.resumePercussionOnPlay = this.percussionDeck.getState().isPlaying;
-    this.percussionDeck.pause();
+    this.rhythm.silence();
     this.saveCurrentTrackToStorage();
     this.notify();
   }
 
-  /** Start/stop the drums. Starting locks them to the beat of the song on air. */
-  public togglePercussion() {
-    if (this.percussionDeck.getState().isPlaying) {
-      this.percussionDeck.stop();
-    } else {
-      this.startPercussionInSync();
-    }
-    this.notify();
-  }
-
-  private startPercussionInSync() {
-    const deck = this.activeDeck === 'A' ? this.deckA : this.deckB;
-    const state = deck.getPlaybackState();
-    if (state.track && state.isPlaying) {
-      this.percussionDeck.setSyncDeck(deck.id);
-      this.percussionDeck.syncPhaseToTime(
-        state.currentTime / state.playbackRate,
-        state.effectiveBpm,
-        (state.track.firstDownbeatTime || 0) / state.playbackRate
-      );
-    }
-    this.percussionDeck.play();
-  }
-
   /** After a seek the beat grid moves: re-lock running drums and re-plan any waiting mix. */
   private afterSeek() {
-    if (this.percussionDeck.getState().isPlaying) {
-      this.startPercussionInSync();
-    }
+    this.rhythm.silence(); // drop hits scheduled for the old position; it re-locks on the next tick
     this.replanPendingMix();
   }
 
@@ -2314,7 +2545,7 @@ export class AudioEngine {
     this.cancelPendingMix('All playback stopped.');
     this.deckA.stop();
     this.deckB.stop();
-    this.percussionDeck.stop();
+    this.rhythm.silence();
     this.cancelTransition();
     this.saveCurrentTrackToStorage();
     this.acquisitionStatus = 'All playback stopped.';
@@ -2364,7 +2595,6 @@ export class AudioEngine {
         targetDeck: otherDeck,
         durationSeconds: 4,
         style: 'smooth_crossfade',
-        syncPercussion: true,
       });
     }
     this.saveCurrentTrackToStorage();
@@ -2448,9 +2678,6 @@ export class AudioEngine {
       targetDeck.loadTrack(track);
       const startPos = track.musicStartTime && track.musicStartTime > 0 ? track.musicStartTime : 0;
       targetDeck.play(startPos);
-      if (this.autoPercussionEnabled) {
-        this.analyzeAndAutoApplyPercussion(track);
-      }
       this.recordSongPlay(track);
       this.saveCurrentTrackToStorage();
       this.notify();
@@ -2477,7 +2704,6 @@ export class AudioEngine {
       targetDeck: targetDeckId,
       durationSeconds,
       style: 'bass_swap',
-      syncPercussion: true,
     });
 
     if (item.source === 'request') {
@@ -2748,8 +2974,7 @@ export class AudioEngine {
         highlightIntensity: match.highlightIntensity,
       };
 
-      // Analyse BPM, downbeat and hook. Percussion is only re-evaluated once the song is on air,
-      // so queueing a song never changes the drums under the current one.
+      // Analyse BPM, downbeat and hook up front, so the song is ready to mix and to drum on.
       this.analyzeTrack(trackMetadata);
       this.copyAnalysisToQueueItem(trackMetadata, queuedItem);
 
@@ -2909,10 +3134,6 @@ export class AudioEngine {
       targetDeck.play(cuePoint, startTime);
     }
 
-    if (config.syncPercussion) {
-      this.percussionDeck.syncBpm(sourceBpm);
-    }
-
     this.isTransitioning = true;
     this.transitionProgress = 0;
 
@@ -2959,8 +3180,8 @@ export class AudioEngine {
       sourceDeck.setEQ(0, 0, 0);
       targetDeck.setEQ(0, 0, 0);
 
-      // The new song is on air: re-sync the drums to it
-      this.analyzeAndAutoApplyPercussion(targetTrack);
+      // The new song is on air (the rhythm layer follows it by itself via rhythmClock)
+      this.analyzeTrack(targetTrack);
       this.recordSongPlay(targetTrack);
       this.saveCurrentTrackToStorage();
       this.notify();
@@ -3012,20 +3233,18 @@ export class AudioEngine {
       duration: curState.duration,
       bpm: curState.effectiveBpm,
       crossfader: this.crossfaderPosition,
-      percussion: this.percussionDeck.getState(),
+      rhythm: this.rhythm.getState(),
       queue: this.queue.map((q) => ({ ...q, audioBuffer: undefined, originalBuffer: undefined, energyProfile: undefined })),
       acquisitionStatus: this.acquisitionStatus,
       pendingMix,
       isTransitioning: this.isTransitioning,
       transitionProgress: this.transitionProgress,
-      percussionDecisionReason: this.percussionDecisionReason,
       autoCurationEnabled: this.autoCurationEnabled,
-      autoPercussionEnabled: this.autoPercussionEnabled,
       autoCueViralHook: this.autoCueViralHook,
       mostPlayedSongs: this.mostPlayedSongs,
       favorites: this.favorites,
       bannedSongs: this.bannedSongs,
-      recentlyPlayed: this.playLog.slice(0, 30),
+      recentlyPlayed: this.dedupeConsecutivePlayLog(this.playLog).slice(0, 30),
       introAnalysis: curState.track ? this.introAnalyses.get(curState.track.id) ?? null : null,
       mood: this.mood,
       eqGains: this.eqGains,
@@ -3063,13 +3282,26 @@ export class AudioEngine {
     if (!track || track.id.startsWith('demo_') || this.lastRecordedTrackId === track.id) return;
     this.lastRecordedTrackId = track.id;
 
-    // Log the play, then drop any other copies of this song waiting in Up Next
-    this.playLog = [
-      { id: track.id, title: track.title, artist: track.artist, url: track.url, thumbnail: track.thumbnail, playedAt: Date.now() },
-      ...this.playLog,
-    ].slice(0, PLAY_LOG_MAX);
-    this.savePlayLog();
     const playedKeys = this.songKeys(track);
+
+    // RULE: In previously played no 2 consecutive songs can be same
+    if (
+      this.playLog.length > 0 &&
+      (areSongsConsecutivelySame(track, this.playLog[0]) || this.isSameSong(playedKeys, this.songKeys(this.playLog[0])))
+    ) {
+      this.playLog[0].playedAt = Date.now();
+      if (!this.playLog[0].thumbnail && track.thumbnail) this.playLog[0].thumbnail = track.thumbnail;
+      if (!this.playLog[0].url && track.url) this.playLog[0].url = track.url;
+      this.savePlayLog();
+    } else {
+      // Log the play, then drop any other copies of this song waiting in Up Next
+      this.playLog = this.dedupeConsecutivePlayLog([
+        { id: track.id, title: track.title, artist: track.artist, url: track.url, thumbnail: track.thumbnail, playedAt: Date.now() },
+        ...this.playLog,
+      ]).slice(0, PLAY_LOG_MAX);
+      this.savePlayLog();
+    }
+
     const before = this.queue.length;
     this.queue = this.queue.filter((q) => q.status === 'downloading' || !this.isSameSong(playedKeys, this.songKeys(q)));
     if (this.queue.length !== before) this.saveQueueToStorage();
@@ -3467,22 +3699,7 @@ export class AudioEngine {
     this.notify();
   }
 
-  public toggleAutoPercussion() {
-    this.autoPercussionEnabled = !this.autoPercussionEnabled;
-    if (this.autoPercussionEnabled) {
-      const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
-      if (cur.getTrack()) this.analyzeAndAutoApplyPercussion(cur.getTrack()!);
-    }
-    this.notify();
-  }
-
-  private handleDeckUpdate(deckId: DeckId) {
-    const pState = this.percussionDeck.getState();
-    if (pState.syncToDeck === deckId) {
-      const activeDeck = deckId === 'A' ? this.deckA : this.deckB;
-      const bpm = activeDeck.getPlaybackState().effectiveBpm;
-      this.percussionDeck.syncBpm(bpm);
-    }
+  private handleDeckUpdate(_deckId: DeckId) {
     this.notify();
   }
 

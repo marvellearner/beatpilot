@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AudioEngine } from '../audio/AudioEngine';
 import { DeckView } from './components/DeckView';
-import { PercussionBar } from './components/PercussionBar';
+import { RhythmPanel } from './components/RhythmPanel';
 import { MixerSection } from './components/MixerSection';
 import { PartyConsoleView } from './components/PartyConsoleView';
-import { OllamaDJAgent, AIResponseResult } from '../ai/OllamaDJAgent';
+import { DJAgent, AIResponseResult } from '../ai/DJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
 import QRCode from 'qrcode';
@@ -28,7 +28,7 @@ import {
 
 export const App: React.FC = () => {
   const engineRef = useRef<AudioEngine | null>(null);
-  const agentRef = useRef<OllamaDJAgent | null>(null);
+  const agentRef = useRef<DJAgent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const isHostRef = useRef(false);
   const [hostRole, setHostRole] = useState<'host' | 'standby' | null>(null);
@@ -46,7 +46,7 @@ export const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<'console' | 'remote'>('console');
   const [consoleMode, setConsoleMode] = useState<'party' | 'pro'>('party');
 
-  // Initialize AudioEngine & OllamaDJAgent
+  // Initialize AudioEngine & DJAgent
   if (!engineRef.current) {
     engineRef.current = new AudioEngine();
   }
@@ -82,20 +82,8 @@ export const App: React.FC = () => {
         case 'CMD_NEXT':
           engine.nextTrack();
           break;
-        case 'CMD_PERCUSSION_TOGGLE':
-          engine.togglePercussion();
-          break;
-        case 'CMD_PERCUSSION_PATTERN':
-          engine.percussionDeck.switchPattern(action.patternId);
-          break;
-        case 'CMD_PERCUSSION_VOLUME':
-          engine.percussionDeck.setVolume(action.volume);
-          break;
-        case 'CMD_PERCUSSION_MUTE':
-          engine.percussionDeck.toggleMute();
-          break;
-        case 'CMD_RESYNC_PERCUSSION':
-          engine.resyncPercussionToActiveDeck();
+        case 'CMD_RHYTHM':
+          engine.rhythmCommand(action.cmd);
           break;
         case 'CMD_ADD_QUEUE':
           engine.acquireTrack(action.query, false);
@@ -105,9 +93,6 @@ export const App: React.FC = () => {
           break;
         case 'CMD_TOGGLE_AUTOCURATION':
           engine.toggleAutoCuration();
-          break;
-        case 'CMD_AUTO_PERCUSSION':
-          engine.toggleAutoPercussion();
           break;
         case 'CMD_JUMP_TO_HOOK':
           engine.jumpToHook(action.deckId);
@@ -517,16 +502,9 @@ export const App: React.FC = () => {
         />
       ) : (
         <>
-          {/* Primary Percussion Layer (Deck P) with Autonomous Decision Advisor */}
+          {/* Live Rhythm Enhancer (Deck P) */}
           <section id="app-pro-percussion">
-            <PercussionBar
-              percussionDeck={engine.percussionDeck}
-              decisionReason={engine.percussionDecisionReason}
-              autoPilotActive={engine.autoPercussionEnabled}
-              onToggleAutoPilot={() => engine.toggleAutoPercussion()}
-              onTogglePlay={() => engine.togglePercussion()}
-              onResync={() => engine.resyncPercussionToActiveDeck()}
-            />
+            <RhythmPanel rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
           </section>
 
           {/* Main Dual-Deck and Center Mixer Grid */}

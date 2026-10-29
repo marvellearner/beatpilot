@@ -56,7 +56,7 @@ To eliminate the ~4–7 s CPU wait during live sets, BeatPilot supports a **Hybr
   GEMINI_MODEL=gemini-2.0-flash
   ```
 - **Performance:** Reduces AI mix planning and DJ command interpretation latency from **~4,000–7,000 ms down to ~300–600 ms**.
-- **Automatic Failover:** If offline, or if the API request fails/times out, BeatPilot automatically falls back to local CPU Ollama (`qwen2.5:3b`), and finally to deterministic heuristic audio mixing rules so the music never stops.
+- **Order of preference:** local CPU Ollama (`qwen2.5:3b`) is always tried first. Gemini is the backup: it is used when Ollama is offline, fails, or takes longer than 12 s (when a Gemini key is set, Ollama is cut off at 12 s so the backup still answers in time). If both fail, the app uses its built-in mixing rules, so the music never stops. See `/api/llm` in `server/apiPlugin.ts`.
 
 How the app copes with this speed:
 
@@ -73,10 +73,10 @@ How the app copes with this speed:
 
 | Buffer | Memory |
 | :--- | :--- |
-| Deck A + Deck B | ~142 MB |
-| Deck P (procedural loops) | ~1.4 MB |
-| 5-song pre-decoded queue | ~355 MB |
-| **Total** | **~498 MB** (under 6% of free RAM) |
+| Deck A + Deck B (active tracks) | ~142 MB |
+| Deck P (26 decoded percussion one-shots) | ~4 MB |
+| Active pre-decoded queue in RAM (3 tracks) | ~213 MB (older tracks in the 50-song queue reload in ~30 ms from disk cache) |
+| **Total** | **~359 MB** (well under 5% of free RAM) |
 
 ---
 
@@ -148,6 +148,6 @@ All dependencies use permissive licenses (MIT, ISC, Apache 2.0). Avoid adding GP
 | `@types/ws`, `@types/react`, `@types/react-dom` | — | MIT | Dev: type definitions |
 
 ### 6.1 Audio rights
-- **Percussion:** all dhol and drum sounds are procedurally synthesised (`SynthesizedSamples.ts`). They are original and royalty-free, and no stems are extracted from commercial recordings.
+- **Percussion:** the dhol and percussion samples in `public/percussion/` are one-shots cut from recordings their uploaders released on Freesound under **CC0 1.0 (public domain)**; sources are listed in `public/percussion/CREDITS.md`. No stems are extracted from commercial recordings.
 - **Streamed tracks:** for personal use and private gatherings only. Audio is held temporarily in memory for the session and is never redistributed.
 - **Provider isolation:** YouTube scraping lives only in `server/apiPlugin.ts`. If the terms change, it can be swapped for local files or a licensed API without touching the mixer or the AI. Re-check provider terms before relying on any source (see `context.md` §4.6).
