@@ -27,8 +27,15 @@
 
 **In this app** (`src/audio/KeyDetector.ts`): each song's key comes from a chroma profile (120 spectra across the song) matched to KeyFinder's key profiles, in Camelot notation. Tested on 40 cached songs: at a confidence of 0.3 or more (19 songs), the key from the first half and second half of every song agreed; below that, results weren't stable, so **the app only uses keys from 0.3 up** and ignores the rest. Two of three songs with published keys came out as a compatible neighbour (Despacito: relative major; Titanium: one step), one was off (Blinding Lights), so the key is a guideline:
 - Keys are compared **as heard**: without key lock a deck's speed shifts pitch (6 % ≈ one semitone), so the incoming song is judged at its beatmatch speed.
-- **Compatible** (same, ±1 on the wheel, or relative major/minor): the mood's normal blend length.
-- **Two steps apart, or clashing:** the blend is kept to **4 bars**, and the AI DJ is told to prefer a cut or a short blend.
+- **Camelot Key Badges & Tags**: Displayed on every track in Up Next queue (`8A Am`, `8B C`, `9A Em`), Decks, and Now Playing.
+- **Color-Coded Harmonic Compatibility**:
+  - `Harmonic ±0` / `To Major ✨` / `To Minor 🌙` (Emerald): Exact match or relative major/minor sharing the same notes for seamless tonal blend.
+  - `Energy +1 ⚡` (Gold / Amber): +1 Camelot step clockwise (adds 1 sharp) to raise room energy smoothly.
+  - `Deep -1 🌊` (Cyan): -1 Camelot step counter-clockwise (adds 1 flat) for a smooth chill/deep groove.
+  - `Drop Jump 🚀` (Purple): +1 Semitone modulation for dramatic climax drop transitions.
+  - `Clash ⚠️` (Rose): Key clash (3+ steps); blend is kept to **4 bars** or executed as a drop cut/echo out to avoid tonal dissonance.
+- **Energy-Shift Mixing**: Tag transitions in the header and status line with their exact harmonic relationship (e.g. `⚡ Energy +1 (8A → 9A)`).
+- **One-Click Harmonic Queue Reordering (`🪄 Harmonic Flow`)**: Automatically sorts the 50-song queue into a continuous, clash-free Camelot wheel wave starting from the currently playing track.
 - **Next song:** the AI DJ sees which ready songs' keys fit. Without the AI, if the next song clashes and one of the two after it fits, that one plays first (guest requests are never skipped).
 
 ## 5. Avoid Bass Clashes

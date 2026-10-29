@@ -48,6 +48,11 @@ export function titleSegments(raw: string): string[] {
   return parts;
 }
 
+/** A stable id for storing per-song data (hot cues, AI answers): the URL, else title + artist. */
+export function songStorageKey(song: { url?: string; title: string; artist: string }): string {
+  return song.url || `${song.title}|${song.artist}`;
+}
+
 /** Comparable forms of a song: its YouTube video id, and normalised "title" / "artist title". */
 export function songKeys(song: SongRef): string[] {
   const keys: string[] = [];

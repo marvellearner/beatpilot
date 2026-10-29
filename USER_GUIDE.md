@@ -202,7 +202,27 @@ https://www.youtube.com/watch?v=kJQP7kiw5Fk
 
 ---
 
-## 9. Typing Instructions to the AI (Optional)
+## 8b. Offline Music (Bad or No Wi-Fi)
+
+The **📁 Local Music** card (Party console, middle column) keeps songs on the laptop, so the party carries on without internet.
+
+**Your most-played songs are saved by themselves.** Once a song has played **3 times**, the app saves it as an **MP3** in the `music/Most Played` folder. It then plays from that file, instantly and offline, even after the download cache has been cleaned up.
+
+**Add your own music** (MP3, WAV, FLAC, M4A, AAC, OGG, Opus):
+
+- **Add files** or **Add folder**, or **drag songs or a whole folder onto the card**. They're copied into the app's `music/Uploads` folder.
+- Or type a folder on the laptop (e.g. `D:\Music`) and press **Scan**. Those files stay where they are. **×** stops scanning a folder, and **⟳** looks for new or changed files.
+
+Songs show up by their tags' title and artist, or as "Artist - Title" from the file name.
+
+**Without internet:**
+
+- The light on the card turns 🔴 **Offline**. **Search** (laptop and phone) finds local songs, and they're listed first even when you're online.
+- **Up Next** fills itself from the local library: songs in the same language as the one playing first, then your most played. The no-repeat rules still apply.
+- Songs in Up Next that were never downloaded can't play, so the app skips them.
+
+**Use only local music** makes Up Next come from the laptop even when the internet works, for example on a slow venue Wi-Fi.
+
 
 Use the bar at the bottom of the screen. Examples:
 

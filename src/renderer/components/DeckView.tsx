@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import { VirtualDeck } from '../../audio/VirtualDeck';
 import type { AudioEngine } from '../../audio/AudioEngine';
-import { shiftKey } from '../../audio/KeyDetector';
+import { shiftKey, getCamelotDetails, getHarmonicCompatibility } from '../../audio/KeyDetector';
 import { DeckId } from '../../types';
 import { WaveformCanvas } from './WaveformCanvas';
 import { Play, Pause, FolderPlus, Disc3, RotateCcw, Square } from 'lucide-react';
@@ -20,10 +20,20 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
   const track = state.track;
 
   // The key as heard: without key lock, speed shifts pitch (6 % = a semitone)
-  const heardKey = track?.key ? shiftKey(track.key, state.playbackRate) : null;
+  const heardKey = track?.key ? (engine.keyLock ? track.key : shiftKey(track.key, state.playbackRate)) : null;
   const keySure = (track?.keyConfidence ?? 0) >= 0.3;
+  const keyDetails = heardKey ? getCamelotDetails(heardKey) : null;
   const hotCues = engine.getHotCues(deckId);
   const loopBars = engine.getLoopBars(deckId);
+
+  // Cross-deck harmonic compatibility for Pro DJing
+  const otherDeck = deckId === 'A' ? engine.deckB : engine.deckA;
+  const otherState = otherDeck.getPlaybackState();
+  const otherTrack = otherState.track;
+  const otherKey = otherTrack?.key
+    ? (engine.keyLock ? otherTrack.key : shiftKey(otherTrack.key, otherState.playbackRate))
+    : null;
+  const deckCompat = heardKey && otherKey ? getHarmonicCompatibility(otherKey, heardKey) : null;
 
   const isA = deckId === 'A';
   const primaryColor = isA ? '#00f2fe' : '#ff8c00';
@@ -62,7 +72,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
           </span>
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
-              <span className="font-bold text-white text-base tracking-wide truncate max-w-[170px]">
+              <span className="font-bold text-white text-base tracking-wide line-clamp-1 max-w-[320px] sm:max-w-[420px] lg:max-w-[520px] break-words" title={track ? track.title : 'No Track Loaded'}>
                 {track ? track.title : 'No Track Loaded'}
               </span>
               {track?.highlightTime !== undefined && (
@@ -84,8 +94,18 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
                   <span>{formatTime(track.musicStartTime)}</span>
                 </span>
               )}
+              {heardKey && keyDetails && (
+                <span
+                  className="flex items-center gap-1 bg-purple-500/20 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold shrink-0"
+                  title={`Camelot: ${heardKey} (${keyDetails.musicalKey})`}
+                >
+                  <span>🎵</span>
+                  <span>{heardKey}</span>
+                  <span className="text-[9px] text-purple-200/70">({keyDetails.shortName})</span>
+                </span>
+              )}
             </div>
-            <span className="text-xs text-slate-400 truncate max-w-[220px]">
+            <span className="text-xs text-slate-400 truncate max-w-[320px] sm:max-w-[420px] lg:max-w-[520px]">
               {track ? track.artist : 'Load local MP3/WAV or Demo'}
             </span>
           </div>
@@ -135,14 +155,40 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
         <div>
           <div className="text-[10px] text-slate-400">KEY</div>
           <div
-            className={`text-base font-bold ${keySure ? 'text-cyan-400' : 'text-slate-500'}`}
+            className={`text-sm sm:text-base font-bold flex items-center justify-center gap-1 ${
+              deckCompat
+                ? deckCompat.color === 'emerald'
+                  ? 'text-emerald-400'
+                  : deckCompat.color === 'amber'
+                  ? 'text-amber-400'
+                  : deckCompat.color === 'cyan'
+                  ? 'text-cyan-400'
+                  : deckCompat.color === 'rose'
+                  ? 'text-rose-400'
+                  : 'text-cyan-400'
+                : keySure
+                ? 'text-cyan-400'
+                : 'text-slate-500'
+            }`}
             title={
               heardKey
-                ? `${keySure ? 'Detected key' : 'Uncertain key (not used for mixing)'}${heardKey !== track?.key ? `; ${track?.key} at normal speed` : ''}`
+                ? `${heardKey} (${keyDetails?.musicalKey}) ${
+                    state.playbackRate !== 1.0 && !engine.keyLock
+                      ? `heard at ${state.playbackRate.toFixed(2)}x (detected: ${track?.key})`
+                      : ''
+                  }${deckCompat ? ` • Deck ${deckId === 'A' ? 'B' : 'A'} Match: ${deckCompat.label} (${deckCompat.description})` : ''}`
                 : 'Key not detected yet'
             }
           >
-            {heardKey ?? '—'}
+            <span>{heardKey ?? '—'}</span>
+            {keyDetails && keyDetails.shortName !== '—' && (
+              <span className="text-[10px] font-normal opacity-80">({keyDetails.shortName})</span>
+            )}
+            {deckCompat && deckCompat.relation !== 'usable' && (
+              <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-white/10" title={deckCompat.description}>
+                {deckCompat.badgeText}
+              </span>
+            )}
           </div>
         </div>
         <div>

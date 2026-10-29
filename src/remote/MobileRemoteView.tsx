@@ -4,6 +4,7 @@ import { MoodEqPanel } from '../renderer/components/MoodEqPanel';
 import { RhythmPanel } from '../renderer/components/RhythmPanel';
 import { TempoControl } from '../renderer/components/TempoControl';
 import { PreviouslyPlayedPanel } from '../renderer/components/PreviouslyPlayedPanel';
+import { getCamelotDetails, getHarmonicCompatibility } from '../audio/KeyDetector';
 import {
   Play,
   Pause,
@@ -28,6 +29,7 @@ import {
   Music,
   Loader2,
   X,
+  ArrowUp,
 } from 'lucide-react';
 
 interface MobileRemoteViewProps {
@@ -218,8 +220,31 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
             </div>
           )}
           <div id="remote-disc-center" className="absolute w-6 h-6 rounded-full bg-[#07090e] border-2 border-white/30" />
+        </div>
 
-          {/* Interactive Heart Button Around Song Image */}
+        {/* Track Info & Actions */}
+        <div id="remote-track-info" className="w-full px-2 flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1 text-left">
+            <h2 className="font-extrabold text-base text-white truncate" title={currentTrack ? currentTrack.title : 'Waiting for track...'}>
+              {currentTrack ? currentTrack.title : 'Waiting for track...'}
+            </h2>
+            <p className="text-xs text-slate-400 truncate">
+              {currentTrack ? currentTrack.artist : 'Select a track or request below'}
+            </p>
+            {currentTrack?.key && (() => {
+              const keyDetails = getCamelotDetails(currentTrack.key);
+              return (
+                <div className="flex items-center gap-1 mt-1">
+                  <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                    <span>🎵</span>
+                    <span>{currentTrack.key}</span>
+                    <span className="text-[9px] text-purple-200/75">({keyDetails.shortName})</span>
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+
           {currentTrack && (() => {
             const isFav = syncState.favorites?.some(
               (f) =>
@@ -227,29 +252,6 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                 (currentTrack.url && f.url === currentTrack.url) ||
                 (f.title && f.title.trim().toLowerCase() === currentTrack.title?.trim().toLowerCase())
             );
-            return (
-              <button
-                id="remote-favorite-btn"
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSendAction({ type: 'CMD_TOGGLE_FAVORITE', song: currentTrack });
-                }}
-                className={`absolute top-0 right-0 p-2 rounded-full backdrop-blur-md shadow-xl transition-transform active:scale-90 z-20 ${
-                  isFav
-                    ? 'bg-rose-500 text-white shadow-rose-500/50 border border-rose-400'
-                    : 'bg-black/70 text-white/80 hover:text-rose-400 border border-white/20'
-                }`}
-                title={isFav ? 'In Favourites (tap to remove)' : 'Save to Favourites'}
-                aria-label={isFav ? 'In Favourites (tap to remove)' : 'Save to Favourites'}
-              >
-                <Heart className={`w-4 h-4 ${isFav ? 'fill-white' : ''}`} />
-              </button>
-            );
-          })()}
-
-          {/* Interactive Thumbs Down (Don't Play Again Ever) Button Around Song Image */}
-          {currentTrack && (() => {
             const isBanned = syncState.bannedSongs?.some(
               (b) =>
                 (currentTrack.id && b.id === currentTrack.id) ||
@@ -257,44 +259,55 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                 (b.title && b.title.trim().toLowerCase() === currentTrack.title?.trim().toLowerCase())
             );
             return (
-              <button
-                id="remote-dislike-btn"
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSendAction({ type: 'CMD_TOGGLE_DONT_PLAY_AGAIN', song: currentTrack });
-                }}
-                className={`absolute top-0 left-0 p-2 rounded-full backdrop-blur-md shadow-xl transition-transform active:scale-90 z-20 ${
-                  isBanned
-                    ? 'bg-red-600 text-white shadow-red-500/50 border border-red-400'
-                    : 'bg-black/70 text-white/80 hover:text-red-400 border border-white/20'
-                }`}
-                title={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
-                aria-label={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
-              >
-                <ThumbsDown className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1 shrink-0 bg-white/5 p-1 rounded-xl border border-white/10 shadow-sm">
+                <button
+                  id="remote-favorite-btn"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSendAction({ type: 'CMD_TOGGLE_FAVORITE', song: currentTrack });
+                  }}
+                  className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                    isFav
+                      ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-rose-400 hover:bg-white/10'
+                  }`}
+                  title={isFav ? 'In Favourites (tap to remove)' : 'Save to Favourites'}
+                  aria-label={isFav ? 'In Favourites (tap to remove)' : 'Save to Favourites'}
+                >
+                  <Heart className={`w-4 h-4 transition-transform ${isFav ? 'fill-rose-500 text-rose-500' : ''}`} />
+                </button>
+
+                <button
+                  id="remote-dislike-btn"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSendAction({ type: 'CMD_TOGGLE_DONT_PLAY_AGAIN', song: currentTrack });
+                  }}
+                  className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                    isBanned
+                      ? 'bg-red-500/20 text-red-400 border border-red-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-red-400 hover:bg-white/10'
+                  }`}
+                  title={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
+                  aria-label={isBanned ? "Don't Play Again (saved)" : "Don't play again ever"}
+                >
+                  <ThumbsDown className={`w-4 h-4 transition-transform ${isBanned ? 'fill-red-500 text-red-500' : ''}`} />
+                </button>
+              </div>
             );
           })()}
         </div>
 
-        {/* Track Info */}
-        <div id="remote-track-info" className="text-center w-full px-2">
-          <h2 className="font-extrabold text-base text-white truncate">
-            {currentTrack ? currentTrack.title : 'Waiting for track...'}
-          </h2>
-          <p className="text-xs text-slate-400 truncate">
-            {currentTrack ? currentTrack.artist : 'Select a track or request below'}
-          </p>
-          {currentTrack?.highlightTime !== undefined && (
-            <div id="remote-highlight-badge-wrapper" className="flex items-center justify-center gap-1.5 mt-1.5">
-              <span className="text-[10px] font-bold text-amber-400 bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                <span>🔥 World's Favorite Part:</span>
-                <span>{formatTime(currentTrack.highlightTime)}</span>
-              </span>
-            </div>
-          )}
-        </div>
+        {currentTrack?.highlightTime !== undefined && (
+          <div id="remote-highlight-badge-wrapper" className="flex items-center justify-center gap-1.5 -mt-1">
+            <span className="text-[10px] font-bold text-amber-400 bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1">
+              <span>🔥 World's Favorite Part:</span>
+              <span>{formatTime(currentTrack.highlightTime)}</span>
+            </span>
+          </div>
+        )}
 
         {/* Scrub Slider & Time */}
         <div id="remote-scrubber" className="w-full flex flex-col gap-1 pt-1">
@@ -670,87 +683,264 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
         </div>
       )}
 
-      {/* Autonomous 5-Song Upcoming Queue */}
-      <div id="remote-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5">
-        <div id="remote-queue-header" className="flex items-center justify-between">
-          <div id="remote-queue-title-group" className="flex items-center gap-2">
-            <ListMusic className="w-4 h-4 text-slate-400" />
-            <span className="font-extrabold text-xs text-white uppercase tracking-wider">
-              UP NEXT ({readyCount} READY / {syncState.queue.length})
-            </span>
-          </div>
+      {/* Autonomous 50-Song Upcoming Queue */}
+      {(() => {
+        const totalQueueSec = syncState.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
+        const totalQueueH = Math.floor(totalQueueSec / 3600);
+        const totalQueueM = Math.round((totalQueueSec % 3600) / 60);
+        const queueDurationStr = totalQueueH > 0 ? `${totalQueueH}h ${totalQueueM}m` : `${totalQueueM}m`;
 
-          <div id="remote-queue-count-badge" className="flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">
-            <Radio className="w-3 h-3 text-purple-400 animate-pulse" />
-            <span>5 PRE-CURATED</span>
-          </div>
-        </div>
-
-        {syncState.queue.length === 0 ? (
-          <div id="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
-            Queue empty — request a song above, or the AI fills it once music plays.
-          </div>
-        ) : (
-          <div id="remote-queue-list" className="flex flex-col gap-2 max-h-64 overflow-y-auto">
-            {syncState.queue.map((item, idx) => (
-              <div id={`remote-queue-item-${item.id}`}
-                key={item.id}
-                className="flex items-center justify-between p-2.5 bg-black/30 rounded-xl border border-white/5 text-xs"
-              >
-                <div id={`remote-queue-item-info-${item.id}`} className="flex items-center gap-2.5 truncate">
-                  <span className="font-mono text-slate-500 text-[10px]">#{idx + 1}</span>
-                  <div id={`remote-queue-item-meta-${item.id}`} className="flex flex-col truncate">
-                    <div id={`remote-queue-item-title-row-${item.id}`} className="flex items-center gap-1.5">
-                      <span className="font-bold text-white truncate max-w-[170px]">
-                        {item.title}
-                      </span>
-                      {item.isAiRecommended && (
-                        <span className="text-[8px] font-mono bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/30">
-                          AI
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-[10px] text-slate-400 truncate max-w-[170px]">
-                      {item.artist}
+        return (
+          <div id="remote-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
+            <div id="remote-queue-header" className="flex items-center justify-between pb-2 border-b border-white/10">
+              <div id="remote-queue-title-group" className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center">
+                  <ListMusic className="w-3.5 h-3.5 text-cyan-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-extrabold text-xs text-white uppercase tracking-wider">
+                      UP NEXT QUEUE
+                    </span>
+                    <span className="font-mono text-[9px] font-bold px-1.5 py-0.2 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                      {syncState.queue.length}
                     </span>
                   </div>
-                </div>
-
-                <div id={`remote-queue-item-actions-${item.id}`} className="flex items-center gap-1.5 shrink-0">
-                  <span
-                    className={`text-[9px] font-mono px-2 py-0.5 rounded ${
-                      item.status === 'ready'
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : item.status === 'failed'
-                        ? 'bg-red-500/20 text-red-300'
-                        : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                    }`}
-                  >
-                    {item.status.toUpperCase()}
-                  </span>
-
-                  {item.status === 'ready' && (
-                    <button
-                      onClick={() => onSendAction({ type: 'CMD_MIX_QUEUED', itemId: item.id })}
-                      disabled={syncState.isTransitioning}
-                      className="px-2 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[10px] transition-colors disabled:opacity-40"
-                    >
-                      MIX
-                    </button>
-                  )}
-                  <button
-                    onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
-                    className="px-1.5 py-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
-                    title="Remove from queue"
-                  >
-                    ✕
-                  </button>
+                  <div className="text-[9px] font-mono text-slate-400 flex items-center gap-1 pt-0.5">
+                    <span className="text-emerald-400 font-bold">{readyCount} ready</span>
+                    <span>•</span>
+                    <span className="text-amber-300 font-medium">~{queueDurationStr}</span>
+                  </div>
                 </div>
               </div>
-            ))}
+
+              <div className="flex items-center gap-1.5">
+                {syncState.queue.length > 1 && (
+                  <button
+                    id="remote-sort-harmonic-btn"
+                    onClick={() => onSendAction({ type: 'CMD_SORT_QUEUE_HARMONICALLY' })}
+                    className="flex items-center gap-1 text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
+                    title="Sort queue into a continuous, clash-free Camelot wheel journey"
+                  >
+                    <Sparkles className="w-2.5 h-2.5 text-purple-300 animate-pulse" />
+                    <span>Harmonic</span>
+                  </button>
+                )}
+                <div id="remote-queue-count-badge" className="flex items-center gap-1 text-[9px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
+                  <Radio className="w-2.5 h-2.5 animate-pulse" />
+                  <span className="font-bold">Auto</span>
+                </div>
+              </div>
+            </div>
+
+            {syncState.queue.length === 0 ? (
+              <div id="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
+                Queue empty — request a song above, or the AI fills it once music plays.
+              </div>
+            ) : (
+              <div id="remote-queue-list" className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5">
+                {syncState.queue.map((item, idx) => {
+                  const keyDetails = item.key ? getCamelotDetails(item.key) : null;
+                  const curKey = currentTrack?.key;
+                  const compat = curKey && item.key ? getHarmonicCompatibility(curKey, item.key) : null;
+                  const colorClass = compat
+                    ? compat.color === 'emerald'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : compat.color === 'amber'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : compat.color === 'cyan'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                      : compat.color === 'teal'
+                      ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                      : compat.color === 'purple'
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                      : compat.color === 'rose'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : 'bg-white/10 text-slate-300 border-white/10'
+                    : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
+
+                  if (idx === 0) {
+                    // Mobile #1 On-Deck Hero
+                    return (
+                      <div
+                        id={`remote-queue-hero-${item.id}`}
+                        key={item.id}
+                        className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
+                      >
+                        <div className="flex items-center justify-between text-[9px] font-mono">
+                          <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase">
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
+                            </span>
+                            <span>#1 ON DECK • UP NEXT</span>
+                          </div>
+                          <span
+                            className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black ${
+                              item.status === 'ready'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : item.status === 'failed'
+                                ? 'bg-red-500/20 text-red-300'
+                                : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                            }`}
+                          >
+                            {item.status === 'ready' ? 'READY' : item.status.toUpperCase()}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-cyan-500/30 bg-slate-900">
+                              {item.thumbnail ? (
+                                <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-slate-800">
+                                  <Music className="w-3.5 h-3.5 text-cyan-400" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-col min-w-0 flex-1">
+                              <span className="font-extrabold text-white text-xs line-clamp-2 leading-snug break-words" title={item.title}>
+                                {item.title}
+                              </span>
+                              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-300 pt-0.5">
+                                <span className="text-slate-400 truncate max-w-[110px]">{item.artist}</span>
+                                {item.key && keyDetails && (
+                                  <span
+                                    className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${colorClass}`}
+                                  >
+                                    <span>{item.key}</span>
+                                    {compat && compat.relation !== 'usable' && (
+                                      <span className="font-black ml-0.5">{compat.badgeText}</span>
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {item.status === 'ready' && (
+                              <button
+                                onClick={() => onSendAction({ type: 'CMD_MIX_QUEUED', itemId: item.id })}
+                                disabled={syncState.isTransitioning}
+                                className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[10px] transition-colors shadow-md active:scale-95 disabled:opacity-40"
+                              >
+                                MIX NOW
+                              </button>
+                            )}
+                            <button
+                              onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
+                              className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
+                              title="Remove from queue"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Mobile #2+ Items
+                  return (
+                    <div
+                      id={`remote-queue-item-${item.id}`}
+                      key={item.id}
+                      className="flex items-center justify-between p-2 bg-black/40 hover:bg-[#121827]/90 rounded-xl border border-white/5 text-xs transition-all"
+                    >
+                      <div id={`remote-queue-item-info-${item.id}`} className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="font-mono text-slate-500 text-[9px] w-3 text-center shrink-0">#{idx + 1}</span>
+                        <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0 border border-white/10 bg-slate-800">
+                          {item.thumbnail ? (
+                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Music className="w-3 h-3 text-slate-400" />
+                            </div>
+                          )}
+                        </div>
+                        <div id={`remote-queue-item-meta-${item.id}`} className="flex flex-col min-w-0 flex-1">
+                          <div id={`remote-queue-item-title-row-${item.id}`} className="flex items-center gap-1.5">
+                            <span className="font-bold text-white line-clamp-2 leading-snug break-words text-[11px]" title={item.title}>
+                              {item.title}
+                            </span>
+                            {item.isAiRecommended && (
+                              <span className="text-[7px] font-mono bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/30 font-bold shrink-0">
+                                AI
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                            <span className="text-[9px] text-slate-400 truncate max-w-[100px]">
+                              {item.artist}
+                            </span>
+                            {item.key && keyDetails && (
+                              <span
+                                className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1 py-0.2 rounded border shrink-0 ${colorClass}`}
+                              >
+                                <span>{item.key}</span>
+                                {compat && compat.relation !== 'usable' && (
+                                  <span className="font-extrabold ml-0.5">{compat.badgeText}</span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div id={`remote-queue-item-actions-${item.id}`} className="flex items-center gap-1 shrink-0">
+                        <span
+                          className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
+                            item.status === 'ready'
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : item.status === 'failed'
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                          }`}
+                        >
+                          {item.status.toUpperCase()}
+                        </span>
+
+                        {item.status === 'ready' && (
+                          <button
+                            onClick={() => onSendAction({ type: 'CMD_MIX_QUEUED', itemId: item.id })}
+                            disabled={syncState.isTransitioning}
+                            className="px-2 py-0.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-500 text-cyan-300 hover:text-black font-bold text-[9px] border border-cyan-500/40 transition-colors disabled:opacity-40"
+                          >
+                            MIX
+                          </button>
+                        )}
+                        <button
+                          onClick={() => onSendAction({ type: 'CMD_MOVE_QUEUED', itemId: item.id, direction: 'top' })}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-cyan-300 text-[10px] transition-colors"
+                          title="Play Next (Move to top)"
+                        >
+                          <ArrowUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
+                          title="Remove from queue"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {syncState.queue.length > 0 && (
+              <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 pt-1.5 border-t border-white/10 px-1">
+                <span className="text-slate-300 font-bold">{syncState.queue.length} songs (~{queueDurationStr})</span>
+                <span className="text-cyan-400">AI auto-curating</span>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        );
+      })()}
     </div>
   );
 };

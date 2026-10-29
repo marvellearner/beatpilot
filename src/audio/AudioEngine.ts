@@ -1,6 +1,8 @@
 import { VirtualDeck } from './VirtualDeck';
 import { RhythmEnhancer, type SongClock, type RhythmCommand } from './rhythm/RhythmEnhancer';
-import { computeRhythmFeatures, guessLanguage, planRhythm, type RhythmPlan, type SongLanguage, type SongRhythmFeatures } from './rhythm/rhythmPlan';
+import { SongLibrary } from './engine/SongLibrary';
+import { buildLiveSyncState, buildSyncState, syncSignature } from './engine/syncState';
+import { SongRhythmPlans } from './engine/SongRhythmPlans';
 import {
   DeckId,
   TransitionConfig,
@@ -16,25 +18,27 @@ import {
   PlayLogEntry,
 } from '../types';
 import { detectBpmFromBuffer } from './BpmDetector';
-import { detectKey, keyCompatibility, shiftKey } from './KeyDetector';
+import {
+  detectKey,
+  keyCompatibility,
+  shiftKey,
+  getHarmonicCompatibility,
+} from './KeyDetector';
 import { measureLoudnessDb, loudnessGainDb } from './Loudness';
-import { HOT_CUE_SLOTS, loadHotCues, saveHotCues } from './HotCues';
+import { DeckCues } from './engine/DeckCues';
 import { HighlightDetector } from './HighlightDetector';
 import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
-import { songKeys, isSameSong, cleanCoreTitle, areSongsConsecutivelySame, type SongRef } from './songMatch';
+import { songKeys, isSameSong, cleanCoreTitle, type SongRef } from './songMatch';
 import { DJAgent } from '../ai/DJAgent';
 import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
 
 const SOUND_SETTINGS_KEY = 'ai_dj_sound_settings';
-const PLAY_LOG_KEY = 'ai_dj_play_log';
 const CURRENT_TRACK_KEY = 'ai_dj_current_track';
 const TOP_SONG_AVOID_KEY = 'ai_dj_top_song_avoid';
-const DONT_PLAY_AGAIN_KEY = 'ai_dj_dont_play_again';
 // Up Next never auto-adds a song played within the last hour
 const NO_REPEAT_WINDOW_MS = 60 * 60 * 1000;
-const PLAY_LOG_MAX = 100;
 // Decoded songs kept in memory for instant replay (~90 MB each); older ones reload in ~30ms from the disk cache
 const MAX_DECODED_IN_MEMORY = 3;
 
@@ -67,10 +71,10 @@ interface AiOutroPrep {
   pick?: { itemId: string; reason: string };
   mix?: AiMixChoice & { itemId: string; key: string };
 }
-const SONG_LANGUAGES_KEY = 'ai_dj_song_languages'; // the AI DJ's answer per song, so it's asked once
 // Below this, the detected key is too unsure to act on (on 40 cached songs, keys from 0.3 up
 // were stable between the two halves of every song; below it, about half were not)
 const MIN_KEY_CONFIDENCE = 0.3;
+const OFFLINE_ONLY_KEY = 'ai_dj_offline_only';
 const PLAN_STABLE_SECONDS = 2.5; // stop ramping tempo this close to a planned mix so timing is exact
 // Tempo glide speed for both the pre-mix ramp and the return to natural pitch (0.4% per second)
 const PITCH_RETURN_PER_SECOND = 0.004;
@@ -127,6 +131,14 @@ export class AudioEngine {
   public queue: QueuedTrack[] = [];
   public acquisitionStatus: string = '';
   public autoCurationEnabled: boolean = true;
+  // Up Next only from the songs on this laptop (the server also switches by itself when offline)
+  public offlineOnly: boolean = (() => {
+    try {
+      return window.localStorage.getItem(OFFLINE_ONLY_KEY) === '1';
+    } catch {
+      return false;
+    }
+  })();
   public autoCueViralHook: boolean = false; // Never start from hook by default (buildup is important)
   private isFetchingRecommendations: boolean = false;
   private lastRefillAttemptAt: number = 0;
@@ -134,8 +146,6 @@ export class AudioEngine {
   private isPopulatingQueue: boolean = false;
   // Songs already played this session, so auto-curation doesn't repeat them
   private playedUrls = new Set<string>();
-  // Every play with its time (kept across reloads): "Previously played" + the 1-hour no-repeat rule
-  public playLog: PlayLogEntry[] = [];
   // Recent intro-skip analyses by track id, for diagnosing songs on real audio
   private introAnalyses = new Map<string, IntroAnalysisResult>();
   // Avoidance tracking for the first song in Up Next queue (remove after avoiding 7 times)
@@ -146,8 +156,19 @@ export class AudioEngine {
   // In-memory audio buffer cache (avoids re-downloading or re-rendering songs)
   private audioBufferCache = new Map<string, { buffer: AudioBuffer; metadata: TrackMetadata }>();
 
-  // User History & Favorite Starters
-  private rawMostPlayedSongs: SongHistoryItem[] = [];
+  // Favourites, banned songs, play history and the play log (see engine/SongLibrary.ts)
+  public readonly library = new SongLibrary(() => this.notify());
+
+  /** Every play with its time (kept across reloads): "Previously played" + the 1-hour no-repeat rule */
+  public get playLog(): PlayLogEntry[] {
+    return this.library.playLog;
+  }
+  public get favorites(): FavoriteSong[] {
+    return this.library.favorites;
+  }
+  public get bannedSongs(): BannedSong[] {
+    return this.library.bannedSongs;
+  }
 
   /**
    * Top Bangers (Most Played Songs) — strictly excludes any song that is currently
@@ -157,15 +178,9 @@ export class AudioEngine {
     return this.getTopBangers();
   }
 
-  public set mostPlayedSongs(items: SongHistoryItem[]) {
-    this.rawMostPlayedSongs = Array.isArray(items) ? items : [];
-  }
-
   public get rawMostPlayedSongsList(): SongHistoryItem[] {
-    return this.rawMostPlayedSongs;
+    return this.library.history;
   }
-  public favorites: FavoriteSong[] = [];
-  public bannedSongs: BannedSong[] = [];
   private lastRecordedTrackId: string | null = null;
   private topBangersCache: { key: string; raw: SongHistoryItem[]; list: SongHistoryItem[] } | null = null;
 
@@ -178,6 +193,7 @@ export class AudioEngine {
     style?: 'blend' | 'cut'; // set by the AI DJ
     blendBars?: number; // set by the AI DJ (or 4 when the keys clash)
     keyFit?: 'good' | 'ok' | 'clash' | 'unknown';
+    harmonicShift?: string;
   } | null = null;
 
   // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
@@ -198,15 +214,30 @@ export class AudioEngine {
   private aiOutroPrep: AiOutroPrep | null = null;
   // AI mix and next-song questions in flight; rhythm questions wait for them (they're time-critical)
   private aiMixCalls = 0;
-  // Live Rhythm Enhancer decisions (see rhythm/rhythmPlan.ts): made from each song's language
-  // (asked of the AI DJ once per song, remembered across sessions), the mood and its audio
-  private songLanguages = new Map<string, SongLanguage>();
-  private songLanguagesLoaded = false;
-  private rhythmPlans = new Map<string, RhythmPlan>(); // by "<song>|<mood>|<language>"
-  private rhythmFeatures = new Map<string, SongRhythmFeatures>();
-  private songIdAsked = new Set<string>();
-  private songIdQueue: TrackMetadata[] = [];
-  private songIdBusy = false;
+  // Live Rhythm Enhancer decisions per song (see engine/SongRhythmPlans.ts)
+  private cues = new DeckCues({
+    deck: (id) => (id === 'A' ? this.deckA : this.deckB),
+    isOnAir: (deck) => deck === this.onAirDeck(),
+    isTransitioning: () => this.isTransitioning,
+    onAirJumped: () => {
+      this.afterSeek();
+      this.saveCurrentTrackToStorage();
+    },
+    onAirLoopStarted: (bars, title) => {
+      this.cancelPendingMix('Loop on: planned mix cancelled. Leave the loop to carry on.');
+      this.acquisitionStatus = `Looping ${bars} bar${bars > 1 ? 's' : ''} of "${title}". Press the loop again to carry on.`;
+    },
+    // The clock jumped back by the loop's repeats: re-lock the drums now rather than wait for the song
+    onAirLoopEnded: () => this.rhythm.silence(),
+    onChange: () => this.notify(),
+  });
+  private rhythmPlans = new SongRhythmPlans({
+    agent: this.djAgent,
+    mood: () => this.mood,
+    aiOnline: () => this.aiStatus === 'online',
+    aiBusy: () => this.aiMixCalls > 0,
+    onChange: () => this.notify(),
+  });
   private recentTitles: string[] = [];
   private loopTicks = 0;
 
@@ -308,14 +339,14 @@ export class AudioEngine {
     this.loadSoundSettings();
 
     // Load persisted most played song history
-    this.fetchPlayHistory();
+    void this.library.fetchHistory();
 
     // Load persisted favorites (localStorage + sync with server)
-    this.loadFavorites();
-    this.loadDontPlayAgain();
+    void this.library.loadFavorites();
+    void this.library.loadBanned();
 
     // What played recently (before the queue is restored, so it can skip those songs)
-    this.loadPlayLog();
+    this.library.loadPlayLog();
     this.loadTopSongAvoid();
 
     // Restore retained on-air playing song from localStorage if page was refreshed (retained in paused state)
@@ -411,8 +442,8 @@ export class AudioEngine {
     if (mood.autoDrums) this.rhythm.setEnabled(true);
     // Rhythm plans are per mood: decide again for the song on air first, then the ready songs
     const onAir = this.onAirDeck().getTrack();
-    if (onAir) this.ensureRhythmPlan(onAir, true);
-    for (const q of this.queue) if (q.status === 'ready' && q.audioBuffer) this.ensureRhythmPlan(this.queuedItemToTrack(q));
+    if (onAir) this.rhythmPlans.planFor(onAir, true);
+    for (const q of this.queue) if (q.status === 'ready' && q.audioBuffer) this.rhythmPlans.planFor(this.queuedItemToTrack(q));
     this.sessionBpm = this.pickSessionBpm();
 
     // Re-curate: drop AI picks that haven't started downloading, and search again for this mood
@@ -1042,10 +1073,27 @@ export class AudioEngine {
     if (!plan) return this.startQueuedMixNow(item, durationSeconds);
 
     this.queue = this.queue.filter((q) => q.id !== itemId);
-    this.pendingMix = { item, plan, durationSeconds, timer: 0, keyFit, blendBars: keyFit === 'clash' || keyFit === 'ok' ? 4 : undefined };
+    const outKey = outTrack?.key
+      ? this.keyLock
+        ? outTrack.key
+        : shiftKey(outTrack.key, outState.playbackRate)
+      : undefined;
+    const harmonicCompat = outKey && incoming.key ? getHarmonicCompatibility(outKey, incoming.key) : null;
+    const harmonicShift = harmonicCompat ? `${harmonicCompat.badgeText} (${harmonicCompat.label})` : undefined;
+
+    this.pendingMix = {
+      item,
+      plan,
+      durationSeconds,
+      timer: 0,
+      keyFit,
+      blendBars: keyFit === 'clash' || keyFit === 'ok' ? 4 : undefined,
+      harmonicShift,
+    };
     this.schedulePendingMix();
     const startsIn = this.pendingMixStartsIn() ?? 0;
-    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s (following MIXING_RULES.md): ${plan.reason}. Click Mix Now to mix immediately.`;
+    const shiftTag = harmonicCompat ? ` [${harmonicCompat.badgeText}]` : '';
+    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag} (following MIXING_RULES.md): ${plan.reason}. Click Mix Now to mix immediately.`;
     this.notify();
 
     if (!outTrack || durationSeconds) return true;
@@ -1348,18 +1396,68 @@ export class AudioEngine {
           seedList.push({ title: f.title, artist: f.artist || '' });
         }
       }
-      for (const p of this.rawMostPlayedSongs) {
+      for (const p of this.library.history) {
         if (seedList.length >= 6) break;
         if (!seedList.some((s) => s.title.toLowerCase() === p.title.toLowerCase())) {
           seedList.push({ title: p.title, artist: p.artist || '' });
         }
       }
 
-      for (const seed of seedList) {
-        if (this.queue.filter((q) => q.status !== 'failed').length >= MAX_QUEUE_TARGET) break;
+      const usedSeeds = new Set<string>();
+      let iterations = 0;
+      const MAX_ITERATIONS = 8;
+
+      while (
+        this.queue.filter((q) => q.status !== 'failed').length < MAX_QUEUE_TARGET &&
+        iterations < MAX_ITERATIONS
+      ) {
+        iterations++;
+
+        // Find next unused seed from seedList
+        let seed = seedList.find((s) => !usedSeeds.has(s.title.toLowerCase()));
+
+        // If initial seedList is exhausted, pick from newly queued songs as seeds!
+        if (!seed) {
+          const nextQueuedSeed = this.queue.find((q) => !usedSeeds.has(q.title.toLowerCase()));
+          if (nextQueuedSeed) {
+            seed = { title: nextQueuedSeed.title, artist: nextQueuedSeed.artist };
+            seedList.push(seed);
+          }
+        }
+
+        // If still no seed, pick top party banger fallbacks to ensure full 50-song queue
+        if (!seed) {
+          const fallbackSeeds = [
+            'Diljit Dosanjh Lover',
+            'Sidhu Moose Wala 295',
+            'AP Dhillon Brown Munde',
+            'Badshah Kar Gayi Chull',
+            'Karan Aujla Softly',
+            'Guru Randhawa High Rated Gabru',
+            'Shubh Cheques',
+            'Yo Yo Honey Singh Blue Eyes',
+            'Mika Singh Subha Hone Na De',
+            'Karan Aujla Tauba Tauba',
+            'Arijit Singh Ghungroo Party Mix',
+            'Diljit Dosanjh GOAT',
+            'Mankirt Aulakh Badnam',
+            'Badshah Kala Chashma',
+            'Shubh Baller',
+          ];
+          const nextFallback = fallbackSeeds.find((f) => !usedSeeds.has(f.toLowerCase()));
+          if (nextFallback) {
+            seed = { title: nextFallback, artist: 'Artist' };
+            seedList.push(seed);
+          }
+        }
+
+        if (!seed) break;
+        usedSeeds.add(seed.title.toLowerCase());
 
         const res = await fetch(
-          `/api/recommend?title=${encodeURIComponent(seed.title)}&artist=${encodeURIComponent(seed.artist)}&mood=${this.mood}`
+          `/api/recommend?title=${encodeURIComponent(seed.title)}&artist=${encodeURIComponent(seed.artist)}&mood=${this.mood}${
+            this.offlineOnly || !navigator.onLine ? '&offline=1' : ''
+          }`
         );
         if (res.ok) {
           const data = await res.json();
@@ -1394,6 +1492,7 @@ export class AudioEngine {
               });
             }
           }
+          this.deduplicateQueue();
           this.saveQueueToStorage();
           this.notify();
         }
@@ -1412,7 +1511,8 @@ export class AudioEngine {
 
     try {
       let streamUrl = item.url;
-      const isDirectUrl = streamUrl.startsWith('http://') || streamUrl.startsWith('https://');
+      // YouTube links and songs from the offline library (local:<id>) are fetched directly
+      const isDirectUrl = streamUrl.startsWith('http://') || streamUrl.startsWith('https://') || streamUrl.startsWith('local:');
       if (!isDirectUrl) {
         // Resolve raw song title / query to YouTube stream URL via /api/search
         const query = item.title + (item.artist && item.artist !== 'Artist' ? ' ' + item.artist : '');
@@ -1554,41 +1654,7 @@ export class AudioEngine {
   // --- Play log: "Previously played" and no repeats within an hour ---
 
   public dedupeConsecutivePlayLog(entries: PlayLogEntry[]): PlayLogEntry[] {
-    const deduped: PlayLogEntry[] = [];
-    for (const entry of entries) {
-      if (!entry) continue;
-      if (
-        deduped.length === 0 ||
-        (!areSongsConsecutivelySame(entry, deduped[deduped.length - 1]) &&
-         !this.isSameSong(this.songKeys(entry), this.songKeys(deduped[deduped.length - 1])))
-      ) {
-        deduped.push(entry);
-      }
-    }
-    return deduped;
-  }
-
-  private loadPlayLog() {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(PLAY_LOG_KEY) || '[]');
-      if (Array.isArray(saved)) {
-        const valid = saved.filter((e) => e && typeof e.playedAt === 'number');
-        // RULE: In previously played no 2 consecutive songs can be same
-        this.playLog = this.dedupeConsecutivePlayLog(valid);
-        this.savePlayLog();
-      }
-    } catch {
-      // Ignore corrupt or unavailable storage
-    }
-  }
-
-  private savePlayLog() {
-    try {
-      this.playLog = this.dedupeConsecutivePlayLog(this.playLog);
-      window.localStorage.setItem(PLAY_LOG_KEY, JSON.stringify(this.playLog.slice(0, PLAY_LOG_MAX)));
-    } catch {
-      // Storage unavailable: the log just won't survive a reload
-    }
+    return this.library.dedupeConsecutivePlayLog(entries);
   }
 
   private songKeys(song: SongRef): string[] {
@@ -1934,7 +2000,7 @@ export class AudioEngine {
   public getTopBangers(): SongHistoryItem[] {
     // One pass compares every history song with the queue and play log (~24 ms with a 50-song
     // history and queue), and the UI and phone sync read this several times a second
-    const raw = this.rawMostPlayedSongs;
+    const raw = this.library.history;
     const key = [
       raw.length,
       raw[0]?.id,
@@ -1960,7 +2026,7 @@ export class AudioEngine {
     const fromLog = this.playLog.find((e) => e.playedAt >= since && this.isSameSong(keys, this.songKeys(e)));
     if (fromLog) return fromLog.playedAt;
     // Also the server-side history, in case this browser's log was cleared
-    const fromHistory = this.rawMostPlayedSongs.find(
+    const fromHistory = this.library.history.find(
       (h) => h.lastPlayed >= since && this.isSameSong(keys, this.songKeys(h))
     );
     return fromHistory ? fromHistory.lastPlayed : null;
@@ -2008,6 +2074,27 @@ export class AudioEngine {
       this.saveTopSongAvoid();
     }
     this.queue = this.queue.filter((q) => q.id !== itemId);
+    this.saveQueueToStorage();
+    this.notify();
+  }
+
+  /**
+   * Reorder a track in the upcoming queue (e.g. prioritize to top/play-next or nudge up/down).
+   */
+  public moveQueueItem(itemId: string, direction: 'up' | 'down' | 'top') {
+    const idx = this.queue.findIndex((q) => q.id === itemId);
+    if (idx === -1) return;
+    const item = this.queue[idx];
+    const newQueue = [...this.queue];
+    newQueue.splice(idx, 1);
+    if (direction === 'top') {
+      newQueue.unshift(item);
+    } else if (direction === 'up') {
+      newQueue.splice(Math.max(0, idx - 1), 0, item);
+    } else if (direction === 'down') {
+      newQueue.splice(Math.min(newQueue.length, idx + 1), 0, item);
+    }
+    this.queue = newQueue;
     this.saveQueueToStorage();
     this.notify();
   }
@@ -2249,7 +2336,7 @@ export class AudioEngine {
 
       // 2. Past Played & Most Played Bangers (excluding last hour)
       const pastList: Array<{ title: string; artist: string; url?: string; thumbnail?: string; duration?: number; highlightTime?: number }> = [
-        ...this.rawMostPlayedSongs,
+        ...this.library.history,
         ...this.playLog,
       ];
       for (const song of pastList) {
@@ -2404,7 +2491,7 @@ export class AudioEngine {
       if (deck.getTrack() === track) deck.setTrimDb(loudnessGainDb(track.loudnessDb));
     }
 
-    this.ensureRhythmPlan(track);
+    this.rhythmPlans.planFor(track);
   }
 
   /**
@@ -2462,186 +2549,30 @@ export class AudioEngine {
       musicStartTime: track.musicStartTime,
       hookTime: track.highlightTime,
       transition,
-      plan: this.ensureRhythmPlan(track, true),
+      plan: this.rhythmPlans.planFor(track, true),
     };
   }
 
-  private songKey(track: { url?: string; title: string; artist: string }): string {
-    return track.url || `${track.title}|${track.artist}`;
-  }
-
-  /**
-   * The song's rhythm plan for the current mood, made on first use (cheap afterwards: the
-   * rhythm layer calls this every tick). Until the AI DJ has identified the song, the plan uses
-   * the built-in language guess; songs the guess isn't sure about are queued for the AI
-   * (urgent = the song on air, asked first).
-   */
-  private ensureRhythmPlan(track: TrackMetadata, urgent = false): RhythmPlan | null {
-    const song = this.songKey(track);
-    const guess = guessLanguage(track.title, track.artist);
-    const fromAi = guess.sure ? undefined : this.songLanguageFromAi(song);
-    const useAi = fromAi !== undefined && fromAi !== 'unknown';
-    const language = useAi ? fromAi! : guess.language;
-    const key = `${song}|${this.mood}|${useAi ? language : '-'}`;
-
-    let plan = this.rhythmPlans.get(key) ?? null;
-    if (!plan) {
-      let features = this.rhythmFeatures.get(song) ?? null;
-      if (!features && track.audioBuffer && track.energyProfile) {
-        features = computeRhythmFeatures(track.audioBuffer, track.energyProfile);
-        this.rhythmFeatures.set(song, features);
-      }
-      if (!features) return null; // not analysed yet
-      plan = planRhythm(
-        { title: track.title, artist: track.artist, bpm: track.bpm, bpmConfidence: track.bpmConfidence ?? 0 },
-        this.mood,
-        features,
-        language,
-        useAi ? 'ai' : guess.sure ? 'known' : 'guess'
-      );
-      this.rhythmPlans.set(key, plan);
-    }
-
-    if (!guess.sure && fromAi === undefined && this.aiStatus === 'online') {
-      if (!this.songIdAsked.has(song)) {
-        this.songIdAsked.add(song);
-        if (urgent) this.songIdQueue.unshift(track);
-        else this.songIdQueue.push(track);
-        void this.processSongIdQueue();
-      } else if (urgent) {
-        // Already waiting behind other songs: the song on air goes first
-        const i = this.songIdQueue.findIndex((t) => this.songKey(t) === song);
-        if (i > 0) this.songIdQueue.unshift(...this.songIdQueue.splice(i, 1));
-      }
-    }
-    return plan;
-  }
-
-  /** Asks the AI DJ about one song at a time (~3 s each), after any time-critical mix question. */
-  private async processSongIdQueue() {
-    if (this.songIdBusy) return;
-    this.songIdBusy = true;
-    try {
-      while (this.songIdQueue.length) {
-        while (this.aiMixCalls > 0) await new Promise((r) => window.setTimeout(r, 500));
-        const track = this.songIdQueue.shift()!;
-        const song = this.songKey(track);
-        if (this.songLanguageFromAi(song) !== undefined) continue;
-        const language = await this.djAgent.identifySong(track.title, track.artist);
-        if (!language) continue; // no answer: the built-in guess stays (asked again next session)
-        this.songLanguages.set(song, language);
-        this.saveSongLanguages();
-        this.notify();
-      }
-    } finally {
-      this.songIdBusy = false;
-    }
-  }
-
-  private songLanguageFromAi(song: string): SongLanguage | undefined {
-    if (!this.songLanguagesLoaded) {
-      this.songLanguagesLoaded = true;
-      try {
-        const saved = JSON.parse(window.localStorage.getItem(SONG_LANGUAGES_KEY) || '{}');
-        for (const [k, v] of Object.entries(saved)) if (typeof v === 'string') this.songLanguages.set(k, v as SongLanguage);
-      } catch {
-        // unreadable: start empty
-      }
-    }
-    return this.songLanguages.get(song);
-  }
-
-  private saveSongLanguages() {
-    try {
-      // Keep the newest 1000 songs (Map keeps insertion order)
-      const entries = [...this.songLanguages.entries()].slice(-1000);
-      window.localStorage.setItem(SONG_LANGUAGES_KEY, JSON.stringify(Object.fromEntries(entries)));
-    } catch {
-      // storage unavailable: songs are just asked about again next session
-    }
-  }
-
-  // --- Hot cues & beat loops (Pro decks) ---
-
-  private deckById(id: DeckId): VirtualDeck {
-    return id === 'A' ? this.deckA : this.deckB;
-  }
+  // --- Hot cues & beat loops (Pro decks, see engine/DeckCues.ts) ---
 
   public getHotCues(deckId: DeckId): Array<number | null> {
-    const track = this.deckById(deckId).getTrack();
-    return track ? loadHotCues(this.songKey(track)) : Array(HOT_CUE_SLOTS).fill(null);
+    return this.cues.getHotCues(deckId);
   }
 
-  /** An empty slot saves the current position (on the nearest beat); a saved one jumps to it. */
   public hotCue(deckId: DeckId, slot: number) {
-    const deck = this.deckById(deckId);
-    const track = deck.getTrack();
-    if (!track || slot < 0 || slot >= HOT_CUE_SLOTS) return;
-    const cues = loadHotCues(this.songKey(track));
-    const saved = cues[slot];
-    if (saved === null) {
-      const beat = 60 / (track.bpm || 120);
-      const downbeat = track.firstDownbeatTime ?? 0;
-      const position = deck.getCurrentTime();
-      cues[slot] = Math.max(0, Math.min(track.duration - 0.5, downbeat + Math.round((position - downbeat) / beat) * beat));
-      saveHotCues(this.songKey(track), cues);
-    } else {
-      deck.seek(saved);
-      if (deck === this.onAirDeck()) {
-        this.afterSeek();
-        this.saveCurrentTrackToStorage();
-      }
-    }
-    this.notify();
+    this.cues.hotCue(deckId, slot);
   }
 
   public clearHotCue(deckId: DeckId, slot: number) {
-    const track = this.deckById(deckId).getTrack();
-    if (!track) return;
-    const cues = loadHotCues(this.songKey(track));
-    cues[slot] = null;
-    saveHotCues(this.songKey(track), cues);
-    this.notify();
+    this.cues.clearHotCue(deckId, slot);
   }
 
-  /** Bars in the deck's current loop, or 0. */
   public getLoopBars(deckId: DeckId): number {
-    const deck = this.deckById(deckId);
-    const loop = deck.getLoop();
-    const track = deck.getTrack();
-    if (!loop || !track) return 0;
-    return Math.round((loop.end - loop.start) / ((4 * 60) / (track.bpm || 120)));
+    return this.cues.getLoopBars(deckId);
   }
 
-  /**
-   * Loops `bars` bars from the start of the bar playing now (pressing the same length again
-   * leaves the loop). On the song on air it cancels a planned mix: the loop is holding the song.
-   */
   public toggleBeatLoop(deckId: DeckId, bars: number) {
-    const deck = this.deckById(deckId);
-    const track = deck.getTrack();
-    if (!track) return;
-    const onAir = deck === this.onAirDeck();
-    if (deck.getLoop()) {
-      const same = this.getLoopBars(deckId) === bars;
-      deck.exitLoop();
-      // The clock jumped back by the loop's repeats: re-lock the drums now rather than wait for the song
-      if (onAir) this.rhythm.silence();
-      if (same) {
-        this.notify();
-        return;
-      }
-    }
-    if (!deck.getPlaybackState().isPlaying || (onAir && this.isTransitioning)) return;
-    const bar = (4 * 60) / (track.bpm || 120);
-    const downbeat = track.firstDownbeatTime ?? 0;
-    const start = downbeat + Math.floor((deck.getCurrentTime() - downbeat) / bar) * bar;
-    if (!deck.setLoop(Math.max(0, start), start + bars * bar)) return;
-    if (onAir) {
-      this.cancelPendingMix('Loop on: planned mix cancelled. Leave the loop to carry on.');
-      this.acquisitionStatus = `Looping ${bars} bar${bars > 1 ? 's' : ''} of "${track.title}". Press the loop again to carry on.`;
-    }
-    this.notify();
+    this.cues.toggleBeatLoop(deckId, bars);
   }
 
   /** Every rhythm control (laptop UI, phone remote and typed commands) goes through here. */
@@ -3411,103 +3342,118 @@ export class AudioEngine {
       startsInSeconds: Math.max(0, startsIn),
       entryTime: this.pendingMix.plan.entryTime,
       reason: this.pendingMix.plan.reason,
-    };
-  }
-
-  /** Everything the phone remote shows (sent when the slow parts change; see getSyncSignature). */
-  public getSyncState(): HostSyncState {
-    const curState = this.onAirDeck().getPlaybackState();
-    // Decoded audio, analysis envelopes and peaks are large; keep them out of the broadcast
-    const currentTrack = curState.track
-      ? { ...curState.track, audioBuffer: undefined, originalBuffer: undefined, energyProfile: undefined }
-      : null;
-    return {
-      ...this.getLiveSyncState(),
-      type: 'SYNC_STATE',
-      currentTrack,
-      queue: this.queue.map((q) => ({
-        ...q,
-        audioBuffer: undefined,
-        originalBuffer: undefined,
-        energyProfile: undefined,
-        waveformPeaks: undefined,
-      })),
-      mostPlayedSongs: this.mostPlayedSongs,
-      favorites: this.favorites,
-      bannedSongs: this.bannedSongs,
-      recentlyPlayed: this.dedupeConsecutivePlayLog(this.playLog).slice(0, 30),
-      introAnalysis: curState.track ? this.introAnalyses.get(curState.track.id) ?? null : null,
-    };
-  }
-
-  /** The parts that change from moment to moment (under 1 KB), sent to the phone several times a second. */
-  public getLiveSyncState(): LiveSyncState {
-    const curState = this.onAirDeck().getPlaybackState();
-    return {
-      type: 'SYNC_LIVE',
-      activeDeck: this.activeDeck,
-      isPlaying: curState.isPlaying,
-      currentTime: curState.currentTime,
-      duration: curState.duration,
-      bpm: curState.effectiveBpm,
-      crossfader: this.crossfaderPosition,
-      rhythm: this.rhythm.getState(),
-      acquisitionStatus: this.acquisitionStatus,
-      pendingMix: this.getPendingMixInfo(),
-      isTransitioning: this.isTransitioning,
-      transitionProgress: this.transitionProgress,
-      autoCurationEnabled: this.autoCurationEnabled,
-      autoCueViralHook: this.autoCueViralHook,
-      mood: this.mood,
-      eqGains: this.eqGains,
-      sessionBpm: this.sessionBpm,
-      aiStatus: this.aiStatus,
-      lastAiDecision: this.lastAiDecision,
-      tempo: this.getTempoInfo(),
+      targetKey: this.pendingMix.item.key,
+      keyFit: this.pendingMix.keyFit,
+      harmonicShift: this.pendingMix.harmonicShift,
     };
   }
 
   /**
-   * A cheap fingerprint of the slow parts of the sync state (queue, history, favourites, the
-   * song on air): when it hasn't changed, the host sends only getLiveSyncState().
+   * One-Click Harmonic Queue Reordering:
+   * Sorts the Up Next queue into an unbroken, clash-free Camelot wheel harmonic journey.
+   * Starts from the currently playing on-air song's key (or deck A/B), preserving any
+   * currently in-flight downloading or mixing tracks at position 0.
    */
+  public sortQueueHarmonically(): number {
+    if (this.queue.length <= 1) return 0;
+
+    // 1. Determine reference key from currently playing on-air song
+    const onAirState = this.getOnAirDeck().getPlaybackState();
+    const onAirTrack = onAirState.track;
+    let refKey = onAirTrack?.key
+      ? (this.keyLock ? onAirTrack.key : shiftKey(onAirTrack.key, onAirState.playbackRate))
+      : this.queue.find((q) => q.key)?.key;
+
+    // 2. Protect head items if currently active/downloading/mixing
+    let startIndex = 0;
+    if (
+      this.pendingMix ||
+      (this.queue[0] &&
+        (this.queue[0].status === 'downloading' ||
+          this.queue[0].status === 'decoding' ||
+          this.queue[0].status === 'tuning'))
+    ) {
+      startIndex = 1;
+      if (this.queue[0].key) refKey = this.queue[0].key;
+    }
+
+    if (startIndex >= this.queue.length - 1) return 0;
+
+    const pinnedHead = this.queue.slice(0, startIndex);
+    const pool = [...this.queue.slice(startIndex)];
+    const sorted: QueuedTrack[] = [];
+
+    while (pool.length > 0) {
+      let bestIdx = 0;
+      let bestScore = -1;
+
+      for (let i = 0; i < pool.length; i++) {
+        const item = pool[i];
+        if (!item.key) {
+          // Track with key still pending: neutral low score with original queue index tiebreaker
+          const score = 0.2 - (i * 0.0001);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+          continue;
+        }
+
+        const compat = getHarmonicCompatibility(refKey, item.key);
+        // Harmonic score: 1.0 (exact), 0.98 (relative), 0.95 (energy boost +1), 0.92 (deep drop -1), etc.
+        // Slight tiebreaker keeps earlier user requests / bangers ahead of same-score tracks
+        const score = compat.score - (i * 0.0001);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      const chosen = pool.splice(bestIdx, 1)[0];
+      sorted.push(chosen);
+      if (chosen.key) {
+        refKey = chosen.key;
+      }
+    }
+
+    this.queue = [...pinnedHead, ...sorted];
+    this.saveQueueToStorage();
+    this.notify();
+    return sorted.length;
+  }
+
+  // --- Phone sync (see engine/syncState.ts) ---
+
+  public getSyncState(): HostSyncState {
+    return buildSyncState(this);
+  }
+
+  public getLiveSyncState(): LiveSyncState {
+    return buildLiveSyncState(this);
+  }
+
   public getSyncSignature(): string {
-    const track = this.onAirDeck().getTrack();
-    const queue = this.queue
-      .map((q) => `${q.id}:${q.status}:${q.bpm ?? ''}:${q.tempoLockedTo ?? ''}:${q.isDiskCached ? 1 : 0}:${q.lastPlayedAt ?? ''}`)
-      .join(',');
-    return [
-      queue,
-      track ? `${track.id}:${track.bpm}:${track.highlightTime ?? ''}:${track.musicStartTime ?? ''}` : '-',
-      this.playLog.length,
-      this.playLog[0]?.playedAt,
-      this.getTopBangers().length,
-      this.topBangersCache?.key,
-      this.favorites.length,
-      this.favorites[0]?.id,
-      this.bannedSongs.length,
-      this.bannedSongs[0]?.id,
-      track ? (this.introAnalyses.has(track.id) ? 1 : 0) : 0,
-    ].join('|');
+    return syncSignature(this);
+  }
+
+  public getOnAirDeck(): VirtualDeck {
+    return this.onAirDeck();
+  }
+
+  /** How the on-air (or any analysed) song's intro was analysed, for diagnostics. */
+  public getIntroAnalysis(trackId: string): IntroAnalysisResult | null {
+    return this.introAnalyses.get(trackId) ?? null;
+  }
+
+  /** Changes whenever the Most Played list may have changed (see getTopBangers). */
+  public getTopBangersKey(): string | undefined {
+    return this.topBangersCache?.key;
   }
 
   // --- History & Favorites Management ---
 
-  public async fetchPlayHistory(): Promise<SongHistoryItem[]> {
-    try {
-      const res = await fetch('/api/history');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.history)) {
-          this.mostPlayedSongs = data.history;
-          this.notify();
-          return data.history;
-        }
-      }
-    } catch (err) {
-      console.error('Failed to fetch play history:', err);
-    }
-    return this.mostPlayedSongs;
+  public fetchPlayHistory(): Promise<SongHistoryItem[]> {
+    return this.library.fetchHistory();
   }
 
   public async recordSongPlay(track: TrackMetadata) {
@@ -3518,341 +3464,54 @@ export class AudioEngine {
     if (!track || track.id.startsWith('demo_') || this.lastRecordedTrackId === track.id) return;
     this.lastRecordedTrackId = track.id;
 
+    this.library.logPlay(track);
+    // Drop any other copies of this song waiting in Up Next
     const playedKeys = this.songKeys(track);
-
-    // RULE: In previously played no 2 consecutive songs can be same
-    if (
-      this.playLog.length > 0 &&
-      (areSongsConsecutivelySame(track, this.playLog[0]) || this.isSameSong(playedKeys, this.songKeys(this.playLog[0])))
-    ) {
-      this.playLog[0].playedAt = Date.now();
-      if (!this.playLog[0].thumbnail && track.thumbnail) this.playLog[0].thumbnail = track.thumbnail;
-      if (!this.playLog[0].url && track.url) this.playLog[0].url = track.url;
-      this.savePlayLog();
-    } else {
-      // Log the play, then drop any other copies of this song waiting in Up Next
-      this.playLog = this.dedupeConsecutivePlayLog([
-        { id: track.id, title: track.title, artist: track.artist, url: track.url, thumbnail: track.thumbnail, playedAt: Date.now() },
-        ...this.playLog,
-      ]).slice(0, PLAY_LOG_MAX);
-      this.savePlayLog();
-    }
-
     const before = this.queue.length;
     this.queue = this.queue.filter((q) => q.status === 'downloading' || !this.isSameSong(playedKeys, this.songKeys(q)));
     if (this.queue.length !== before) this.saveQueueToStorage();
     this.notify();
 
-    try {
-      const res = await fetch('/api/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          song: {
-            id: track.id,
-            title: track.title,
-            artist: track.artist,
-            duration: Math.round(track.duration),
-            url: track.url,
-            thumbnail: track.thumbnail,
-            highlightTime: track.highlightTime,
-          },
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.history)) {
-          this.mostPlayedSongs = data.history;
-          this.notify();
-        }
-      }
-    } catch (err) {
-      console.error('Failed to record song play history:', err);
-    }
+    await this.library.postPlay(track);
   }
 
   public isFavorite(song?: { id?: string; title?: string; url?: string } | null): boolean {
-    if (!song) return false;
-    const sId = song.id;
-    const sUrl = song.url;
-    const sTitle = (song.title || '').trim().toLowerCase();
-    return this.favorites.some((f) => {
-      if (sId && f.id === sId) return true;
-      if (sUrl && f.url && f.url === sUrl) return true;
-      if (sTitle && f.title && f.title.trim().toLowerCase() === sTitle) return true;
-      return false;
-    });
+    return this.library.isFavorite(song);
   }
 
-  public async loadFavorites(): Promise<FavoriteSong[]> {
-    try {
-      const raw = localStorage.getItem('ai_dj_favorites');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.favorites = parsed;
-          this.notify();
-        }
-      }
-    } catch {
-      // ignore localStorage errors
-    }
-    return this.fetchFavorites();
-  }
-
-  public async fetchFavorites(): Promise<FavoriteSong[]> {
-    try {
-      const res = await fetch('/api/favorites');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.favorites)) {
-          this.favorites = data.favorites;
-          try {
-            localStorage.setItem('ai_dj_favorites', JSON.stringify(this.favorites));
-          } catch {}
-          this.notify();
-          return data.favorites;
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to fetch favorites from server:', err);
-    }
-    return this.favorites;
-  }
-
-  public async toggleFavorite(
-    song?: {
-      id?: string;
-      title?: string;
-      artist?: string;
-      url?: string;
-      thumbnail?: string;
-      duration?: number;
-      bpm?: number;
-      highlightTime?: number;
-    } | null
-  ): Promise<boolean> {
-    if (!song || (!song.id && !song.title && !song.url)) return false;
-
-    const alreadyFav = this.isFavorite(song);
-    const normTitle = (song.title || '').trim().toLowerCase();
-
-    // Optimistic local update for instant UI feedback
-    if (alreadyFav) {
-      this.favorites = this.favorites.filter((f) => {
-        if (song.id && f.id === song.id) return false;
-        if (song.url && f.url && f.url === song.url) return false;
-        if (normTitle && f.title && f.title.trim().toLowerCase() === normTitle) return false;
-        return true;
-      });
-    } else {
-      const newFav: FavoriteSong = {
-        id: song.id || `fav_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        title: (song.title || 'Unknown Track').trim(),
-        artist: (song.artist || 'Unknown Artist').trim(),
-        url: song.url,
-        thumbnail: song.thumbnail,
-        duration: song.duration ? Math.round(song.duration) : undefined,
-        bpm: song.bpm ? Math.round(song.bpm) : undefined,
-        highlightTime: song.highlightTime,
-        addedAt: Date.now(),
-      };
-      this.favorites = [newFav, ...this.favorites];
-    }
-
-    try {
-      localStorage.setItem('ai_dj_favorites', JSON.stringify(this.favorites));
-    } catch {}
-    this.notify();
-
-    // Sync with backend /api/favorites/toggle
-    try {
-      const res = await fetch('/api/favorites/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          song: {
-            id: song.id,
-            title: song.title,
-            artist: song.artist,
-            url: song.url,
-            thumbnail: song.thumbnail,
-            duration: song.duration,
-            bpm: song.bpm,
-            highlightTime: song.highlightTime,
-          },
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.favorites)) {
-          this.favorites = data.favorites;
-          try {
-            localStorage.setItem('ai_dj_favorites', JSON.stringify(this.favorites));
-          } catch {}
-          this.notify();
-          return Boolean(data.isFavorite);
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to sync favorite toggle with backend:', err);
-    }
-
-    return !alreadyFav;
+  public toggleFavorite(song?: Parameters<SongLibrary['toggleFavorite']>[0]): Promise<boolean> {
+    return this.library.toggleFavorite(song);
   }
 
   public isDontPlayAgain(song?: { id?: string; title?: string; artist?: string; url?: string } | null): boolean {
-    if (!song) return false;
-    const sId = song.id;
-    const sUrl = song.url ? song.url.trim().toLowerCase() : '';
-    const sTitle = (song.title || '').trim().toLowerCase();
-    const sCore = cleanCoreTitle(song.title || '');
-    const sKeys = song.title ? this.songKeys({ title: song.title, artist: song.artist, url: song.url }) : [];
-
-    return this.bannedSongs.some((b) => {
-      if (sId && b.id === sId) return true;
-      if (sUrl && b.url && b.url.trim().toLowerCase() === sUrl) return true;
-      if (sTitle && b.title && b.title.trim().toLowerCase() === sTitle) return true;
-      if (sCore && b.title && cleanCoreTitle(b.title) === sCore) return true;
-      if (sKeys.length > 0 && b.title && this.isSameSong(sKeys, this.songKeys({ title: b.title, artist: b.artist, url: b.url }))) return true;
-      return false;
-    });
+    return this.library.isBanned(song);
   }
 
-  public async loadDontPlayAgain(): Promise<BannedSong[]> {
-    try {
-      const raw = localStorage.getItem(DONT_PLAY_AGAIN_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.bannedSongs = parsed;
-          this.notify();
-        }
-      }
-    } catch {
-      // ignore localStorage errors
-    }
-    return this.fetchBannedSongs();
-  }
-
-  public async fetchBannedSongs(): Promise<BannedSong[]> {
-    try {
-      const res = await fetch('/api/banned');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.banned)) {
-          this.bannedSongs = data.banned;
-          try {
-            localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
-          } catch {}
-          this.notify();
-          return data.banned;
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to fetch banned songs from server:', err);
-    }
-    return this.bannedSongs;
-  }
-
-  public async toggleDontPlayAgain(
-    song?: {
-      id?: string;
-      title?: string;
-      artist?: string;
-      url?: string;
-      thumbnail?: string;
-      duration?: number;
-    } | null
-  ): Promise<boolean> {
+  /** Thumbs down: never play this song again (removed from Up Next, skipped if on air). Again to undo. */
+  public async toggleDontPlayAgain(song?: Parameters<SongLibrary['toggleBanned']>[0] | null): Promise<boolean> {
     if (!song || (!song.id && !song.title && !song.url)) return false;
-
-    const alreadyBanned = this.isDontPlayAgain(song);
-    const normTitle = (song.title || '').trim().toLowerCase();
-    const coreTitle = cleanCoreTitle(song.title || '');
-
-    if (alreadyBanned) {
-      // Unban
-      this.bannedSongs = this.bannedSongs.filter((b) => {
-        if (song.id && b.id === song.id) return false;
-        if (song.url && b.url && b.url === song.url) return false;
-        if (normTitle && b.title && b.title.trim().toLowerCase() === normTitle) return false;
-        if (coreTitle && b.title && cleanCoreTitle(b.title) === coreTitle) return false;
-        return true;
-      });
-      this.acquisitionStatus = `Removed "${song.title}" from Don't Play Again Ever.`;
+    const { banned, title, synced } = this.library.toggleBanned(song);
+    if (!banned) {
+      this.acquisitionStatus = `Removed "${title}" from Don't Play Again Ever.`;
     } else {
-      // Ban: Add to Don't Play Again Ever list
-      const newBanned: BannedSong = {
-        id: song.id || `banned_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        title: (song.title || 'Unknown Track').trim(),
-        artist: (song.artist || 'Unknown Artist').trim(),
-        url: song.url,
-        thumbnail: song.thumbnail,
-        duration: song.duration ? Math.round(song.duration) : undefined,
-        bannedAt: Date.now(),
-      };
-      this.bannedSongs = [newBanned, ...this.bannedSongs];
-      this.acquisitionStatus = `Saved "${newBanned.title}" in "Don't Play Again Ever".`;
-
-      // 1. Immediately purge any copies from Up Next queue!
-      const beforeQueueLen = this.queue.length;
+      this.acquisitionStatus = `Saved "${title}" in "Don't Play Again Ever".`;
+      // 1. Immediately purge any copies from Up Next
+      const before = this.queue.length;
       this.queue = this.queue.filter((q) => !this.isDontPlayAgain(q));
-      if (this.queue.length !== beforeQueueLen) {
-        this.saveQueueToStorage();
-      }
-
-      // 2. If it's currently on air, skip immediately!
-      const curDeck = this.onAirDeck();
-      const curTrack = curDeck.getTrack();
-      if (curTrack && this.isDontPlayAgain(curTrack)) {
-        console.log(`[AudioEngine] Currently playing "${curTrack.title}" was banned (Thumbs Down) — skipping immediately.`);
+      if (this.queue.length !== before) this.saveQueueToStorage();
+      // 2. If it's on air, skip it now
+      const onAir = this.onAirDeck().getTrack();
+      if (onAir && this.isDontPlayAgain(onAir)) {
+        console.log(`[AudioEngine] Currently playing "${onAir.title}" was banned (Thumbs Down) — skipping immediately.`);
         this.nextTrack();
       }
     }
-
-    try {
-      localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
-    } catch {}
     this.notify();
-
-    // Sync with backend /api/banned/toggle
-    try {
-      const res = await fetch('/api/banned/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          song: {
-            id: song.id,
-            title: song.title,
-            artist: song.artist,
-            url: song.url,
-            thumbnail: song.thumbnail,
-            duration: song.duration,
-          },
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.banned)) {
-          this.bannedSongs = data.banned;
-          try {
-            localStorage.setItem(DONT_PLAY_AGAIN_KEY, JSON.stringify(this.bannedSongs));
-          } catch {}
-          this.notify();
-          return Boolean(data.isBanned);
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to sync banned song toggle with backend:', err);
-    }
-
-    return !alreadyBanned;
+    return synced;
   }
 
   public async playStarterSong(songId: string) {
-    const song = this.rawMostPlayedSongs.find((s) => s.id === songId) || this.favorites.find((s) => s.id === songId);
+    const song = this.library.history.find((s) => s.id === songId) || this.favorites.find((s) => s.id === songId);
     if (!song) return;
 
     const query = song.url || `${song.title} ${song.artist}`;
@@ -3927,6 +3586,22 @@ export class AudioEngine {
 
   public toggleAutoCueHook() {
     this.autoCueViralHook = !this.autoCueViralHook;
+    this.notify();
+  }
+
+  /** Up Next from the offline library only (e.g. a venue with bad Wi-Fi). Remembered. */
+  public toggleOfflineOnly() {
+    this.offlineOnly = !this.offlineOnly;
+    try {
+      window.localStorage.setItem(OFFLINE_ONLY_KEY, this.offlineOnly ? '1' : '0');
+    } catch {
+      // storage unavailable
+    }
+    this.acquisitionStatus = this.offlineOnly
+      ? 'Offline only: Up Next now comes from the songs on this laptop.'
+      : 'Online again: Up Next uses internet recommendations.';
+    // Refill from the right source straight away
+    this.lastRefillAttemptAt = 0;
     this.notify();
   }
 

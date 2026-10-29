@@ -21,3 +21,7 @@ Thumbs.db
 
 # Downloaded song audio (server/apiPlugin.ts audio cache)
 cache/
+
+# Offline music library: your songs and the saved most-played MP3s (server/localLibrary.ts)
+music/
+data/local_library.json

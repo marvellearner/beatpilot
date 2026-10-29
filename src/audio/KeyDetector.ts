@@ -169,6 +169,214 @@ function parseCamelot(c: string): { num: number; minor: boolean } | null {
   return m ? { num: Number(m[1]), minor: m[2] === 'A' } : null;
 }
 
+export interface CamelotDetails {
+  camelot: string;           // e.g. "8A"
+  musicalKey: string;        // e.g. "A minor"
+  shortName: string;         // e.g. "Am"
+  number: number;            // 1-12
+  mode: 'A' | 'B';           // 'A' = minor, 'B' = major
+  tonic: number;             // 0-11 pitch class (C=0)
+}
+
+/**
+ * Returns the musical key details for a Camelot code (e.g. "8A" -> "A minor / Am").
+ */
+export function getCamelotDetails(camelot: string | undefined): CamelotDetails {
+  if (!camelot) {
+    return {
+      camelot: '—',
+      musicalKey: 'Unknown Key',
+      shortName: '—',
+      number: 0,
+      mode: 'A',
+      tonic: 0,
+    };
+  }
+
+  const parsed = parseCamelot(camelot);
+  if (!parsed) {
+    return {
+      camelot,
+      musicalKey: camelot,
+      shortName: camelot,
+      number: 0,
+      mode: 'A',
+      tonic: 0,
+    };
+  }
+
+  const tonic = (parsed.minor ? CAMELOT_MINOR : CAMELOT_MAJOR).indexOf(parsed.num);
+  const noteName = NOTE_NAMES[tonic] ?? 'C';
+  const shortName = parsed.minor ? `${noteName}m` : noteName;
+  const musicalKey = `${noteName} ${parsed.minor ? 'minor' : 'major'}`;
+
+  return {
+    camelot,
+    musicalKey,
+    shortName,
+    number: parsed.num,
+    mode: parsed.minor ? 'A' : 'B',
+    tonic,
+  };
+}
+
+export type HarmonicRelationType =
+  | 'exact'         // 8A -> 8A (Same key)
+  | 'relative'      // 8A -> 8B (Relative Major/Minor)
+  | 'energy_boost'  // 8A -> 9A (+1 Camelot step: Energy lift)
+  | 'deep_drop'     // 8A -> 7A (-1 Camelot step: Chill/Deep)
+  | 'diagonal'      // 8A -> 9B or 7B (Diagonal neighbor)
+  | 'semitone_jump' // +1 semitone (e.g. 8A to 3A)
+  | 'usable'        // ±2 steps
+  | 'clash';        // 3+ steps (dissonant)
+
+export interface HarmonicCompatibility {
+  score: number;             // 0.0 to 1.0 (for sorting & weighting)
+  relation: HarmonicRelationType;
+  label: string;             // e.g. "Harmonic Match", "Energy Boost +1", "Relative Major"
+  badgeText: string;         // e.g. "±0", "+1 ⚡", "-1 🌊", "⚠️ Clash"
+  color: 'emerald' | 'amber' | 'cyan' | 'teal' | 'purple' | 'slate' | 'rose';
+  description: string;       // detailed tooltip explaining the musical relationship
+  energyDiff: number;        // -1, 0, +1, etc.
+}
+
+/**
+ * Evaluates harmonic compatibility and energy shift between two Camelot keys.
+ * Used for color-coding the Up Next queue, tagging transitions, and sorting harmonic flow.
+ */
+export function getHarmonicCompatibility(
+  currentKey: string | undefined,
+  candidateKey: string | undefined
+): HarmonicCompatibility {
+  const pa = currentKey ? parseCamelot(currentKey) : null;
+  const pb = candidateKey ? parseCamelot(candidateKey) : null;
+
+  if (!pa || !pb) {
+    return {
+      score: 0.5,
+      relation: 'usable',
+      label: 'Key Pending',
+      badgeText: '—',
+      color: 'slate',
+      description: 'Key analysis in progress',
+      energyDiff: 0,
+    };
+  }
+
+  const tonicA = (pa.minor ? CAMELOT_MINOR : CAMELOT_MAJOR).indexOf(pa.num);
+  const tonicB = (pb.minor ? CAMELOT_MINOR : CAMELOT_MAJOR).indexOf(pb.num);
+  const semitoneShift = (((tonicB - tonicA) % 12) + 12) % 12;
+
+  const diffNum = (((pb.num - pa.num) % 12) + 12) % 12;
+  const wheelDist = Math.min(diffNum, (12 - diffNum) % 12);
+  const sameMode = pa.minor === pb.minor;
+
+  // 1. Exact Key Match (e.g. 8A -> 8A, 8B -> 8B)
+  if (sameMode && wheelDist === 0) {
+    return {
+      score: 1.0,
+      relation: 'exact',
+      label: 'Harmonic Match',
+      badgeText: 'Harmonic ±0',
+      color: 'emerald',
+      description: `Exact harmonic match (${currentKey}): seamless blend with zero tonal clash`,
+      energyDiff: 0,
+    };
+  }
+
+  // 2. Relative Major/Minor (e.g. 8A Am <-> 8B C)
+  if (!sameMode && wheelDist === 0) {
+    const isMajorLift = !pb.minor;
+    return {
+      score: 0.98,
+      relation: 'relative',
+      label: isMajorLift ? 'Major Lift ✨' : 'Minor Mood 🌙',
+      badgeText: isMajorLift ? 'To Major ✨' : 'To Minor 🌙',
+      color: 'emerald',
+      description: isMajorLift
+        ? `Relative Major (${currentKey} → ${candidateKey}): brightens the room with identical scale notes`
+        : `Relative Minor (${currentKey} → ${candidateKey}): deepens the mood with identical scale notes`,
+      energyDiff: 0,
+    };
+  }
+
+  // 3. Energy Boost: +1 Camelot Step (e.g. 8A -> 9A, 8B -> 9B)
+  if (sameMode && diffNum === 1) {
+    return {
+      score: 0.95,
+      relation: 'energy_boost',
+      label: 'Energy Boost +1',
+      badgeText: 'Energy +1 ⚡',
+      color: 'amber',
+      description: `+1 Camelot Step (${currentKey} → ${candidateKey}): raises room energy smoothly (adds 1 sharp)`,
+      energyDiff: 1,
+    };
+  }
+
+  // 4. Deep / Chill Drop: -1 Camelot Step (e.g. 8A -> 7A, 8B -> 7B)
+  if (sameMode && diffNum === 11) {
+    return {
+      score: 0.92,
+      relation: 'deep_drop',
+      label: 'Deep / Chill -1',
+      badgeText: 'Deep -1 🌊',
+      color: 'cyan',
+      description: `-1 Camelot Step (${currentKey} → ${candidateKey}): smooth wind-down for a deeper groove (adds 1 flat)`,
+      energyDiff: -1,
+    };
+  }
+
+  // 5. Diagonal Blend (e.g. 8A -> 9B or 8A -> 7B)
+  if (!sameMode && wheelDist === 1) {
+    return {
+      score: 0.85,
+      relation: 'diagonal',
+      label: 'Diagonal Blend',
+      badgeText: 'Blend ~',
+      color: 'teal',
+      description: `Diagonal neighbor (${currentKey} → ${candidateKey}): compatible mood shift sharing 5/7 notes`,
+      energyDiff: diffNum === 1 ? 1 : -1,
+    };
+  }
+
+  // 6. Semitone Energy Modulation (+1 semitone pitch jump, e.g. 8A Am -> 3A Bbm)
+  if (semitoneShift === 1) {
+    return {
+      score: 0.8,
+      relation: 'semitone_jump',
+      label: 'Semitone Lift +1',
+      badgeText: 'Drop Jump 🚀',
+      color: 'purple',
+      description: `+1 Semitone Jump (${currentKey} → ${candidateKey}): explosive drop transition for dramatic climax`,
+      energyDiff: 2,
+    };
+  }
+
+  // 7. Usable (±2 Camelot Steps)
+  if (wheelDist === 2) {
+    return {
+      score: 0.5,
+      relation: 'usable',
+      label: 'Compatible (±2)',
+      badgeText: 'Usable ±2',
+      color: 'slate',
+      description: `2 steps apart (${currentKey} → ${candidateKey}): best with a bass cut or quick swap`,
+      energyDiff: diffNum === 2 ? 2 : -2,
+    };
+  }
+
+  // 8. Key Clash (3+ steps apart)
+  return {
+    score: 0.1,
+    relation: 'clash',
+    label: 'Key Clash',
+    badgeText: 'Clash ⚠️',
+    color: 'rose',
+    description: `Dissonant keys (${currentKey} → ${candidateKey}): recommend drop cut or echo out rather than long blend`,
+    energyDiff: 0,
+  };
+}
+
 /**
  * How well two keys mix: 1 = same, ±1 on the wheel, or relative major/minor; 0.5 = two steps
  * apart (usable in a short blend); 0 = clash.

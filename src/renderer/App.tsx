@@ -9,6 +9,7 @@ import { DJAgent, AIResponseResult } from '../ai/DJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
 import QRCode from 'qrcode';
+import { getCamelotDetails, getHarmonicCompatibility, shiftKey } from '../audio/KeyDetector';
 import {
   Disc,
   Send,
@@ -25,6 +26,9 @@ import {
   ListMusic,
   Radio,
   Zap,
+  Music,
+  ArrowUp,
+  X,
 } from 'lucide-react';
 
 // Phone updates: at most this often (the engine can change many times per frame during a mix)
@@ -155,6 +159,12 @@ export const App: React.FC = () => {
           if (curTrack) engine.toggleDontPlayAgain(curTrack);
           break;
         }
+        case 'CMD_SORT_QUEUE_HARMONICALLY':
+          engine.sortQueueHarmonically();
+          break;
+        case 'CMD_MOVE_QUEUED':
+          engine.moveQueueItem(action.itemId, action.direction);
+          break;
       }
     },
     [engine]
@@ -618,93 +628,230 @@ export const App: React.FC = () => {
         </>
       )}
 
-      {/* Autonomous 5-Song Upcoming Queue Panel (Desktop Console Pro View) */}
-      {consoleMode === 'pro' && (
-        <section id="app-pro-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <ListMusic className="w-4 h-4 text-purple-400" />
-              <h3 className="font-extrabold text-sm text-white tracking-wide">
-                AI AUTONOMOUS UPCOMING QUEUE ({engine.queue.length} TRACKS CURATED)
-              </h3>
-            </div>
+      {/* Autonomous 50-Song Upcoming Queue Panel (Desktop Console Pro View) */}
+      {consoleMode === 'pro' && (() => {
+        const activeDeckInstance = engine.activeDeck === 'A' ? engine.deckA : engine.deckB;
+        const proCurTrack = activeDeckInstance.getPlaybackState().track;
+        const proCurKey = proCurTrack?.key
+          ? (engine.keyLock ? proCurTrack.key : shiftKey(proCurTrack.key, activeDeckInstance.getPlaybackState().playbackRate))
+          : undefined;
+        const totalQueueDurationSec = engine.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
+        const totalQueueHours = Math.floor(totalQueueDurationSec / 3600);
+        const totalQueueMins = Math.round((totalQueueDurationSec % 3600) / 60);
+        const queueDurationStr = totalQueueHours > 0 ? `${totalQueueHours}h ${totalQueueMins}m` : `${totalQueueMins}m`;
 
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => engine.toggleAutoCuration()}
-                className={`text-[11px] font-mono font-bold px-3 py-1 rounded-xl border transition-colors ${
-                  engine.autoCurationEnabled
-                    ? 'bg-purple-600/30 border-purple-500 text-purple-300'
-                    : 'bg-white/5 border-white/10 text-slate-400'
-                }`}
-              >
-                Auto-Curate From Internet: {engine.autoCurationEnabled ? 'ON' : 'OFF'}
-              </button>
-
-              <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-                <Radio className="w-3 h-3 animate-pulse" />
-                <span>Auto-Mix At Outro Active</span>
-              </span>
-            </div>
-          </div>
-
-          {/* Queue Grid */}
-          <div id="app-pro-queue-grid" className="grid grid-cols-1 sm:grid-cols-5 gap-3 pt-1">
-            {engine.queue.map((item, idx) => (
-              <div id={`app-pro-queue-item-${item.id}`}
-                key={item.id}
-                className="p-3 rounded-xl bg-black/40 border border-white/5 flex flex-col justify-between gap-2 text-xs hover:border-white/20 transition-all relative group"
-              >
-                <div className="flex flex-col gap-1">
-                  <div className="flex justify-between items-center text-[10px] font-mono text-slate-500">
-                    <span>#{idx + 1} UPCOMING</span>
-                    {item.isAiRecommended && (
-                      <span className="bg-purple-500/20 text-purple-300 px-1 rounded font-bold">
-                        AI RECOM
-                      </span>
-                    )}
-                  </div>
-                  <div className="font-bold text-white truncate" title={item.title}>
-                    {item.title}
-                  </div>
-                  <div className="text-[10px] text-slate-400 truncate">{item.artist}</div>
+        return (
+          <section id="app-pro-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-3 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-white/10">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center shadow-sm">
+                  <ListMusic className="w-4 h-4 text-cyan-400" />
                 </div>
-
-                <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                  <div className="flex items-center gap-1">
-                    {item.isDiskCached && (
-                      <span className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold">
-                        DISK
-                      </span>
-                    )}
-                    <span
-                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
-                        item.status === 'ready'
-                          ? 'bg-emerald-500/20 text-emerald-300 font-bold'
-                          : item.status === 'failed'
-                          ? 'bg-red-500/20 text-red-300'
-                          : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                      }`}
-                    >
-                      {item.status.toUpperCase()}
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-black text-sm text-white tracking-wide">
+                      AI UPCOMING QUEUE
+                    </h3>
+                    <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                      {engine.queue.length} TRACKS
                     </span>
                   </div>
-
-                  <button
-                    onClick={() => engine.mixQueuedTrack(item.id)}
-                    disabled={item.status !== 'ready' || engine.isTransitioning}
-                    title={item.status === 'ready' ? 'Mix into this song now' : 'Still loading'}
-                    className="flex items-center gap-1 text-[10px] font-bold text-cyan-400 hover:text-cyan-300 bg-white/5 hover:bg-white/10 px-2 py-1 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                  >
-                    <Zap className="w-3 h-3" />
-                    <span>Mix</span>
-                  </button>
+                  <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5 pt-0.5">
+                    <span className="text-emerald-400 font-bold">{engine.queue.filter(q => q.status === 'ready').length} ready</span>
+                    <span>•</span>
+                    <span className="text-amber-300 font-medium">~{queueDurationStr} continuous party flow</span>
+                    {engine.diskCacheCount > 0 && (
+                      <>
+                        <span>•</span>
+                        <span className="text-cyan-400">💾 {engine.diskCacheCount} on disk</span>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
-      )}
+
+              <div className="flex items-center gap-2">
+                {engine.queue.length > 1 && (
+                  <button
+                    id="app-pro-sort-harmonic-btn"
+                    onClick={() => engine.sortQueueHarmonically()}
+                    className="flex items-center gap-1.5 text-xs font-mono font-extrabold text-purple-200 bg-gradient-to-r from-purple-500/25 via-indigo-500/25 to-pink-500/25 hover:from-purple-500/40 hover:to-indigo-500/40 border border-purple-500/40 px-3 py-1 rounded-xl shadow-md active:scale-95 transition-all cursor-pointer"
+                    title="Sort queue using Camelot wheel harmonic rules"
+                  >
+                    <Sparkles className="w-3 h-3 text-purple-300 animate-pulse" />
+                    <span>Harmonic Flow</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => engine.toggleAutoCuration()}
+                  className={`text-[11px] font-mono font-bold px-3 py-1 rounded-xl border transition-colors ${
+                    engine.autoCurationEnabled
+                      ? 'bg-purple-600/30 border-purple-500 text-purple-300'
+                      : 'bg-white/5 border-white/10 text-slate-400'
+                  }`}
+                >
+                  Auto-Curate: {engine.autoCurationEnabled ? 'ON' : 'OFF'}
+                </button>
+
+                <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
+                  <Radio className="w-3 h-3 animate-pulse" />
+                  <span className="font-bold">Auto-Mix Active</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Queue Cards Grid */}
+            <div id="app-pro-queue-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-3 pt-1 max-h-[520px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10">
+              {engine.queue.map((item, idx) => {
+                const keyDetails = item.key ? getCamelotDetails(item.key) : null;
+                const compat = proCurKey && item.key ? getHarmonicCompatibility(proCurKey, item.key) : null;
+                const colorClass = compat
+                  ? compat.color === 'emerald'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : compat.color === 'amber'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : compat.color === 'cyan'
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                    : compat.color === 'teal'
+                    ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                    : compat.color === 'purple'
+                    ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                    : compat.color === 'rose'
+                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                    : 'bg-white/10 text-slate-300 border-white/10'
+                  : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
+
+                const isHero = idx === 0;
+
+                return (
+                  <div
+                    id={`app-pro-queue-item-${item.id}`}
+                    key={item.id}
+                    className={`p-3 rounded-xl flex flex-col justify-between gap-2.5 text-xs transition-all relative group ${
+                      isHero
+                        ? 'bg-gradient-to-b from-cyan-950/40 via-[#101728]/90 to-[#0c101c]/95 border border-cyan-500/40 shadow-lg shadow-cyan-950/30 ring-1 ring-cyan-500/25'
+                        : 'bg-black/40 hover:bg-[#121827]/90 border border-white/5 hover:border-white/20'
+                    }`}
+                  >
+                    <div className="flex flex-col gap-1.5">
+                      {/* Top Rank + Badges */}
+                      <div className="flex justify-between items-center text-[10px] font-mono">
+                        <span className={`font-bold ${isHero ? 'text-cyan-300 flex items-center gap-1 font-black' : 'text-slate-500'}`}>
+                          {isHero && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />}
+                          #{idx + 1} {isHero ? 'UP NEXT' : 'UPCOMING'}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          {item.isAiRecommended && (
+                            <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 rounded font-bold text-[8px]">
+                              AI
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => engine.removeFromQueue(item.id)}
+                            className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-white p-0.5 rounded transition-all"
+                            title="Remove from queue"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Thumbnail & Title (Spacious 2-line wrapped title for 50+ chars upfront) */}
+                      <div className="flex items-start gap-2">
+                        <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-white/10 bg-slate-900 mt-0.5">
+                          {item.thumbnail ? (
+                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-slate-800">
+                              <Music className="w-3.5 h-3.5 text-slate-400" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <div className="font-bold text-white text-xs group-hover:text-cyan-300 transition-colors line-clamp-2 leading-snug break-words" title={item.title}>
+                            {item.title}
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate pt-0.5">{item.artist}</div>
+                        </div>
+                      </div>
+
+                      {/* Camelot Key + BPM badges */}
+                      <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                        {item.bpm !== undefined && (
+                          <span className="font-mono text-[9px] text-slate-300 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+                            {Math.round(item.bpm)} BPM
+                          </span>
+                        )}
+                        {item.key && keyDetails && (
+                          <span
+                            className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border ${colorClass}`}
+                            title={compat ? `${item.key} (${keyDetails.musicalKey}) • ${compat.description}` : `Key: ${item.key}`}
+                          >
+                            <span>{item.key}</span>
+                            {compat && compat.relation !== 'usable' && (
+                              <span className="font-black ml-0.5">{compat.badgeText}</span>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Bottom Status & Action Buttons */}
+                    <div className="flex items-center justify-between pt-2 border-t border-white/5">
+                      <div className="flex items-center gap-1">
+                        {item.isDiskCached && (
+                          <span className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold">
+                            DISK
+                          </span>
+                        )}
+                        <span
+                          className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${
+                            item.status === 'ready'
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : item.status === 'failed'
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                          }`}
+                        >
+                          {item.status.toUpperCase()}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        {!isHero && (
+                          <button
+                            type="button"
+                            onClick={() => engine.moveQueueItem(item.id, 'top')}
+                            className="opacity-0 group-hover:opacity-100 p-1 rounded bg-white/5 hover:bg-white/15 text-slate-400 hover:text-cyan-300 text-[10px] transition-colors"
+                            title="Play Next (Move to #1 on deck)"
+                          >
+                            <ArrowUp className="w-3 h-3" />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => engine.mixQueuedTrack(item.id)}
+                          disabled={item.status !== 'ready' || engine.isTransitioning}
+                          title={item.status === 'ready' ? 'Mix into this song now' : 'Still loading'}
+                          className={`flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+                            isHero
+                              ? 'bg-cyan-500 hover:bg-cyan-400 text-black shadow-md shadow-cyan-500/20'
+                              : 'bg-white/10 hover:bg-white/20 text-cyan-300'
+                          }`}
+                        >
+                          <Zap className="w-3 h-3 fill-current" />
+                          <span>Mix</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })()}
 
       {/* Natural Language AI DJ Command Bar & Response Panel */}
       <footer id="app-ai-command-bar" className="dj-panel rounded-xl p-2.5 border border-white/10 flex flex-col gap-2">

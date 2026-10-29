@@ -78,7 +78,7 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
                 key={`${entry.id}-${entry.playedAt}`}
                 className="p-1.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between gap-2 text-xs"
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
                   {entry.thumbnail ? (
                     <img src={entry.thumbnail} alt="" className="w-7 h-7 rounded-lg object-cover shrink-0 opacity-80" />
                   ) : (
@@ -86,11 +86,11 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
                       <Music className="w-3 h-3 text-slate-400" />
                     </div>
                   )}
-                  <div className="flex flex-col min-w-0">
-                    <span className="font-bold text-slate-200 text-[11px] truncate" title={entry.title}>
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="font-bold text-slate-200 text-[11px] line-clamp-2 leading-snug break-words" title={entry.title}>
                       {entry.title}
                     </span>
-                    <span className="text-[9px] text-slate-400 truncate">
+                    <span className="text-[9px] text-slate-400 truncate pt-0.5">
                       {entry.artist} ·{' '}
                       <span className={recent ? 'text-violet-300' : 'text-slate-500'}>{timeAgo(entry.playedAt, now)}</span>
                     </span>

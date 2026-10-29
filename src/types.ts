@@ -86,6 +86,9 @@ export interface PendingMixInfo {
   startsInSeconds: number;
   entryTime: number;
   reason: string;
+  targetKey?: string;
+  keyFit?: 'good' | 'ok' | 'clash' | 'unknown';
+  harmonicShift?: string;
 }
 
 export interface QueuedTrack {
@@ -262,4 +265,6 @@ export type MobileAction =
         thumbnail?: string;
         duration?: number;
       };
-    };
+    }
+  | { type: 'CMD_SORT_QUEUE_HARMONICALLY' }
+  | { type: 'CMD_MOVE_QUEUED'; itemId: string; direction: 'up' | 'down' | 'top' };

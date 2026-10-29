@@ -124,6 +124,8 @@ New-NetFirewallRule -DisplayName "AI-DJ-DevServer" -Direction Inbound -LocalPort
   - Replays and page refreshes load from disk (about 0.03 s vs about 2 s), and cached songs play without internet.
   - The folder is capped at 2 GB (~500 songs). The least recently played files are deleted first.
   - It isn't committed to git. Deleting the folder is always safe; songs just download again.
+- **Offline library:** `music/` holds your own songs (uploads go to `music/Uploads`) and, in `music/Most Played`, an MP3 (192 kbps, tagged) of every song played 3+ times, named "Artist - Title [videoId].mp3". Unlike the cache it isn't trimmed. Extra folders you add are scanned in place and only listed in `data/local_library.json`. Neither is committed to git. Deleting `music/Most Played` is safe: songs are saved again from the cache after their next play.
+  - The MP3s need **ffmpeg** on the PATH (here it came with yt-dlp: `winget install yt-dlp.FFmpeg`). Without it the original audio is copied instead, which plays just as well.
 - **Decoded audio in memory:** only the 8 most recent songs (about 90 MB each) are kept decoded for instant replay. Older ones are re-read from the disk cache.
 - **Future:** embedded file-based SQLite (`better-sqlite3`, `library.db`), added only if the library grows large (around 5,000+ tracks), for search and analysis caching.
 - **Never:** a separate database server such as PostgreSQL, MySQL or Redis. The app must stay runnable with a single `npm run dev`.
@@ -141,7 +143,9 @@ All dependencies use permissive licenses (MIT, ISC, Apache 2.0). Avoid adding GP
 | `zod` | ^4.6.7 | MIT | LLM command validation |
 | `lucide-react` | ^1.63.0 | ISC | Icons |
 | `yt-search` | ^2.13.1 | MIT | YouTube metadata search (no API key) |
-| `@distube/ytdl-core` | ^5.1.3 | MIT | YouTube audio stream |
+| `@distube/ytdl-core` | 5.1.3 | MIT | YouTube audio stream |
+| `music-metadata` | 12.3.2 | MIT | Tags and duration of local music files |
+| `qrcode` | ^1.5.4 | MIT | Phone pairing QR code |
 | `typescript` | ^7.0.2 | Apache 2.0 | Dev: typing |
 | `vite`, `@vitejs/plugin-react` | ^8.3.5 / ^6.1.2 | MIT | Dev: server and bundler |
 | `tailwindcss`, `@tailwindcss/vite` | ^4.3.3 | MIT | Dev: styling |
