@@ -23,7 +23,7 @@ export const MoodEqPanel: React.FC<MoodEqPanelProps> = ({ mood, eqGains, onSetMo
       <div id="mood-eq-moods" className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between">
           <h3 className="font-extrabold text-xs text-white tracking-wide">MOOD</h3>
-          <span className="text-[10px] text-slate-400 truncate ml-2">{activeMood.description}</span>
+          <span className="text-[10px] text-slate-400 text-right leading-snug ml-2 min-w-0">{activeMood.description}</span>
         </div>
         <div className={`grid gap-1.5 ${compact ? 'grid-cols-3' : 'grid-cols-5'}`}>
           {MOODS.map((m) => (

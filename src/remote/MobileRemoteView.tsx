@@ -4,6 +4,7 @@ import { MoodEqPanel } from '../renderer/components/MoodEqPanel';
 import { RhythmPanel } from '../renderer/components/RhythmPanel';
 import { TempoControl } from '../renderer/components/TempoControl';
 import { PreviouslyPlayedPanel } from '../renderer/components/PreviouslyPlayedPanel';
+import { MixToast } from '../renderer/components/MixToast';
 import { getCamelotDetails, getHarmonicCompatibility } from '../audio/KeyDetector';
 import {
   Play,
@@ -20,7 +21,6 @@ import {
   Sparkles,
   ListMusic,
   ArrowRightLeft,
-  Radio,
   Star,
   Heart,
   ThumbsDown,
@@ -30,6 +30,7 @@ import {
   Loader2,
   X,
   ArrowUp,
+  RefreshCw,
 } from 'lucide-react';
 
 interface MobileRemoteViewProps {
@@ -47,6 +48,18 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
   const searchAbortControllerRef = useRef<AbortController | null>(null);
 
   const acquisitionStatus = syncState.acquisitionStatus;
+
+  // Mix taps: say at once that it was sent, then show what the laptop did with it
+  const [mixToast, setMixToast] = useState<{ text: string; at: number } | null>(null);
+  const mixSentAt = useRef(0);
+  const sendMix = (action: MobileAction, title: string) => {
+    mixSentAt.current = Date.now();
+    setMixToast({ text: `Mix sent: "${title}"…`, at: Date.now() });
+    onSendAction(action);
+  };
+  useEffect(() => {
+    if (acquisitionStatus && Date.now() - mixSentAt.current < 6000) setMixToast({ text: acquisitionStatus, at: Date.now() });
+  }, [acquisitionStatus]);
   const readyCount = syncState.queue.filter((q) => q.status === 'ready').length;
 
   const formatTime = (secs: number) => {
@@ -96,7 +109,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
 
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=5`, {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=20`, {
           signal: abortCtrl.signal,
         });
         if (res.ok) {
@@ -114,7 +127,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           setIsSearching(false);
         }
       }
-    }, 280);
+    }, 300);
 
     return () => clearTimeout(timer);
   }, [query]);
@@ -152,6 +165,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
 
   return (
     <div id="remote-view" className="max-w-md mx-auto min-h-screen bg-[#07090e] text-slate-100 flex flex-col gap-4 p-4 pb-12 select-none">
+      <MixToast notice={mixToast} />
       {/* Mobile Header */}
       <header id="remote-header" className="flex items-center justify-between pb-2 border-b border-white/10">
         <div id="remote-header-brand" className="flex items-center gap-2">
@@ -432,7 +446,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           />
         </div>
 
-        {/* Quick Viral Hook & Auto-Cue Action Bar */}
+        {/* Best part of this song, and Best Parts mode (every song plays only its best part) */}
         <div id="remote-hook-controls" className="w-full grid grid-cols-2 gap-2 pt-1 border-t border-white/5">
           <button
             onClick={() => onSendAction({ type: 'CMD_JUMP_TO_HOOK' })}
@@ -444,15 +458,15 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           </button>
 
           <button
-            onClick={() => onSendAction({ type: 'CMD_TOGGLE_AUTO_CUE_HOOK' })}
+            onClick={() => onSendAction({ type: 'CMD_TOGGLE_BEST_PARTS' })}
             className={`flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-bold text-[11px] border transition-all ${
-              syncState.autoCueViralHook
+              syncState.bestPartsMode
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/20'
                 : 'bg-white/5 text-slate-400 border-white/10'
             }`}
           >
-            <span>Hook Cue:</span>
-            <span className="font-extrabold">{syncState.autoCueViralHook ? 'ACTIVE' : 'OFF'}</span>
+            <span>Best Parts:</span>
+            <span className="font-extrabold">{syncState.bestPartsMode ? 'ON' : 'OFF'}</span>
           </button>
         </div>
       </div>
@@ -487,7 +501,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
               if (query.trim().length >= 2) setIsDropdownOpen(true);
             }}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Song name (e.g. '295 Sidhu') or YouTube link..."
+            placeholder="Song name or YouTube link"
             className="w-full bg-black/50 border border-white/15 rounded-xl pl-9 pr-10 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 font-mono disabled:opacity-50"
           />
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -512,14 +526,14 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           {isDropdownOpen && query.trim().length >= 2 && (
             <div
               id="remote-search-dropdown"
-              className="absolute left-0 right-0 top-full mt-2 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[300px] overflow-y-auto ring-1 ring-black/80"
+              className="absolute left-0 right-0 top-full mt-2 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[380px] overflow-y-auto ring-1 ring-black/80"
             >
               <div id="remote-search-dropdown-header" className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
                 <span className="font-bold text-cyan-300 flex items-center gap-1">
                   <Sparkles className="w-3 h-3 text-cyan-400" />
                   MATCHING SONGS ({searchResults.length})
                 </span>
-                <span className="text-[9px]">Tap to add</span>
+                <span className="text-[9px]">Tap to play, or + Queue</span>
               </div>
 
               {isSearching && searchResults.length === 0 ? (
@@ -536,7 +550,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                   <div
                     id={`remote-search-result-${idx}`}
                     key={song.url || idx}
-                    onClick={() => handleSelectSong(song, false)}
+                    onClick={() => handleSelectSong(song, true)}
                     className="flex items-center justify-between gap-2 p-2 rounded-xl bg-black/40 hover:bg-white/10 border border-white/5 active:scale-98 transition-all cursor-pointer shrink-0"
                   >
                     <div id={`remote-search-result-info-${idx}`} className="flex items-center gap-2 min-w-0 flex-1 truncate">
@@ -625,7 +639,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
       <PreviouslyPlayedPanel
         compact
         entries={syncState.recentlyPlayed ?? []}
-        onQueueAgain={(entry) => onSendAction({ type: 'CMD_ADD_QUEUE', query: entry.url || `${entry.artist} ${entry.title}` })}
+        onMix={(entry) => sendMix({ type: 'CMD_MIX_NOW', query: entry.url || `${entry.artist} ${entry.title}` }, entry.title)}
       />
 
       {/* Most Played Bangers (Quick Starters) */}
@@ -726,10 +740,15 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                     <span>Harmonic</span>
                   </button>
                 )}
-                <div id="remote-queue-count-badge" className="flex items-center gap-1 text-[9px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
-                  <Radio className="w-2.5 h-2.5 animate-pulse" />
-                  <span className="font-bold">Auto</span>
-                </div>
+                <button
+                  id="remote-refresh-queue-btn"
+                  onClick={() => onSendAction({ type: 'CMD_REFRESH_QUEUE' })}
+                  className="flex items-center gap-1 text-[10px] font-mono font-bold text-cyan-200 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all"
+                  title="Refresh Up Next: keeps songs you added and the next 3"
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  <span>Refresh</span>
+                </button>
               </div>
             </div>
 
@@ -767,16 +786,16 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                         key={item.id}
                         className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
                       >
-                        <div className="flex items-center justify-between text-[9px] font-mono">
-                          <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase">
-                            <span className="relative flex h-2 w-2">
+                        <div className="flex items-center justify-between gap-1.5 text-[9px] font-mono flex-wrap">
+                          <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase shrink-0 min-w-0">
+                            <span className="relative flex h-2 w-2 shrink-0">
                               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
                               <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
                             </span>
-                            <span>#1 ON DECK • UP NEXT</span>
+                            <span className="whitespace-nowrap shrink-0">#1 ON DECK • UP NEXT</span>
                           </div>
                           <span
-                            className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black ${
+                            className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black shrink-0 whitespace-nowrap ml-auto ${
                               item.status === 'ready'
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                                 : item.status === 'failed'
@@ -820,9 +839,9 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0">
-                            {item.status === 'ready' && (
+                            {item.status !== 'failed' && (
                               <button
-                                onClick={() => onSendAction({ type: 'CMD_MIX_QUEUED', itemId: item.id })}
+                                onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
                                 disabled={syncState.isTransitioning}
                                 className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[10px] transition-colors shadow-md active:scale-95 disabled:opacity-40"
                               >
@@ -902,9 +921,9 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                           {item.status.toUpperCase()}
                         </span>
 
-                        {item.status === 'ready' && (
+                        {item.status !== 'failed' && (
                           <button
-                            onClick={() => onSendAction({ type: 'CMD_MIX_QUEUED', itemId: item.id })}
+                            onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
                             disabled={syncState.isTransitioning}
                             className="px-2 py-0.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-500 text-cyan-300 hover:text-black font-bold text-[9px] border border-cyan-500/40 transition-colors disabled:opacity-40"
                           >

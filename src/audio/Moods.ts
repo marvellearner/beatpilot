@@ -40,7 +40,6 @@ export interface Mood {
   description: string;
   eq: EqGains;
   blendBars: number; // length of a beatmatched blend
-  hookCue: boolean; // start incoming songs just before their hook
   autoDrums: boolean; // switch the Live Rhythm Enhancer on when this mood is chosen
   // Lock the whole set to one tempo inside this range, time-stretching songs with key lock
   // (tempo changes, pitch doesn't). Undefined = songs keep their natural tempo.
@@ -61,7 +60,6 @@ export const MOODS: Mood[] = [
     description: 'Flat sound, standard 8-bar blends',
     eq: FLAT_EQ,
     blendBars: 8,
-    hookCue: false,
     autoDrums: false,
   },
   {
@@ -71,7 +69,6 @@ export const MOODS: Mood[] = [
     description: 'Whole set locked to a 120–130 BPM dance tempo (key-locked), punchy bass',
     eq: { bass: 4, lowMid: -1, mid: 0, presence: 1.5, treble: 2 },
     blendBars: 8,
-    hookCue: false,
     autoDrums: false,
     tempoLock: PARTY_TEMPO,
   },
@@ -82,7 +79,6 @@ export const MOODS: Mood[] = [
     description: 'Heavy bass, live dhol on, short punchy mixes',
     eq: { bass: 5, lowMid: 0, mid: 1, presence: 2, treble: 1 },
     blendBars: 4, // Punjabi vocals clash on long overlaps
-    hookCue: false,
     autoDrums: true,
   },
   {
@@ -92,7 +88,6 @@ export const MOODS: Mood[] = [
     description: 'Warm and soft, long smooth blends, songs from the start',
     eq: { bass: 2, lowMid: 0, mid: -1, presence: -1, treble: -2 },
     blendBars: 16,
-    hookCue: false,
     autoDrums: false,
   },
   {
@@ -102,7 +97,6 @@ export const MOODS: Mood[] = [
     description: 'Warm vocals, long blends, songs from the start',
     eq: { bass: 1, lowMid: 1, mid: 1, presence: 0, treble: -1 },
     blendBars: 16,
-    hookCue: false,
     autoDrums: false,
   },
 ];

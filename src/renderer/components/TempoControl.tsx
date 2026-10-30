@@ -12,7 +12,7 @@ interface TempoControlProps {
   compact?: boolean;
 }
 
-const SPEED_PRESETS = [0.5, 0.9, 1.0, 1.1, 1.2, 1.5];
+const SPEED_PRESETS = [0.95, 0.98, 1, 1.02, 1.05, 1.07, 1.1, 1.12, 1.15, 1.2];
 
 /**
  * Pro-style tempo section for the on-air song: original vs current BPM, an "Original" toggle,
@@ -115,7 +115,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
                 : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
             }`}
           >
-            {preset.toFixed(1)}x
+            {preset}x
           </button>
         ))}
         <button

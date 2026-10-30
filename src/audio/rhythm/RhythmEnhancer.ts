@@ -84,8 +84,8 @@ export class RhythmEnhancer {
 
   private enabled = true; // on by default: in AI mode the AI decides per song whether drums play
   private mode: 'ai' | 'manual' = 'ai';
-  private styleId: RhythmStyleId = 'dhol_chaal'; // playing now
-  private manualStyleId: RhythmStyleId = 'dhol_chaal'; // the user's choice in manual mode
+  private styleId: RhythmStyleId = 'dhol_dhamaal'; // playing now
+  private manualStyleId: RhythmStyleId = 'dhol_dhamaal'; // the user's choice in manual mode
   private pendingStyleId: RhythmStyleId | null = null; // switched on the next bar line
   private followSong = true;
   private level = 0.8;

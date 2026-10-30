@@ -49,7 +49,7 @@ export function buildLiveSyncState(engine: AudioEngine): LiveSyncState {
     isTransitioning: engine.isTransitioning,
     transitionProgress: engine.transitionProgress,
     autoCurationEnabled: engine.autoCurationEnabled,
-    autoCueViralHook: engine.autoCueViralHook,
+    bestPartsMode: engine.bestPartsMode,
     mood: engine.mood,
     eqGains: engine.eqGains,
     sessionBpm: engine.sessionBpm,

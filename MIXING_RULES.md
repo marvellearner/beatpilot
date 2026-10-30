@@ -1,3 +1,4 @@
+> **Which document is which.** This file holds the app's concrete rules: the numbers and algorithms the engine follows (BPM limits, Deck P, queue and lookahead rules), which the code and UI cite. The general DJ craft behind them, with sources, is in [DJ_KNOWLEDGE_AND_MIXING_RULES.md](DJ_KNOWLEDGE_AND_MIXING_RULES.md); the "Top 10" below is the short version of its §4–§10. When the two disagree, this file describes what the app does.
 
 # Top 10 Rules for Mixing Any Two Songs
 
@@ -67,7 +68,7 @@
 **In this app** (`planMix` in `src/audio/MixPointPlanner.ts`): each candidate exit and entry gets a vocal-activity value: the 300 Hz–3 kHz band's share of the loudness over the blend window, relative to the song's own average share (so a loud chorus without singing doesn't count). The exit and entry are chosen **as a pair**, and pairs where both sides sing lose 3 points (an 8-bar phrase start is worth 1). On 24 real song pairs this halved the blends with two vocals at once (10 → 5) while giving up 0.08 points of phrase/energy score on average; the remaining 5 had vocals in every candidate window. The status line says *"chosen so the two vocals don't overlap"* when it made a difference. This is a vocal/lead *proxy* from the frequency band, not true vocal separation.
 
 ## 9. Choose the Right Entry and Exit Points
-- **Never start from the hook because buildup is also important:** Incoming and first songs must build up naturally from where the music begins (skipping initial dialogue/conversation skits). Do not jump straight into the hook or chorus drop.
+- **Never start from the hook because buildup is also important:** Incoming and first songs must build up naturally from where the music begins (skipping initial dialogue/conversation skits). Do not jump straight into the hook or chorus drop. *(In Best Parts mode the incoming song enters later, in the build-up 16–4 bars before its hook, but still never at the hook: see "Best Parts Mode".)*
 - Identify suitable intro, outro, breakdown, and instrumental sections.
 - Avoid introducing a loud vocal or drop over another prominent section unless intentional.
 - Use cue points and phrase markers to identify suitable transition positions.
@@ -148,7 +149,7 @@ A layer of real dhol, dholak and percussion played on top of the song on air. It
 - Each hit varies by up to ±8 % in velocity and ±3 ms in timing (±1 ms on the downbeat) so it doesn't sound machine-made. Ghost notes play clearly softer than accents.
 - **Bass management:** the dhol and dholak bass are high-passed at 70–75 Hz, the tops (crack, tambourine, shaker) from 200–600 Hz, so the layer stays out of the song's kick and 808. Only **Club Drive** adds a kick, and it is meant for songs whose own kick is weak or missing.
 - Each sound has its own level and stereo position; a gentle compressor glues the layer before it joins the master bus (so the master EQ and limiter apply to it too).
-- There is no CC0 recording of a chimta, so the styles use tambourine and stick sounds instead.
+- Dholak Keherwa plays authentic, clean dholak tones without any metallic chimta / tambourine layer.
 
 ## 2. Timing: locked to the song's beat grid
 
@@ -182,7 +183,6 @@ With **Follows song** on (the default), each 4-bar phrase gets a level from the 
 
 | Style | Feel | Suits |
 | :--- | :--- | :--- |
-| **Dhol Chaal** | The classic bhangra shuffle: boom on the beat, crack on the off-beats (swing 0.28) | Punjabi, bhangra, wedding songs |
 | **Dhol Dhamaal** | Peak-time: a boom on every beat and driving cracks | High-energy Punjabi and Bollywood bangers |
 | **Dholak Keherwa** | The 8-beat keherwa (dha ge na ti na ka dhi na) on dholak, lighter than dhol | Bollywood, sangeet, folk, mid-tempo desi |
 | **Clap & Tambourine** | Claps on 2 and 4 with a tambourine shuffle, no low end | Pop, Bollywood, songs with strong drums of their own |
@@ -206,18 +206,18 @@ With **🤖 AI decides** (the default) every song gets its own plan when it is a
 
    | Mood | Punjabi | Hindi | Spanish | English / other |
    | :--- | :--- | :--- | :--- | :--- |
-   | Party | Dhol Dhamaal | Dhol Chaal | Afro Groove | Club Tops at 118–132 BPM, otherwise Clap & Tambourine |
-   | Bhangra | Dhol Chaal | Dhol Chaal | Dhol Chaal | Dhol Chaal |
-   | Normal | Dhol Chaal | Dholak Keherwa | Afro Groove | Clap & Tambourine |
+   | Party | Dhol Dhamaal | Dholak Keherwa | Afro Groove | Club Tops at 118–132 BPM, otherwise Clap & Tambourine |
+   | Bhangra | Dhol Dhamaal | Dholak Keherwa | Afro Groove | Dhol Dhamaal |
+   | Normal | Dhol Dhamaal | Dholak Keherwa | Afro Groove | Clap & Tambourine |
    | Chill, Romantic | Dholak Keherwa | Dholak Keherwa | Light Shaker | Light Shaker |
 
 4. **How loud, from the song's own sound** (thresholds calibrated on 60 songs from the app's cache):
-   - **Hard-hitting drums already** (low-end punch above ~0.13, e.g. *295*, *Morni*, *Dope Shope*): level 0.5, and Dhol Dhamaal becomes the lighter Dhol Chaal, so the dhol doesn't pile on top of the song's own drums.
+   - **Hard-hitting drums already** (low-end punch above ~0.13, e.g. *295*, *Morni*, *Dope Shope*): level 0.5, and Dhol Dhamaal becomes Dholak Keherwa, so the dhol doesn't pile on top of the song's own drums.
    - **Vocal-heavy** (mid-band share above 0.58): at most 0.55.
    - **Soft drums at a party** (punch below ~0.095, non-desi songs): **Club Drive**, adding a kick, at 0.8.
    - Otherwise 0.7 (0.45 in Chill and Romantic).
 
-The card shows the plan, who identified the song (**🤖 AI**, **Known artist** or **Guess**) and why, e.g. *"Punjabi song, party mood: Dhol Chaal, kept light (its drums are already strong)"*. A plan that changes while a song plays (the AI answered late) switches on the next bar line. AI questions about songs wait while a mix or next-song question is in flight, because those are time-critical.
+The card shows the plan, who identified the song (**🤖 AI**, **Known artist** or **Guess**) and why, e.g. *"Punjabi song, party mood: Dhol Dhamaal, kept light (its drums are already strong)"*. A plan that changes while a song plays (the AI answered late) switches on the next bar line. AI questions about songs wait while a mix or next-song question is in flight, because those are time-critical.
 
 **Why the AI identifies the song but doesn't pick the style.** Tested on 20 real songs with the app's local model, qwen2.5:3b:
 
@@ -256,7 +256,7 @@ On/off, **🤖 AI decides / Choose myself**, volume (0–100 %, multiplied by th
    - If the user does **not** click "Mix now", the planned transition **must strictly follow all 10 Mixing Rules**:
      - **Rule 1 (Match BPM):** Rates matched seamlessly within safe pitch-shift limits (or half/double time).
      - **Rule 2 (Align Beats):** Beats and downbeat grids locked with sample-accurate audio scheduling.
-     - **Rule 3 & 9 (Phrase Boundary Exit & Intro Buildup Entry):** Blend initiates on the planned 4/8-bar phrase or breakdown exit within the 45s window. The incoming song enters at `musicStartTime` (skipping dialogue/conversation skits) to allow natural musical buildup, **never starting from the hook**.
+     - **Rule 3 & 9 (Phrase Boundary Exit & Intro Buildup Entry):** Blend initiates on the planned 4/8-bar phrase or breakdown exit within the 45s window. The incoming song enters at `musicStartTime` (skipping dialogue/conversation skits) to allow natural musical buildup, **never starting from the hook**. In Best Parts mode it enters in the build-up 16–4 bars before its hook instead.
      - **Rule 5 (Avoid Bass Clashes):** Smooth EQ bass swap ramp executed over the transition (outgoing low EQ drops before incoming low EQ rises) to keep the low end punchy without dual-kick phase cancellation.
      - **Rule 6 & 7 (Energy & Transition Length):** Transition length adapted to the genre/tempo (4 Bhangra, 8 Normal/Party, 16 Chill/Romantic bars).
      - **Rule 8 (Avoid Vocal Clashes):** Vocal energy envelope analysis (`profile.mid`) avoids clashing vocal lines.
@@ -266,6 +266,52 @@ On/off, **🤖 AI decides / Choose myself**, volume (0–100 %, multiplied by th
    - If the user explicitly clicks **"Mix now"** (or clicks the active song's "MIX NOW" button / presses Next during the countdown):
      - The phrase countdown is immediately bypassed.
      - The transition starts on the very next beat grid downbeat, preserving beatmatching and bass swap while fulfilling the user's explicit request for an immediate transition.
+
+---
+
+# Best Parts Mode (Dance Floor) Rules
+
+When people are dancing they want the energy of each song, not its full length. **Best Parts** mode plays every song from its build-up through its hook, then mixes into the next song's build-up. Each song is on air for about **1–1.5 minutes** (≈ 40 bars at 120 BPM) instead of 3–4.
+
+Switch: **"Best parts only"** under the transport controls (Party console), **"Best Parts"** in the Master Mixer header, and **"Best Parts"** on the phone remote. It is off by default and remembered on this browser (`ai_dj_best_parts`). Moods don't change it. Code: `bestPartExitWindow`, `bestPartEntryRange` and `mixOutWindow` in `src/audio/AudioEngine.ts`; `earliestExit` and `entryRange` in `planMix` (`src/audio/MixPointPlanner.ts`).
+
+## 1. What "the best part" is
+- The song's **hook** is its `highlightTime` (`HighlightDetector`): the loudest sustained 6-second stretch between 18 % and 75 % of the song, which is where the chorus or drop sits.
+- **The best part = the build-up into the hook + the hook (one full chorus).** The build-up is kept on purpose: the crowd needs it to feel the hook arrive.
+
+## 2. Entry: the incoming song enters in its build-up
+- It enters on a **bar start 16 to 4 bars before its hook** (`BEST_PART_BUILD_BARS = 16`, `BEST_PART_MIN_BUILD_BARS = 4`), never closer than 4 bars to the hook, so **it still never starts from the hook** (Rule 9).
+- Phrase starts (8 / 4 bars) and calm, vocal-light bars are preferred, as for any entry (Rules 3, 8).
+- The blend should **finish before the hook hits**: an entry whose blend runs into the hook loses 1.5 points, so the hook is heard in full and not under the old song.
+- Dialogue/skits are still skipped: the entry is never before `musicStartTime`.
+- **Early hook:** if the hook comes within 8 bars of the music start, the intro *is* the build-up: the song enters at its intro as usual.
+- A mix that can't be planned (immediate mix) also cues the incoming song at the start of its build-up range.
+
+## 3. Exit: the outgoing song leaves after its hook
+- The on-air song keeps playing for **16 bars from its hook** (`BEST_PART_HOOK_BARS`, a full chorus), then mixes out at the **best phrase in the next 16 bars** (`BEST_PART_EXIT_BARS`): its *exit window*.
+- Inside the window the normal exit rules choose the bar: phrase starts, a drop into a calmer section, few vocals, never fading out over the hook (Rules 3, 8, 9).
+- The auto-mix treats the end of the exit window as the song's end: it plans the mix (and asks the AI DJ ahead of time) 45 s before it, exactly as it would before a real outro.
+- **Never cut a phrase short to hit a time:** the exit is always a bar start chosen for musical reasons inside the window.
+
+## 4. When a song plays whole
+- **Short songs:** under 2 minutes (`BEST_PART_MIN_SONG_SECONDS = 120`) play whole.
+- **Late hook:** if the exit window would run into the song's last 22 seconds, the song plays out to its outro and mixes normally.
+- **Not analysed yet:** a song that is still streaming, before its analysis has found the hook, plays normally until the hook is known.
+- **First song of the set:** it still starts from the music start (never from the hook). Its exit follows the Best Parts rule.
+
+## 5. When the next song isn't ready
+- The song keeps playing; nothing is cut into silence.
+- Once a song is ready after the exit window has passed, the mix happens at the best bar in the **next 16 bars**.
+
+## 6. What doesn't change
+- **Manual Mix / Next:** these keep their 45-second lookahead and "Mix now" (see *Manual Mix* rules). In Best Parts mode the incoming song still enters at its build-up.
+- **All other mixing rules still apply:** BPM matching and limits, beat alignment, key compatibility, bass swap, blend length per mood, vocal-clash avoidance, loudness, and the AI DJ's choice between rule-abiding exit/entry points.
+- **Queue rules:** a song played as a best part counts as played (Previously Played, Most Played, the no-repeat window).
+- **Switching it on or off mid-song:** a mix that's already planned stands. The new rule applies from the next planned mix.
+
+## 7. Limits
+- The hook comes from the audio's loudness alone (YouTube's "most replayed" data is not used, to keep this laptop off YouTube). A song whose loudest part isn't its best-known part will be cut around the wrong section. **Play best part** and the manual Mix button let you take over.
+- Faster turnover means the next song has to be downloaded, analysed and tempo-matched within about a minute. The queue preloads the next song, so this normally keeps up. On a slow connection, songs run longer while they wait (rule 5).
 
 ---
 
@@ -365,15 +411,16 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
 
 # Previously Played Exclusion Rules for Up Next Queue
 
-1. **Strict Exclusion of Previously Played Songs:**
-   - **If any song is in Previously Played, the same name song should NOT be in the Up Next queue.**
-   - Matches are strictly evaluated across:
+1. **No Repeats Within 3 Hours:**
+   - **A song played in the last 3 hours is NOT added to Up Next automatically** (`REPLAY_GAP_MS` in `AudioEngine.ts`). Songs played longer ago come back: they're the songs people know (see *Up Next Familiar-First Rules*).
+   - "Played" means this browser's Previously Played log, or the server's play history (`lastPlayed`) in case the log was cleared (`playedRecently`).
+   - Matches are evaluated across:
      - Exact video URL or YouTube video ID
      - Exact song title (case-insensitive)
      - Normalized core title (stripping artist prefixes like `"Artist - Title"`, `"(Official Video)"`, `"[Audio]"`, etc.)
      - Title segments and fuzzy key matches (`isSameSong`)
-   - Any matching song is immediately purged from the Up Next queue during queue sanitization, when a track finishes playing, and when restoring the queue from persistent storage.
-   - When automatically replenishing or seeding Up Next (up to 50 songs), songs in the Previously Played history (`playLog`) are strictly excluded.
+   - Any matching song is purged from Up Next during queue sanitization, when a track finishes playing, and when restoring the queue from storage.
+   - A song someone asks for (search, a request from the phone, Mix on a Previously Played song) is always allowed.
 
 2. **No Consecutive Identical Songs in Previously Played:**
    - **In Previously Played, no 2 consecutive songs can ever be the same.**
@@ -457,18 +504,45 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
    - The engine actively maintains up to **50 songs** (`MAX_QUEUE_TARGET = 50`) in the Up Next queue.
    - When the queue size drops below 50, the auto-curation loop periodically seeds new tracks to keep the playlist full.
 
-2. **Multi-Tier Seeding Precedence:**
-   - **Tier 1: User Favorites** (`favorites`) — Starred bangers that have not recently played.
-   - **Tier 2: Past Played & Most Played History** (`mostPlayedSongs`, `playLog`) — High-energy party favorites, strictly excluding songs played within the last hour.
-   - **Tier 3: Local Song Library** (`my_songs.txt`) — Curated local tracks.
-   - **Tier 4: Contextual AI Recommendations** (`/api/recommend`) — Dynamically fetched songs matching the current mood and tempo.
+2. **Seeding Precedence** (`populateQueueTo50`):
+   - **Tier 1: Familiar songs:** Favourites, Most Played and Previously Played, not played in the last 3 hours. They're taken in a weighted random order (favourites weigh 4, a Most Played song 1 + log₂(plays), a play-log song 1, each times a random 0.5–1.5) so the same songs don't always lead.
+   - **Tier 2: Local Song Library** (`my_songs.txt`): curated local tracks.
+   - **Tier 3: New picks** (`/api/recommend`): songs matching the listener's taste, the current mood and tempo.
+   - Tiers 1 and 2 fill at most **70 %** of the queue (35 of 50) when auto-curation is on, so new picks get the rest.
 
 3. **Combined Exclusion Filters:**
    - Candidates are automatically rejected if they:
      - Exceed the **5-minute duration limit** ($> 300\text{ seconds}$).
      - Are already present in the **Up Next queue** or **currently on air**.
-     - Are present in **Previously Played** (`playLog`).
+     - Were **played in the last 3 hours**.
      - Are in the **"Don't Play Again Ever"** blacklist (`bannedSongs`).
+     - Were **expired or refreshed away in the last 2 hours** (new picks only).
+     - Have a **link instead of a title** (a failed lookup in the history).
 
+---
 
+# Up Next Familiar-First Rules
 
+The listener should know most of what plays. Up Next is built so that about 70 % of automatically picked songs are familiar, new picks are well-known hits rather than fresh uploads, and new picks that nobody plays don't sit in the list.
+
+1. **Familiar and new take turns:** below the first 3 songs, Up Next is ordered **two familiar songs, then one new pick**, repeating (`mixFamiliarAndNew` in `src/audio/engine/queueRules.ts`). Songs someone added on purpose stay exactly where they are, and so do the first 3 songs (they're loading or about to play).
+2. **New picks are hits:**
+   - The AI is asked only for *"well-known hits that most people at a party would recognise"*, with no new releases, deep cuts or obscure songs (both the Up Next suggestions and the AI mood picks).
+   - Each search hit is ranked (`scoreHit` in `shared/taste.ts`):
+     - **Views:** about 3 M is neutral, about 100 M+ scores up to +1.5, under about 100 k scores down to −1.5.
+     - **Age:** uploaded in the last 30 days −1.5; in the last 4 months −0.5.
+     - Artists the listener plays, and official versions, score up.
+     - Slowed, lofi, karaoke, mashup, live and TV versions, fan clips and shorts score down.
+   - A search for an artist looks at their top 20 results (not 8), so their big hits beat their newest upload.
+3. **Stale new picks expire:** a new pick below the first 3 songs that has waited **30 minutes** without being played is removed and replaced (`STALE_AFTER_MS`, checked every 30 s). Familiar songs and songs someone chose never expire. An expired song isn't suggested again for 2 hours.
+4. **Refresh button** (top of Up Next, laptop and phone):
+   - Rebuilds Up Next from the song on air, the listener's taste and the mood.
+   - It keeps the songs someone added and the first 3.
+   - It stops any fill already running, then uses quick searches only (no AI wait), so it takes about 20 s.
+   - Familiar songs appear at once and new picks as each search returns.
+   - It reports *"Up Next refreshed: N new songs"*. The new picks it dropped aren't suggested again for 2 hours.
+5. **Removing songs teaches it:** removing **2 or more** automatically picked songs by the same artist from Up Next makes that artist avoided for the rest of the session. They're left out of AI suggestions, ranked down in searches, and sent to the server as `?avoid=`.
+6. **Speed:**
+   - The AI (about 30 s per answer on this laptop's CPU) is asked once per background fill, for its first seed; the other seeds use quick searches.
+   - Quick searches start from the seed song's own artist and rotate through the listener's top artists, so each seed finds different songs.
+   - If the AI times out, it is skipped for 5 minutes.

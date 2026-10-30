@@ -4,9 +4,11 @@ import { RhythmPanel } from './RhythmPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { MoodEqPanel } from './MoodEqPanel';
 import { TempoControl } from './TempoControl';
-import { PreviouslyPlayedPanel, timeAgo } from './PreviouslyPlayedPanel';
-import { getCamelotDetails, getHarmonicCompatibility, shiftKey } from '../../audio/KeyDetector';
+import { PreviouslyPlayedPanel } from './PreviouslyPlayedPanel';
+import { getCamelotDetails, shiftKey } from '../../audio/KeyDetector';
+import { isStrictStartSong } from '../../audio/songMatch';
 import { VuMeter } from './VuMeter';
+import { UpNextQueueItem } from './UpNextQueueItem';
 import { SearchResult } from '../../types';
 import {
   Play,
@@ -20,7 +22,6 @@ import {
   Disc3,
   Search,
   Plus,
-  Radio,
   Sliders,
   Star,
   Heart,
@@ -34,8 +35,8 @@ import {
   Lock,
   Scissors,
   Loader2,
-  ArrowUp,
-  Zap,
+  Target,
+  RefreshCw,
 } from 'lucide-react';
 
 interface PartyConsoleViewProps {
@@ -84,7 +85,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
 
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=6`, {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=20`, {
           signal: abortCtrl.signal,
         });
         if (res.ok) {
@@ -102,7 +103,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           setIsSearching(false);
         }
       }
-    }, 280);
+    }, 300);
 
     return () => {
       clearTimeout(timer);
@@ -135,6 +136,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
   const markerRatio = (time?: number) => (duration > 0 && time !== undefined && time > 0 && time < duration ? time / duration : null);
   const hookRatio = markerRatio(currentTrack?.highlightTime);
   const cueRatio = markerRatio(currentTrack?.cueInTime);
+  const mixLoadingItem = engine.mixLoadingId ? engine.queue.find((q) => q.id === engine.mixLoadingId) : null;
   const deckStatus = engine.isTransitioning
     ? { label: 'MIXING', className: 'text-cyan-200 bg-cyan-500/10 border-cyan-500/30', dotClassName: 'bg-cyan-400 animate-pulse' }
     : pendingMix
@@ -143,6 +145,16 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
           className: 'text-cyan-200 bg-cyan-500/10 border-cyan-500/30',
           dotClassName: 'bg-cyan-400',
         }
+      : mixLoadingItem
+        ? {
+            label: 'LOADING NEXT MIX…',
+            className: 'text-amber-200 bg-amber-500/10 border-amber-500/30',
+            dotClassName: 'bg-amber-400 animate-pulse',
+          }
+      : isPlaying && playbackState.isBuffering
+        ? { label: 'BUFFERING…', className: 'text-amber-200 bg-amber-500/10 border-amber-500/30', dotClassName: 'bg-amber-400 animate-pulse' }
+      : isPlaying && playbackState.isStreaming
+        ? { label: 'ON AIR · STREAMING', className: 'text-rose-200 bg-rose-500/10 border-rose-500/30', dotClassName: 'bg-rose-500 animate-pulse' }
       : isPlaying
         ? { label: 'ON AIR', className: 'text-rose-200 bg-rose-500/10 border-rose-500/30', dotClassName: 'bg-rose-500 animate-pulse' }
         : currentTrack
@@ -208,8 +220,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     setIsDropdownOpen(false);
     setSearchQuery('');
     setSearchResults([]);
-    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued'}: "${song.title}"`);
-    await engine.acquireTrack(song.url || `${song.title} ${song.author}`, autoMix, 'back', 'request', autoMix);
+    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued at top of Up Next'}: "${song.title}"`);
+    await engine.acquireTrack(song.url || `${song.title} ${song.author}`, autoMix, 'front', 'request', autoMix);
   };
 
   const handleSearchSubmit = async (e: React.FormEvent, autoMix: boolean = false) => {
@@ -224,8 +236,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
     setIsDropdownOpen(false);
     setSearchQuery('');
     setSearchResults([]);
-    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued'}: "${displayTitle}"`);
-    await engine.acquireTrack(targetQuery, autoMix, 'back', 'request', autoMix);
+    showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued at top of Up Next'}: "${displayTitle}"`);
+    await engine.acquireTrack(targetQuery, autoMix, 'front', 'request', autoMix);
   };
 
   // The queue / history / favourites column is the biggest part of the page and changes far less
@@ -297,10 +309,17 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                       <span>Harmonic Flow</span>
                     </button>
                   )}
-                  <div className="flex items-center gap-1 text-[9px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded-lg">
-                    <Radio className="w-2.5 h-2.5 animate-pulse" />
-                    <span className="font-bold">Auto-Mix</span>
-                  </div>
+                  <button
+                    id="party-console-refresh-queue-btn"
+                    type="button"
+                    onClick={() => void engine.refreshQueue()}
+                    disabled={engine.refreshingQueue}
+                    className="px-2.5 py-1 rounded-xl text-[10px] font-extrabold font-mono bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/40 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
+                    title="Refresh Up Next: new picks from the song playing, your taste and the mood. Keeps songs you added and the next 3."
+                  >
+                    <RefreshCw className={`w-3 h-3 ${engine.refreshingQueue ? 'animate-spin' : ''}`} />
+                    <span>{engine.refreshingQueue ? 'Refreshing' : 'Refresh'}</span>
+                  </button>
                 </div>
               </div>
 
@@ -341,7 +360,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     type="submit"
                     disabled={!searchQuery.trim()}
                     className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-cyan-500/20"
-                    title="Queue at back"
+                    title="Queue next (at top of Up Next)"
                   >
                     <Plus className="w-3 h-3" />
                     <span>Queue</span>
@@ -362,14 +381,14 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 {isDropdownOpen && searchQuery.trim().length >= 2 && (
                   <div
                     id="party-console-search-dropdown"
-                    className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[360px] overflow-y-auto animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
+                    className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[440px] overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 hover:scrollbar-thumb-cyan-500/30 scrollbar-track-transparent animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
                   >
                     <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
                       <span className="flex items-center gap-1.5 font-bold text-cyan-300">
                         <Sparkles className="w-3 h-3 text-cyan-400" />
                         MATCHING SONGS {searchResults.length > 0 ? `(${searchResults.length})` : ''}
                       </span>
-                      <span className="text-[9px] text-slate-400">Click row or button to add</span>
+                      <span className="text-[9px] text-slate-400">Click to play & sync mood, or use + Queue</span>
                     </div>
 
                     {isSearching && searchResults.length === 0 ? (
@@ -387,7 +406,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         <div
                           id={`party-console-search-item-${idx}`}
                           key={song.url || idx}
-                          onClick={() => handleSelectSong(song, false)}
+                          onClick={() => handleSelectSong(song, true)}
                           className="group/item flex items-center justify-between gap-2.5 p-2 rounded-xl bg-black/30 hover:bg-white/10 border border-white/5 hover:border-cyan-500/40 cursor-pointer transition-all shrink-0"
                         >
                           <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -429,7 +448,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                               type="button"
                               onClick={() => handleSelectSong(song, false)}
                               className="py-1 px-2.5 bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-black border border-cyan-500/40 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                              title="Add to Up Next Queue"
+                              title="Add to top of Up Next Queue"
                             >
                               <Plus className="w-3 h-3" />
                               <span>Queue</span>
@@ -452,7 +471,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
               </div>
 
               {/* Scrollable Queue List */}
-              <div id="party-console-queue-list" className="flex flex-col gap-2 max-h-[490px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10 hover:scrollbar-thumb-cyan-500/30 scrollbar-track-transparent">
+              <div id="party-console-queue-list" className="flex flex-col gap-2 max-h-[490px] overflow-y-auto pr-2 py-0.5 scrollbar-thin scrollbar-thumb-white/10 hover:scrollbar-thumb-cyan-500/30 scrollbar-track-transparent">
                 {engine.queue.length === 0 ? (
                   <div id="party-console-queue-empty" className="text-center py-10 px-4 rounded-xl bg-black/30 border border-dashed border-white/10 flex flex-col items-center gap-2">
                     <div className="w-10 h-10 rounded-full bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
@@ -464,374 +483,9 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     </span>
                   </div>
                 ) : (
-                  engine.queue.map((item, idx) => {
-                    const keyDetails = item.key ? getCamelotDetails(item.key) : null;
-                    const compat = (curKey && item.key) ? getHarmonicCompatibility(curKey, item.key) : null;
-                    const colorClass = compat
-                      ? compat.color === 'emerald'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                        : compat.color === 'amber'
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                        : compat.color === 'cyan'
-                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                        : compat.color === 'teal'
-                        ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-                        : compat.color === 'purple'
-                        ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                        : compat.color === 'rose'
-                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                        : 'bg-white/10 text-slate-300 border-white/10'
-                      : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
-
-                    if (idx === 0) {
-                      // #1 ON-DECK / UP NEXT HERO CARD (Spacious 2-tier layout, 50+ chars title upfront)
-                      return (
-                        <div
-                          id={`party-console-queue-item-${item.id}`}
-                          key={item.id}
-                          className="group/qhero relative overflow-hidden rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1526]/90 to-[#0b0f1a]/95 p-3 shadow-lg shadow-cyan-950/40 hover:border-cyan-400/60 transition-all flex flex-col gap-2 ring-1 ring-cyan-500/20"
-                        >
-                          {/* Top Status Strip */}
-                          <div className="flex items-center justify-between text-[9px] font-mono">
-                            <div className="flex items-center gap-1.5 font-extrabold uppercase tracking-wider">
-                              <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
-                              </span>
-                              <span className="bg-gradient-to-r from-cyan-300 via-teal-200 to-cyan-400 bg-clip-text text-transparent font-black tracking-wide">
-                                #1 ON DECK • UP NEXT
-                              </span>
-                              {item.isAiRecommended && (
-                                <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded font-bold text-[8px]">
-                                  AI PICK
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-1.5">
-                              {item.isDiskCached && (
-                                <span
-                                  className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold"
-                                  title="Audio saved on laptop disk in cache/audio"
-                                >
-                                  💾 DISK
-                                </span>
-                              )}
-                              <span
-                                className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black tracking-wide ${
-                                  item.status === 'ready'
-                                    ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40'
-                                    : item.status === 'failed'
-                                    ? 'bg-red-500/25 text-red-300 border border-red-500/40'
-                                    : 'bg-yellow-500/25 text-yellow-300 border border-yellow-500/40 animate-pulse'
-                                }`}
-                              >
-                                {item.status === 'ready' ? 'READY TO MIX' : item.status.toUpperCase()}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Main Row: Thumbnail + Full Width 2-line wrapped Title (50+ chars visible upfront) */}
-                          <div className="flex items-start gap-2.5 min-w-0">
-                            <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 border border-cyan-500/30 group/hthumb shadow-md bg-slate-900 mt-0.5">
-                              {item.thumbnail ? (
-                                <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center bg-slate-800">
-                                  <Music className="w-4 h-4 text-cyan-400" />
-                                </div>
-                              )}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  engine.toggleFavorite(item);
-                                }}
-                                className={`absolute inset-0 flex items-center justify-center bg-black/60 transition-opacity ${
-                                  engine.isFavorite(item) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/hthumb:opacity-100'
-                                }`}
-                                title={engine.isFavorite(item) ? 'Saved in Favourites' : 'Save to Favourites'}
-                              >
-                                <Heart
-                                  className={`w-4 h-4 transition-transform ${
-                                    engine.isFavorite(item) ? 'fill-rose-500 text-rose-500 scale-110' : 'text-white hover:text-rose-400'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            <div className="flex flex-col min-w-0 flex-1">
-                              {/* 2-line title wrap: at least 50-80 chars fully visible upfront! */}
-                              <span
-                                className="font-extrabold text-white text-[12.5px] leading-snug line-clamp-2 break-words group-hover/qhero:text-cyan-200 transition-colors"
-                                title={item.title}
-                              >
-                                {item.title}
-                              </span>
-                              <span className="text-[10.5px] text-slate-300 font-medium truncate pt-0.5">
-                                {item.artist}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Bottom Row: Metadata Badges + Actions Strip */}
-                          <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-white/10">
-                            <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
-                              {/* Camelot Badge */}
-                              {item.key && keyDetails && (
-                                <span
-                                  className={`inline-flex items-center gap-1 font-mono text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 transition-colors shadow-sm ${colorClass}`}
-                                  title={compat ? `${item.key} (${keyDetails.musicalKey}) • ${compat.description}` : `Key: ${item.key}`}
-                                >
-                                  <span>{item.key}</span>
-                                  <span className="opacity-75">{keyDetails.shortName}</span>
-                                  {compat && compat.relation !== 'usable' && (
-                                    <span className="font-black ml-0.5">{compat.badgeText}</span>
-                                  )}
-                                </span>
-                              )}
-
-                              {/* BPM */}
-                              {item.bpm !== undefined && item.bpmConfidence !== undefined && (
-                                <span className="font-mono text-slate-300 shrink-0 bg-white/5 px-1.5 py-0.5 rounded border border-white/10 text-[9px]">
-                                  {Math.round(item.bpm)} BPM
-                                  {item.tempoLockedTo !== undefined && item.original && (
-                                    <span className="text-emerald-300 ml-0.5" title={`Tuned from ${Math.round(item.original.bpm)} BPM`}>
-                                      🔒
-                                    </span>
-                                  )}
-                                </span>
-                              )}
-
-                              {engine.topSongAvoidCount > 0 && (
-                                <span
-                                  className="text-[8px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.5 rounded shrink-0 animate-pulse"
-                                  title={`Avoided ${engine.topSongAvoidCount}/7 times.`}
-                                >
-                                  ⚠️ Skipped {engine.topSongAvoidCount}/7
-                                </span>
-                              )}
-
-                              {item.lastPlayedAt !== undefined && (
-                                <span className="text-violet-300 shrink-0 text-[8.5px]">
-                                  🔁 played {timeAgo(item.lastPlayedAt)}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Hero Actions */}
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {item.status === 'ready' && (
-                                <button
-                                  onClick={() => engine.mixQueuedTrack(item.id)}
-                                  disabled={engine.isTransitioning}
-                                  className={`px-3 py-1 rounded-lg text-[10px] font-black transition-all flex items-center gap-1.5 shadow-md active:scale-95 disabled:opacity-40 cursor-pointer ${
-                                    pendingMix?.id === item.id
-                                      ? 'bg-gradient-to-r from-cyan-400 to-teal-300 text-black shadow-cyan-400/50 animate-pulse'
-                                      : 'bg-gradient-to-r from-cyan-500 to-cyan-400 hover:from-cyan-400 hover:to-cyan-300 text-black shadow-cyan-500/25'
-                                  }`}
-                                  title={
-                                    pendingMix?.id === item.id
-                                      ? 'Mix now immediately (skip 45s wait)'
-                                      : 'Plan mix within next 45s (following MIXING_RULES.md)'
-                                  }
-                                >
-                                  <Zap className="w-3.5 h-3.5 fill-current" />
-                                  <span>{pendingMix?.id === item.id ? 'MIXING' : 'MIX NOW'}</span>
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => engine.toggleDontPlayAgain(item)}
-                                className="text-slate-500 hover:text-red-400 p-1 rounded-lg hover:bg-white/5 transition-all"
-                                title="Don't play again ever (Dislike)"
-                              >
-                                <ThumbsDown className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => engine.removeFromQueue(item.id)}
-                                className="text-slate-500 hover:text-white p-1 rounded-lg hover:bg-white/5 transition-colors"
-                                title="Remove from queue"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    // #2 to #50 SUBSEQUENT TRACKS (Spacious 2-tier layout, at least 50+ chars title upfront)
-                    return (
-                      <div
-                        id={`party-console-queue-item-${item.id}`}
-                        key={item.id}
-                        className="group/qitem p-2.5 rounded-xl bg-black/40 hover:bg-[#121827]/90 border border-white/5 hover:border-white/15 flex flex-col gap-1.5 text-xs transition-all"
-                      >
-                        {/* Top Row: Rank + Thumb + Full-Width Title (Zero right-side competition, 50-80+ chars visible upfront) */}
-                        <div className="flex items-start gap-2.5 min-w-0 w-full">
-                          <span className="font-mono text-[10px] font-bold text-slate-500 w-4 text-center shrink-0 pt-0.5">
-                            #{idx + 1}
-                          </span>
-                          <div className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 group/qthumb border border-white/10 bg-slate-900 mt-0.5">
-                            {item.thumbnail ? (
-                              <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full bg-slate-800 flex items-center justify-center">
-                                <Music className="w-3.5 h-3.5 text-slate-400" />
-                              </div>
-                            )}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                engine.toggleFavorite(item);
-                              }}
-                              className={`absolute inset-0 flex items-center justify-center bg-black/60 transition-opacity ${
-                                engine.isFavorite(item) ? 'opacity-100 bg-black/40' : 'opacity-0 group-hover/qthumb:opacity-100'
-                              }`}
-                              title={engine.isFavorite(item) ? 'Saved in Favourites' : 'Save to Favourites'}
-                            >
-                              <Heart
-                                className={`w-3.5 h-3.5 transition-transform ${
-                                  engine.isFavorite(item) ? 'fill-rose-500 text-rose-500 scale-110' : 'text-white hover:text-rose-400'
-                                }`}
-                              />
-                            </button>
-                          </div>
-
-                          <div className="flex flex-col min-w-0 flex-1">
-                            {/* Full-width 2-line title wrap: easily displays 50-80+ characters upfront! */}
-                            <span
-                              className="font-bold text-white text-[12px] leading-snug line-clamp-2 break-words group-hover/qitem:text-cyan-300 transition-colors"
-                              title={item.title}
-                            >
-                              {item.title}
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-medium truncate pt-0.5">
-                              {item.artist}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Sub-row: Telemetry Badges on left + Action Triggers on right - zero competition with title */}
-                        <div className="flex items-center justify-between text-[9px] pl-6 pt-1.5 border-t border-white/[0.06] gap-2">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {/* Camelot Badge */}
-                            {item.key && keyDetails && (
-                              <span
-                                className={`inline-flex items-center gap-1 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border shrink-0 transition-colors ${colorClass}`}
-                                title={compat ? `${item.key} (${keyDetails.musicalKey}) • ${compat.description}` : `Key: ${item.key} (${keyDetails.musicalKey})`}
-                              >
-                                <span>{item.key}</span>
-                                <span className="opacity-75">{keyDetails.shortName}</span>
-                                {compat && compat.relation !== 'usable' && (
-                                  <span className="font-extrabold ml-0.5">{compat.badgeText}</span>
-                                )}
-                              </span>
-                            )}
-
-                            {/* BPM */}
-                            {item.bpm !== undefined && item.bpmConfidence !== undefined && (
-                              <span className="font-mono text-slate-300 bg-white/5 px-1 py-0.5 rounded border border-white/5 shrink-0 text-[8.5px]">
-                                {Math.round(item.bpm)} BPM
-                                {item.tempoLockedTo !== undefined && item.original && (
-                                  <span className="text-emerald-300 ml-0.5" title={`Tuned from ${Math.round(item.original.bpm)} BPM, key-locked`}>
-                                    🔒
-                                  </span>
-                                )}
-                              </span>
-                            )}
-
-                            {item.isDiskCached && (
-                              <span
-                                className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold"
-                                title="Audio saved on laptop disk in cache/audio"
-                              >
-                                DISK
-                              </span>
-                            )}
-
-                            {item.isAiRecommended && (
-                              <span className="text-[7.5px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded shrink-0 font-bold">
-                                AI
-                              </span>
-                            )}
-
-                            {/* Status Pill */}
-                            <span
-                              className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                                item.status === 'ready'
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : item.status === 'failed'
-                                  ? 'bg-red-500/20 text-red-300'
-                                  : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                              }`}
-                            >
-                              {item.status.toUpperCase()}
-                            </span>
-
-                            {item.lastPlayedAt !== undefined && (
-                              <span className="text-violet-300 shrink-0 text-[8px]">
-                                • 🔁 {timeAgo(item.lastPlayedAt)}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Quick Actions on bottom-right */}
-                          <div className="flex items-center gap-1 shrink-0">
-                            {item.status === 'ready' && (
-                              <button
-                                onClick={() => engine.mixQueuedTrack(item.id)}
-                                disabled={engine.isTransitioning}
-                                className={`text-[9px] font-bold px-2 py-0.5 rounded transition-all disabled:opacity-40 cursor-pointer ${
-                                  pendingMix?.id === item.id
-                                    ? 'text-cyan-950 bg-cyan-400 hover:bg-cyan-300 font-extrabold animate-pulse'
-                                    : 'text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/30'
-                                }`}
-                                title={
-                                  pendingMix?.id === item.id
-                                    ? 'Mix now immediately (skip 45s wait)'
-                                    : 'Plan mix within next 45s (following MIXING_RULES.md)'
-                                }
-                              >
-                                {pendingMix?.id === item.id ? 'MIX NOW' : 'MIX'}
-                              </button>
-                            )}
-
-                            {/* Play Next / Move To Top Button */}
-                            <button
-                              type="button"
-                              onClick={() => engine.moveQueueItem(item.id, 'top')}
-                              className="text-slate-400 hover:text-cyan-300 hover:bg-white/10 p-1 rounded transition-all"
-                              title="Play Next (Move to #1 on deck)"
-                            >
-                              <ArrowUp className="w-3 h-3" />
-                            </button>
-
-                            {/* Dislike */}
-                            <button
-                              type="button"
-                              onClick={() => engine.toggleDontPlayAgain(item)}
-                              className="text-slate-400 hover:text-red-400 hover:bg-white/10 p-1 rounded transition-all"
-                              title="Don't play again ever (Thumbs Down)"
-                            >
-                              <ThumbsDown className="w-3 h-3" />
-                            </button>
-
-                            {/* Remove */}
-                            <button
-                              onClick={() => engine.removeFromQueue(item.id)}
-                              className="text-slate-400 hover:text-white hover:bg-white/10 p-1 rounded transition-colors"
-                              title="Remove from queue"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
+                  engine.queue.map((item, idx) => (
+                    <UpNextQueueItem key={item.id} engine={engine} item={item} idx={idx} curKey={curKey} pendingMixId={pendingMix?.id} />
+                  ))
                 )}
               </div>
 
@@ -851,10 +505,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
               )}
             </div>
 
-            {/* Previously played songs (newest first); the last hour's are kept out of Up Next */}
+            {/* Previously played songs (newest first); the last 3 hours' are kept out of Up Next */}
             <PreviouslyPlayedPanel
               entries={engine.playLog.slice(0, 30)}
-              onQueueAgain={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false)}
+              onMix={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, true)}
             />
 
             {/* Favourites & Most Played Bangers (Quick Starters) */}
@@ -974,9 +628,9 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
-                            onClick={() => engine.acquireTrack(song.url || `${song.title} ${song.artist}`, false)}
+                            onClick={() => engine.acquireTrack(song.url || `${song.title} ${song.artist}`, false, 'front')}
                             className="p-1 hover:bg-white/10 text-slate-400 hover:text-cyan-300 rounded-lg text-[10px] font-bold transition-all"
-                            title="Add to Up Next Queue"
+                            title="Add to top of Up Next Queue"
                           >
                             <Plus className="w-3.5 h-3.5" />
                           </button>
@@ -1183,7 +837,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
       </div>
 
       {/* 3-Column Dashboard Grid: player (38-40%) | sound controls (25%) | queue & history (35-37%) */}
-      <div id="party-console-grid" className="grid grid-cols-1 lg:grid-cols-[40%_25%_35%] xl:grid-cols-[38%_25%_37%] gap-3 items-start">
+      <div id="party-console-grid" className="grid grid-cols-1 lg:grid-cols-[minmax(0,40fr)_minmax(0,25fr)_minmax(0,35fr)] xl:grid-cols-[minmax(0,38fr)_minmax(0,25fr)_minmax(0,37fr)] gap-3 items-start">
         {/* Left Column (45% width, decreased by 5% from 50%): Live Party Player */}
         <div id="party-console-left-column" className="flex flex-col gap-3 min-w-0">
           {/* Now Playing: status header, artwork + track info + VU, stats, waveform, transport, tempo */}
@@ -1223,6 +877,113 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 {deckStatus.label}
               </span>
             </div>
+
+            {/* Lined Up Mix: prominently displays the song lined up to mix with live countdown and one-click Mix Now / Cancel */}
+            {(pendingMix || mixLoadingItem) && (
+              <div
+                id="party-console-lined-up-mix"
+                className="mx-4 mt-3 p-3 rounded-xl bg-gradient-to-r from-cyan-950/80 via-blue-950/60 to-purple-950/70 border border-cyan-500/40 shadow-xl shadow-cyan-500/10 flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1 duration-150"
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  {/* Thumbnail / Animated Disc */}
+                  <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-slate-900 border border-cyan-500/30 flex items-center justify-center shadow-md">
+                    {(pendingMix?.thumbnail || mixLoadingItem?.thumbnail) ? (
+                      <img
+                        src={pendingMix?.thumbnail || mixLoadingItem?.thumbnail}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <Disc3 className="w-6 h-6 text-cyan-400 animate-spin [animation-duration:8s]" />
+                    )}
+                    <span className="absolute bottom-0 right-0 px-1 py-0.2 bg-cyan-500 text-[8px] font-black text-black rounded-tl shadow-sm">
+                      NEXT
+                    </span>
+                  </div>
+
+                  {/* Details */}
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] font-black tracking-wider px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 uppercase flex items-center gap-1.5 shadow-sm">
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                        LINED UP TO MIX
+                      </span>
+                      {pendingMix && (
+                        <span className="text-[11px] font-mono font-extrabold text-cyan-200 bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-400/40 shadow-sm animate-pulse">
+                          ⏱ in {Math.ceil(pendingMix.startsInSeconds)}s
+                        </span>
+                      )}
+                      {pendingMix?.harmonicShift && (
+                        <span
+                          className="text-[9px] font-mono font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 rounded-full"
+                          title="Energy & harmonic flow compatibility"
+                        >
+                          ⚡ {pendingMix.harmonicShift}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-baseline gap-2 truncate mt-1">
+                      <span
+                        className="text-xs sm:text-sm font-extrabold text-white truncate leading-snug"
+                        title={pendingMix?.title || mixLoadingItem?.title}
+                      >
+                        {pendingMix?.title || mixLoadingItem?.title}
+                      </span>
+                      {(pendingMix?.artist || mixLoadingItem?.artist) && (
+                        <span className="text-[10px] text-slate-400 truncate hidden sm:inline">
+                          by {pendingMix?.artist || mixLoadingItem?.artist}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="text-[10px] font-mono text-slate-300 flex items-center gap-1.5 truncate mt-0.5">
+                      {pendingMix ? (
+                        <>
+                          <span className="text-cyan-300 font-semibold truncate" title={pendingMix.reason}>
+                            {pendingMix.reason}
+                          </span>
+                          {pendingMix.entryTime > 0 && (
+                            <>
+                              <span className="text-slate-500">•</span>
+                              <span className="text-slate-400">enters at {formatTime(pendingMix.entryTime)}</span>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-amber-300 font-semibold flex items-center gap-1">
+                          <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                          Loading track audio… will mix in automatically once ready
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-2 shrink-0">
+                  {pendingMix && (
+                    <button
+                      type="button"
+                      onClick={() => engine.nextTrack()}
+                      className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-400 via-cyan-500 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-slate-950 font-black text-xs shadow-lg shadow-cyan-500/25 transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
+                      title="Mix now immediately (skip phrase wait)"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>Mix now</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => engine.cancelPendingMix()}
+                    className="px-2.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-semibold text-xs border border-white/10 transition-colors active:scale-95 cursor-pointer"
+                    title="Cancel lined up mix"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-col gap-4 p-4">
               {/* Hero: artwork, title/artist/chips, VU meter */}
@@ -1390,6 +1151,16 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         Intro skipped {formatTime(currentTrack.musicStartTime)}
                       </span>
                     )}
+                    {isStrictStartSong(currentTrack) && (
+                      <span
+                        id="party-console-strict-start-badge"
+                        className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-full"
+                        title="Strict Start Song: always plays strictly from 0:00 without skipping intro build-up"
+                      >
+                        <Target className="w-2.5 h-2.5 text-emerald-400" />
+                        Start 0:00
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1470,6 +1241,39 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                       <Flame className="absolute top-0.5 -translate-x-1/2 left-0 w-3 h-3 text-orange-400" />
                     </div>
                   )}
+                  {/* Loop Region on Waveform (Virtual DJ style) */}
+                  {playbackState.loop && (() => {
+                    const lStartRatio = markerRatio(playbackState.loop.start);
+                    const lEndRatio = markerRatio(playbackState.loop.end);
+                    if (lStartRatio === null || lEndRatio === null) return null;
+                    return (
+                      <div
+                        className="absolute inset-y-0 bg-emerald-500/25 border-x-2 border-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.4)] pointer-events-none z-10"
+                        style={{ left: `${lStartRatio * 100}%`, width: `${Math.max(0.5, (lEndRatio - lStartRatio) * 100)}%` }}
+                      >
+                        <span className="absolute top-0.5 left-1 text-[8px] font-mono font-black text-emerald-300 bg-black/60 px-1 rounded">
+                          IN
+                        </span>
+                        <span className="absolute top-0.5 right-1 text-[8px] font-mono font-black text-emerald-300 bg-black/60 px-1 rounded">
+                          OUT
+                        </span>
+                      </div>
+                    );
+                  })()}
+                  {playbackState.loopInTime !== null && !playbackState.loop && (() => {
+                    const inRatio = markerRatio(playbackState.loopInTime);
+                    if (inRatio === null) return null;
+                    return (
+                      <div
+                        className="absolute inset-y-0 w-0.5 bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] z-10 animate-pulse pointer-events-none"
+                        style={{ left: `${inRatio * 100}%` }}
+                      >
+                        <span className="absolute top-0.5 left-1 text-[8px] font-mono font-black text-amber-300 bg-black/80 px-1 rounded">
+                          IN
+                        </span>
+                      </div>
+                    );
+                  })()}
                   <div
                     className="absolute inset-y-0 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.8)]"
                     style={{ left: `${progress * 100}%` }}
@@ -1490,6 +1294,103 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 <div className="flex justify-between text-[11px] font-mono tabular-nums text-slate-400">
                   <span>{formatTime(playbackState.currentTime)}</span>
                   <span className="text-slate-500">{duration > 0 ? formatTime(duration) : '0:00'}</span>
+                </div>
+              </div>
+
+              {/* Virtual DJ Style Manual Loop (IN / OUT / EXIT) & Beat Loop Bar */}
+              <div
+                id="party-console-loop-controls"
+                className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-black/40 border border-white/10 shadow-inner"
+              >
+                {/* Manual Loop Controls: IN / START, OUT / END, EXIT / RELOOP */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-1 text-[10px] font-black tracking-wider text-slate-400 px-1 font-mono">
+                    <RotateCw className="w-3 h-3 text-cyan-400" />
+                    <span>LOOP:</span>
+                  </div>
+
+                  {/* IN (START) BUTTON */}
+                  <button
+                    id="party-console-loop-in-btn"
+                    type="button"
+                    onClick={() => engine.setLoopIn()}
+                    disabled={!currentTrack || !isPlaying}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-black tracking-wide border transition-all active:scale-95 disabled:opacity-40 cursor-pointer flex items-center gap-1.5 ${
+                      playbackState.loopInTime !== null && !playbackState.loop
+                        ? 'bg-amber-500 text-black border-amber-400 animate-pulse shadow-md shadow-amber-500/30'
+                        : playbackState.loop
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-white/5 hover:bg-white/15 text-slate-200 border-white/10 hover:border-white/20'
+                    }`}
+                    title="Press to set Loop IN (Start point) at current playback position"
+                  >
+                    <span>IN / START</span>
+                    {playbackState.loopInTime !== null && !playbackState.loop && <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />}
+                  </button>
+
+                  {/* OUT (END) BUTTON */}
+                  <button
+                    id="party-console-loop-out-btn"
+                    type="button"
+                    onClick={() => engine.setLoopOut()}
+                    disabled={!currentTrack || !isPlaying}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-black tracking-wide border transition-all active:scale-95 disabled:opacity-40 cursor-pointer flex items-center gap-1.5 ${
+                      playbackState.loop
+                        ? 'bg-emerald-500 text-black border-emerald-400 shadow-md shadow-emerald-500/30'
+                        : playbackState.loopInTime !== null
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-400 animate-bounce'
+                        : 'bg-white/5 hover:bg-white/15 text-slate-200 border-white/10 hover:border-white/20'
+                    }`}
+                    title={
+                      playbackState.loop
+                        ? 'Song is stuck in loop! Click to exit loop and continue playing'
+                        : 'Press to set Loop OUT (End point) and start looping'
+                    }
+                  >
+                    <span>OUT / END</span>
+                    {playbackState.loop && <span className="font-mono text-[10px]">⟲</span>}
+                  </button>
+
+                  {/* EXIT / RELOOP BUTTON */}
+                  <button
+                    id="party-console-reloop-btn"
+                    type="button"
+                    onClick={() => engine.reloop()}
+                    disabled={!currentTrack || (!playbackState.loop && !playbackState.hasLastLoop)}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all active:scale-95 disabled:opacity-30 cursor-pointer ${
+                      playbackState.loop
+                        ? 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border-rose-500/40 shadow-sm'
+                        : 'bg-white/5 hover:bg-white/15 text-slate-300 border-white/10'
+                    }`}
+                    title={playbackState.loop ? 'Exit current loop (play forward)' : 'Reloop (re-enter last saved loop)'}
+                  >
+                    {playbackState.loop ? 'EXIT LOOP' : 'RELOOP'}
+                  </button>
+                </div>
+
+                {/* Quick Auto Beat Loops (1, 2, 4, 8 Bars) */}
+                <div className="flex items-center gap-1 border-l border-white/10 pl-2">
+                  <span className="text-[9px] font-mono text-slate-500 mr-1 hidden sm:inline">BEAT:</span>
+                  {[1, 2, 4, 8].map((bars) => {
+                    const isBarsActive = engine.getLoopBars(engine.activeDeck) === bars;
+                    return (
+                      <button
+                        key={bars}
+                        id={`party-console-loop-${bars}b`}
+                        type="button"
+                        onClick={() => engine.toggleBeatLoop(engine.activeDeck, bars)}
+                        disabled={!currentTrack || !isPlaying}
+                        className={`px-2 py-1 rounded-md text-[10px] font-mono font-black border transition-all active:scale-95 disabled:opacity-40 cursor-pointer ${
+                          isBarsActive
+                            ? 'bg-emerald-500 text-black border-emerald-400 shadow-sm shadow-emerald-500/30'
+                            : 'bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white border-white/10'
+                        }`}
+                        title={isBarsActive ? 'Leave loop' : `Instant ${bars}-bar beat loop`}
+                      >
+                        {bars}B
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1564,19 +1465,23 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     <Flame className="w-3.5 h-3.5" />
                     Play best part
                   </button>
-                  <label className="inline-flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer select-none" title="Start the next songs just before their hook">
-                    <span>Auto-cue hook</span>
+                  <label
+                    className="inline-flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer select-none"
+                    title="For a dancing crowd: each song plays only its build-up and hook (about 1–1.5 min), then mixes into the next"
+                  >
+                    <span>Best parts only</span>
                     <button
                       role="switch"
-                      aria-checked={engine.autoCueViralHook}
-                      onClick={() => engine.toggleAutoCueHook()}
+                      aria-label="Best parts only"
+                      aria-checked={engine.bestPartsMode}
+                      onClick={() => engine.toggleBestParts()}
                       className={`relative w-8 h-[18px] rounded-full transition-colors ${
-                        engine.autoCueViralHook ? 'bg-orange-500' : 'bg-white/15'
+                        engine.bestPartsMode ? 'bg-orange-500' : 'bg-white/15'
                       }`}
                     >
                       <span
                         className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
-                          engine.autoCueViralHook ? 'translate-x-3.5' : ''
+                          engine.bestPartsMode ? 'translate-x-3.5' : ''
                         }`}
                       />
                     </button>

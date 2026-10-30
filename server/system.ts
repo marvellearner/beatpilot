@@ -1,6 +1,7 @@
 /** Laptop memory telemetry for the RAM meter. */
 import os from 'os';
 import { IncomingMessage, ServerResponse } from 'http';
+import { logError } from './logger';
 
 // 7. System & RAM Usage Telemetry (GET /api/system/memory)
 export async function handleSystemMemory(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -33,7 +34,7 @@ export async function handleSystemMemory(req: IncomingMessage, res: ServerRespon
       })
     );
   } catch (err) {
-    console.error('Error fetching system memory:', err);
+    logError('system', err);
     res.statusCode = 500;
     res.end(JSON.stringify({ error: 'Failed to read memory' }));
   }

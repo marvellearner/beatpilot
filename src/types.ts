@@ -83,6 +83,8 @@ export interface TransitionConfig {
 export interface PendingMixInfo {
   id?: string;
   title: string;
+  artist?: string;
+  thumbnail?: string;
   startsInSeconds: number;
   entryTime: number;
   reason: string;
@@ -110,6 +112,7 @@ export interface QueuedTrack {
   // last hour; a song the user asked for ('request') is allowed but flagged
   source?: 'ai' | 'playlist' | 'request';
   lastPlayedAt?: number; // set when a requested song was played within the last hour
+  queuedAt?: number; // when it joined Up Next (new picks expire after 30 min unplayed, see queueRules.ts)
   highlightTime?: number;
   cueInTime?: number;
   bpm?: number;
@@ -138,7 +141,7 @@ export interface HostSyncState {
   isTransitioning: boolean;
   transitionProgress: number;
   autoCurationEnabled: boolean;
-  autoCueViralHook: boolean;
+  bestPartsMode: boolean;
   mostPlayedSongs?: SongHistoryItem[];
   favorites?: FavoriteSong[];
   bannedSongs?: BannedSong[];
@@ -227,8 +230,9 @@ export type MobileAction =
   | { type: 'CMD_ADD_QUEUE'; query: string }
   | { type: 'CMD_MIX_NOW'; query: string }
   | { type: 'CMD_TOGGLE_AUTOCURATION' }
+  | { type: 'CMD_REFRESH_QUEUE' }
   | { type: 'CMD_JUMP_TO_HOOK'; deckId?: DeckId }
-  | { type: 'CMD_TOGGLE_AUTO_CUE_HOOK' }
+  | { type: 'CMD_TOGGLE_BEST_PARTS' }
   | { type: 'CMD_MIX_QUEUED'; itemId: string }
   | { type: 'CMD_REMOVE_QUEUED'; itemId: string }
   | { type: 'CMD_CANCEL_PENDING_MIX' }

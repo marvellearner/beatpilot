@@ -5,6 +5,7 @@ import { RhythmPanel } from './components/RhythmPanel';
 import { MixerSection } from './components/MixerSection';
 import { PartyConsoleView } from './components/PartyConsoleView';
 import { RamUsageMeter } from './components/RamUsageMeter';
+import { MixToast } from './components/MixToast';
 import { DJAgent, AIResponseResult } from '../ai/DJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
@@ -101,14 +102,17 @@ export const App: React.FC = () => {
         case 'CMD_MIX_NOW':
           engine.acquireTrack(action.query, true);
           break;
+        case 'CMD_REFRESH_QUEUE':
+          void engine.refreshQueue();
+          break;
         case 'CMD_TOGGLE_AUTOCURATION':
           engine.toggleAutoCuration();
           break;
         case 'CMD_JUMP_TO_HOOK':
           engine.jumpToHook(action.deckId);
           break;
-        case 'CMD_TOGGLE_AUTO_CUE_HOOK':
-          engine.toggleAutoCueHook();
+        case 'CMD_TOGGLE_BEST_PARTS':
+          engine.toggleBestParts();
           break;
         case 'CMD_MIX_QUEUED':
           engine.mixQueuedTrack(action.itemId);
@@ -345,7 +349,7 @@ export const App: React.FC = () => {
 
   const samplePrompts = [
     'Mix into Deck B with energetic Punjabi Dhol',
-    'Switch to Bhangra Dholak & Chimta beat',
+    'Switch to Bhangra Dholak beat',
     'Kill low bass on Deck A to clean up the mix',
     'Start smooth 16-second crossfade into Deck A',
   ];
@@ -485,7 +489,8 @@ export const App: React.FC = () => {
             })()}
           </div>
 
-          <div className="hidden sm:flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-xl border border-white/5 text-xs font-mono text-slate-400">
+          {/* Wide screens only: on a laptop-width screen it pushes the help button onto a line of its own */}
+          <div className="hidden 2xl:flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-xl border border-white/5 text-xs font-mono text-slate-400">
             <Laptop className="w-3.5 h-3.5 text-slate-300" />
             <span>i7-9750H</span>
           </div>
@@ -510,6 +515,8 @@ export const App: React.FC = () => {
       )}
 
       {/* iPhone Remote Modal */}
+      <MixToast notice={engine.mixNotice} />
+
       {showRemoteModal && (
         <div id="app-remote-modal" className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="dj-panel rounded-3xl p-6 border border-white/20 max-w-md w-full flex flex-col gap-4 text-center shadow-2xl relative">
@@ -736,9 +743,9 @@ export const App: React.FC = () => {
                   >
                     <div className="flex flex-col gap-1.5">
                       {/* Top Rank + Badges */}
-                      <div className="flex justify-between items-center text-[10px] font-mono">
-                        <span className={`font-bold ${isHero ? 'text-cyan-300 flex items-center gap-1 font-black' : 'text-slate-500'}`}>
-                          {isHero && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />}
+                      <div className="flex justify-between items-center text-[10px] font-mono gap-1.5 flex-wrap">
+                        <span className={`font-bold shrink-0 whitespace-nowrap ${isHero ? 'text-cyan-300 flex items-center gap-1 font-black' : 'text-slate-500'}`}>
+                          {isHero && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping shrink-0" />}
                           #{idx + 1} {isHero ? 'UP NEXT' : 'UPCOMING'}
                         </span>
                         <div className="flex items-center gap-1">

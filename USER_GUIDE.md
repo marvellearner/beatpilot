@@ -63,7 +63,7 @@ Once a song is playing, the app looks after the party:
 - **Thumbs Down ("Don't Play Again Ever"):** Every queue item has a Thumbs Down (👎) button. Clicking it permanently bans the song, instantly drops it, and prevents it from ever being auto-queued again.
 - **Previously Played history:** songs appear in the Previously Played list as they finish mixing in. **No two consecutive songs in previously played can ever be the same**, and songs present in previously played are strictly prevented from appearing in the Up Next queue.
 - **Mixes automatically:** about 20 seconds before a song ends, it blends into the next one with the beats lined up. In the final stretch it gently nudges the tempo toward the next song, so the two meet at the same BPM. If two songs' tempos are too far apart, it does a quick, clean cut on the beat instead of a messy blend.
-- **Plays the best part:** with **Auto-Cue: ON**, the next songs start just before their most popular part. Turn it **OFF** if you'd rather every song play from the start.
+- **Best parts only (for dancing):** switch on **Best parts only** and every song plays just its build-up and hook (about 1–1.5 minutes), then mixes into the next song's build-up. Songs under 2 minutes play whole. Switch it off to hear songs through to their outro. Rules: MIXING_RULES.md "Best Parts Mode".
 - **Never goes silent while loading:** if the next song isn't ready yet, the current song keeps playing.
 - **Real-Time RAM Usage Meter:** The top navigation bar displays a live RAM gauge showing system memory (GB and percentage), process footprint (AI DJ server RSS), and browser JS/audio heap with interactive health telemetry on click/hover.
 
@@ -112,7 +112,6 @@ All you might want to touch:
 
 | Style | Best for |
 | :--- | :--- |
-| **Dhol Chaal** | Punjabi, bhangra, wedding songs |
 | **Dhol Dhamaal** | The biggest Punjabi and Bollywood bangers |
 | **Dholak Keherwa** | Bollywood, sangeet, folk |
 | **Clap & Tambourine** | Almost anything, especially songs with strong drums already |
@@ -128,7 +127,7 @@ All you might want to touch:
 - During a mix it plays lighter, or rests if the two songs are cut together.
 - If it can't hear a clear beat, it rests rather than play out of time. The card says why.
 
-The card's grey line always says what it's doing, e.g. *"🤖 Dhol Chaal: chorus energy: full groove"*.
+The card's grey line always says what it's doing, e.g. *"🤖 Dhol Dhamaal: chorus energy: full groove"*.
 
 It can't yet tell a slow love song from an upbeat one in the same language. If drums come in on a ballad, mute them for that song.
 
@@ -143,8 +142,8 @@ The **Mood & Equalizer** card is below the drums card on the laptop, and also on
 | Mood | Sound | Mixing | Songs the AI adds |
 | :--- | :--- | :--- | :--- |
 | 🎵 Normal | Flat | 8-bar blends | Popular mix |
-| 🎉 Party | Punchy bass, crisp highs | **Every song tuned to one dance tempo (120–130 BPM)** without changing its pitch, so every mix is at the exact same BPM. 8-bar blends, starts at the hook. | Upbeat bangers |
-| 🥁 Bhangra | Heavy bass + **dhol switched on** (Dhol Chaal) | Short 4-bar mixes | Punjabi / bhangra |
+| 🎉 Party | Punchy bass, crisp highs | **Every song tuned to one dance tempo (120–130 BPM)** without changing its pitch, so every mix is at the exact same BPM. 8-bar blends. | Upbeat bangers |
+| 🥁 Bhangra | Heavy bass + **dhol switched on** (Dhol Dhamaal) | Short 4-bar mixes | Punjabi / bhangra |
 | 🌙 Chill | Warm, soft highs | Long 16-bar blends, songs from the start | Mellow songs |
 | 💕 Romantic | Warm vocals | Long 16-bar blends, songs from the start | Love songs |
 
@@ -226,7 +225,7 @@ Songs show up by their tags' title and artist, or as "Artist - Title" from the f
 
 Use the bar at the bottom of the screen. Examples:
 
-- *Switch to Bhangra Dholak & Chimta beat*
+- *Switch to Bhangra Dholak beat*
 - *Mix into Deck B with energetic Punjabi Dhol*
 - *Kill low bass on Deck A*
 

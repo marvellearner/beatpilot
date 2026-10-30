@@ -10,4 +10,9 @@ export default defineConfig({
     port: 5173,
     cors: true,
   },
+  // `npm run build && npm run preview`: the built app, with the same API (see server/apiPlugin.ts)
+  preview: {
+    host: '0.0.0.0',
+    port: 4173,
+  },
 });

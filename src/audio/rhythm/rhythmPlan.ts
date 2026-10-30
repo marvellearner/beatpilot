@@ -16,6 +16,8 @@
 import { RHYTHM_STYLES, type RhythmStyleId } from './styles';
 import type { EnergyProfile } from '../MixPointPlanner';
 import type { MoodId } from '../Moods';
+import type { SongLanguage } from '../../../shared/songLanguage';
+export { SONG_LANGUAGES, guessLanguage, type SongLanguage } from '../../../shared/songLanguage';
 
 export interface RhythmPlan {
   play: boolean;
@@ -25,8 +27,6 @@ export interface RhythmPlan {
   source: 'ai' | 'known' | 'guess'; // who identified the song: the AI DJ, a known artist/script, or a guess
 }
 
-export const SONG_LANGUAGES = ['punjabi', 'hindi', 'english', 'spanish', 'other', 'unknown'] as const;
-export type SongLanguage = (typeof SONG_LANGUAGES)[number];
 
 export interface SongRhythmFeatures {
   midShare: number; // 300 Hz–3 kHz share of the loudness: vocals and leads
@@ -72,26 +72,8 @@ export function computeRhythmFeatures(buffer: AudioBuffer, profile: EnergyProfil
   return { midShare, contrastDb, punch };
 }
 
-const PUNJABI_HINT =
-  /[਀-੿]|\b(punjabi|bhangra|jatt|jatti|gabru|munda|kudi|diljit|sidhu|moose ?wala|aujla|ap dhillon|shubh|guru randhawa|mankirt|gurdas|babbu maan|ammy virk|jass manak|harrdy sandhu|b praak|garry sandhu|panjabi mc|jazzy b|parmish|karan aujla|amrit maan|gippy|sukh-e|mannat noor|nimrat)\b/i;
-const HINDI_HINT =
-  /[ऀ-ॿ]|\b(bollywood|hindi|arijit|neha kakkar|badshah|honey singh|atif aslam|shreya ghoshal|sonu nigam|kk|shaan|vishal|pritam|t-series|sangeet|haryanvi)\b/i;
-const SPANISH_HINT = /\b(reggaeton|despacito|bad bunny|j balvin|daddy yankee|shakira|maluma|luis fonsi|ozuna|karol g|rosal[ií]a)\b/i;
 const DEVOTIONAL = /\b(chalisa|aarti|bhajan|mantra|shabad|gurbani|kirtan|naat|stotram|hymn|devotional|bhakti)\b/i;
 
-/**
- * The language from the script, title words and well-known artists. `sure` when one of those
- * matched; then it wins over the AI (the AI's misses in testing were exactly such songs, e.g.
- * Sidhu Moose Wala as Hindi) and the AI isn't asked. Otherwise it's only a guess ("English" for
- * plain Latin-alphabet titles) and the AI's answer is used when it has one.
- */
-export function guessLanguage(title: string, artist: string): { language: SongLanguage; sure: boolean } {
-  const text = `${title} ${artist}`;
-  if (PUNJABI_HINT.test(text)) return { language: 'punjabi', sure: true };
-  if (HINDI_HINT.test(text)) return { language: 'hindi', sure: true };
-  if (SPANISH_HINT.test(text)) return { language: 'spanish', sure: true };
-  return { language: /^[\x20-\x7E]+$/.test(text) ? 'english' : 'other', sure: false };
-}
 
 const MOOD_PHRASE: Record<MoodId, string> = {
   normal: 'normal mood',
@@ -134,12 +116,12 @@ export function planRhythm(
   let styleId: RhythmStyleId;
   switch (mood) {
     case 'bhangra':
-      styleId = 'dhol_chaal';
+      styleId = 'dhol_dhamaal';
       break;
     case 'party':
       styleId =
         language === 'punjabi' ? 'dhol_dhamaal'
-        : language === 'hindi' ? 'dhol_chaal'
+        : language === 'hindi' ? 'dholak_keherwa'
         : language === 'spanish' ? 'afro_groove'
         : clubTempo ? 'club_tops'
         : 'clap_tambourine';
@@ -150,7 +132,7 @@ export function planRhythm(
       break;
     default:
       styleId =
-        language === 'punjabi' ? 'dhol_chaal'
+        language === 'punjabi' ? 'dhol_dhamaal'
         : language === 'hindi' ? 'dholak_keherwa'
         : language === 'spanish' ? 'afro_groove'
         : 'clap_tambourine';
@@ -163,7 +145,7 @@ export function planRhythm(
     if (features.punch > 0.13) {
       // The song's drums are already busy: stay lighter, and no extra boom on top of them
       level = Math.min(level, 0.5);
-      if (styleId === 'dhol_dhamaal') styleId = 'dhol_chaal';
+      if (styleId === 'dhol_dhamaal') styleId = 'dholak_keherwa';
       lighter.push('its drums are already strong');
     } else if (features.punch < 0.095 && mood === 'party' && !desi && language !== 'spanish') {
       styleId = 'club_drive';

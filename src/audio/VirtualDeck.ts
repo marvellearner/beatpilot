@@ -2,6 +2,7 @@ import { DeckId, TrackMetadata } from '../types';
 import { detectBpmFromBuffer } from './BpmDetector';
 import { IntroSkitDetector } from './IntroSkitDetector';
 import { loudnessGainDb } from './Loudness';
+import { isStrictStartSong } from './songMatch';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
 // a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.5x).
@@ -16,6 +17,11 @@ export class VirtualDeck {
   // Nodes
   private sourceNode: AudioBufferSourceNode | null = null;
   private sourceGain: GainNode | null = null; // per-source fade, used when swapping audio mid-song
+  // Streaming: a song that isn't downloaded yet plays through an <audio> element while it buffers,
+  // then hands over to the decoded buffer (see attachStream / upgradeToBuffer)
+  private mediaEl: HTMLAudioElement | null = null;
+  private mediaSource: MediaElementAudioSourceNode | null = null;
+  private mediaGain: GainNode | null = null;
   private gainNode: GainNode;
   private trimNode: GainNode; // loudness matching (see Loudness.ts), before the volume fader
   private lowFilter: BiquadFilterNode;
@@ -45,6 +51,8 @@ export class VirtualDeck {
   private pausedAt: number = 0;
   // A beat loop on the playing source (song seconds); cleared by any new source, pause or seek
   private loop: { start: number; end: number } | null = null;
+  private loopInTime: number | null = null;
+  private lastLoop: { start: number; end: number } | null = null;
 
   // Callback on playback state change
   public onStateUpdate?: () => void;
@@ -172,9 +180,16 @@ export class VirtualDeck {
     if (this.isPlaying) {
       this.pause();
     }
+    this.releaseStream();
     this.track = metadata;
-    // Always skip initial conversation/dialogue if any that is without music
-    const defaultStart = metadata.musicStartTime && metadata.musicStartTime > 0 ? metadata.musicStartTime : 0;
+    const isStrict = isStrictStartSong(metadata);
+    if (isStrict) {
+      metadata.musicStartTime = 0;
+      metadata.cueInTime = 0;
+      metadata.introSkipReason = undefined;
+    }
+    // Always skip initial conversation/dialogue if any that is without music (unless strict start song)
+    const defaultStart = isStrict ? 0 : (metadata.musicStartTime && metadata.musicStartTime > 0 ? metadata.musicStartTime : 0);
     this.pausedAt = initialPosition !== undefined ? Math.max(0, Math.min(initialPosition, metadata.duration)) : defaultStart;
     this.startedAt = 0;
     // A new song starts at its natural tempo/pitch
@@ -195,7 +210,11 @@ export class VirtualDeck {
 
   /** @param when AudioContext time to start at (used to land the first beat on the other deck's beat) */
   public play(fromOffset?: number, when?: number) {
-    if (!this.track || !this.track.audioBuffer) return;
+    if (!this.track) return;
+    if (!this.track.audioBuffer) {
+      if (this.mediaEl) this.playStream(fromOffset);
+      return;
+    }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
     }
@@ -204,10 +223,11 @@ export class VirtualDeck {
       this.stopSource();
     }
 
-    const musicStart = this.track.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0;
+    const isStrict = isStrictStartSong(this.track);
+    const musicStart = isStrict ? 0 : (this.track.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0);
     let offset = fromOffset !== undefined ? fromOffset : this.pausedAt;
-    // Always skip initial conversation/dialogue part if any that is without music
-    if (fromOffset === undefined && this.pausedAt < musicStart) {
+    // Always skip initial conversation/dialogue part if any that is without music (unless strict start song)
+    if (!isStrict && fromOffset === undefined && this.pausedAt < musicStart) {
       offset = musicStart;
     }
     const clampedOffset = Math.max(0, Math.min(offset, this.track.duration));
@@ -268,19 +288,143 @@ export class VirtualDeck {
     this.notifyUpdate();
   }
 
+  /**
+   * Plays `src` while it downloads, through the same EQ, trim and volume chain as a buffer.
+   * The song's details stay on `track`; call upgradeToBuffer once its audio is decoded.
+   */
+  public attachStream(src: string) {
+    this.releaseStream();
+    const el = new Audio();
+    el.preload = 'auto';
+    el.preservesPitch = false; // speed changes move the pitch too ("vinyl"), like the buffer source
+    el.src = src;
+    this.mediaEl = el;
+    this.mediaSource = this.ctx.createMediaElementSource(el);
+    this.mediaGain = this.ctx.createGain();
+    this.mediaSource.connect(this.mediaGain);
+    this.mediaGain.connect(this.lowFilter);
+    const update = () => this.notifyUpdate();
+    el.addEventListener('waiting', update);
+    el.addEventListener('playing', update);
+    el.addEventListener('canplay', update);
+    el.addEventListener('loadedmetadata', () => {
+      if (this.track && !this.track.audioBuffer && Number.isFinite(el.duration)) this.track.duration = el.duration;
+      update();
+    });
+    el.addEventListener('ended', () => {
+      if (this.mediaEl !== el) return;
+      this.isPlaying = false;
+      this.pausedAt = 0;
+      update();
+    });
+    el.addEventListener('error', () => {
+      if (this.mediaEl !== el) return;
+      this.isPlaying = false;
+      this.streamError = el.error?.message || 'The song could not be streamed';
+      update();
+    });
+  }
+
+  /** Why streaming stopped, if it failed (shown by the engine). */
+  public streamError: string | null = null;
+
+  /** True while the song plays from the stream, before its full audio is decoded. */
+  public isStreaming(): boolean {
+    return !!this.mediaEl && !this.track?.audioBuffer;
+  }
+
+  /** Streaming, playing, but waiting for data. */
+  public isBuffering(): boolean {
+    const el = this.mediaEl;
+    return !!el && this.isPlaying && el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+  }
+
+  private playStream(fromOffset?: number) {
+    const el = this.mediaEl!;
+    if (this.ctx.state === 'suspended') void this.ctx.resume();
+    const isStrict = isStrictStartSong(this.track);
+    const musicStart = isStrict ? 0 : (this.track?.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0);
+    let offset = fromOffset ?? this.pausedAt;
+    if (isStrict && fromOffset === undefined && this.pausedAt === 0) {
+      offset = 0;
+    } else if (!isStrict && fromOffset === undefined && this.pausedAt < musicStart) {
+      offset = musicStart;
+    }
+    if (Math.abs(el.currentTime - offset) > 0.05) el.currentTime = offset;
+    el.playbackRate = this.playbackRate;
+    this.streamError = null;
+    this.isPlaying = true;
+    el.play().catch((err) => {
+      if (this.mediaEl !== el || err?.name === 'AbortError') return; // replaced or paused meanwhile
+      this.isPlaying = false;
+      this.streamError = err?.message || 'The song could not be streamed';
+      this.notifyUpdate();
+    });
+    this.notifyUpdate();
+  }
+
+  /**
+   * The song's full audio is decoded: carry on from the same moment on the buffer (40 ms
+   * crossfade, no gap) and drop the stream. `track` must be this deck's track with audioBuffer set.
+   */
+  public upgradeToBuffer(track: TrackMetadata) {
+    if (!this.mediaEl || track !== this.track || !track.audioBuffer) return;
+    const el = this.mediaEl;
+    const position = el.currentTime;
+    if (this.isPlaying && !el.paused) {
+      const now = this.ctx.currentTime;
+      const fadeOut = this.mediaGain!;
+      fadeOut.gain.setValueAtTime(1, now);
+      fadeOut.gain.linearRampToValueAtTime(0, now + SWAP_FADE_SECONDS);
+      this.startSource(track.audioBuffer, Math.min(position, track.duration), now, true);
+      this.startedAt = now - position / this.playbackRate;
+      // The deck now plays from the buffer; the stream fades out, then is let go
+      const nodes = { el, source: this.mediaSource, gain: this.mediaGain };
+      this.mediaEl = null;
+      this.mediaSource = null;
+      this.mediaGain = null;
+      window.setTimeout(() => VirtualDeck.disposeStream(nodes), (SWAP_FADE_SECONDS + 0.05) * 1000);
+    } else {
+      this.pausedAt = position;
+      this.releaseStream();
+    }
+    this.notifyUpdate();
+  }
+
+  /** Stops and disconnects the current stream, if any. */
+  private releaseStream() {
+    if (!this.mediaEl) return;
+    VirtualDeck.disposeStream({ el: this.mediaEl, source: this.mediaSource, gain: this.mediaGain });
+    this.mediaEl = null;
+    this.mediaSource = null;
+    this.mediaGain = null;
+  }
+
+  private static disposeStream(s: { el: HTMLAudioElement; source: AudioNode | null; gain: AudioNode | null }) {
+    s.el.pause();
+    s.el.removeAttribute('src');
+    s.el.load(); // aborts the download
+    s.source?.disconnect();
+    s.gain?.disconnect();
+  }
+
   public pause() {
     if (!this.isPlaying) return;
     this.pausedAt = this.getCurrentTime();
+    if (this.loop) this.lastLoop = { ...this.loop };
     this.loop = null;
     this.stopSource();
+    this.mediaEl?.pause();
     this.isPlaying = false;
     this.notifyUpdate();
   }
 
   public stop() {
     this.stopSource();
+    this.mediaEl?.pause();
     this.isPlaying = false;
-    this.pausedAt = this.track?.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0;
+    const isStrict = isStrictStartSong(this.track);
+    this.pausedAt = isStrict ? 0 : (this.track?.musicStartTime && this.track.musicStartTime > 0 ? this.track.musicStartTime : 0);
     this.startedAt = 0;
     this.notifyUpdate();
   }
@@ -337,6 +481,7 @@ export class VirtualDeck {
       this.sourceNode.playbackRate.setTargetAtTime(this.playbackRate, this.ctx.currentTime, 0.02);
       this.startedAt = this.ctx.currentTime - position / this.playbackRate;
     }
+    if (this.mediaEl) this.mediaEl.playbackRate = this.playbackRate;
     this.notifyUpdate();
   }
 
@@ -371,18 +516,76 @@ export class VirtualDeck {
    * counting through the loop, so anything locked to this song's beat grid stays on the beat.
    */
   public setLoop(start: number, end: number): boolean {
-    if (!this.isPlaying || !this.sourceNode || !this.track || end <= start || end > this.track.duration) return false;
+    if (!this.isPlaying || !this.sourceNode || this.isStreaming() || !this.track || end <= start || end > this.track.duration) return false;
     this.sourceNode.loopStart = start;
     this.sourceNode.loopEnd = end;
     this.loop = { start, end };
+    this.lastLoop = { start, end };
+    this.loopInTime = null;
     this.notifyUpdate();
     return true;
   }
 
-  /** Leaves the loop and plays on from where the loop is now. */
+  /** Sets the loop IN (start) point. Snaps to the nearest beat if beat grid is known. */
+  public setLoopIn(time?: number) {
+    if (!this.track) return;
+    const pos = time !== undefined ? time : this.getCurrentTime();
+    const bpm = this.track.bpm || 120;
+    const beat = 60 / bpm;
+    const downbeat = this.track.firstDownbeatTime ?? 0;
+    const snapped = (this.track.bpmConfidence ?? 0) >= 0.3
+      ? Math.max(0, downbeat + Math.round((pos - downbeat) / beat) * beat)
+      : Math.max(0, pos);
+
+    this.loopInTime = snapped;
+
+    // If currently looping, pressing IN moves the loop's start point
+    if (this.loop && this.loop.end > snapped + 0.1) {
+      this.setLoop(snapped, this.loop.end);
+    }
+    this.notifyUpdate();
+  }
+
+  /**
+   * Sets the loop OUT (end) point and immediately starts looping between IN and OUT.
+   * If already looping, pressing OUT exits the loop (standard DJ controller behavior).
+   */
+  public setLoopOut(time?: number): boolean {
+    if (!this.track) return false;
+    if (this.loop) {
+      this.exitLoop();
+      return false;
+    }
+
+    const pos = time !== undefined ? time : this.getCurrentTime();
+    const bpm = this.track.bpm || 120;
+    const beat = 60 / bpm;
+    const downbeat = this.track.firstDownbeatTime ?? 0;
+
+    let start = this.loopInTime;
+    let end = (this.track.bpmConfidence ?? 0) >= 0.3
+      ? Math.max(0, downbeat + Math.round((pos - downbeat) / beat) * beat)
+      : Math.max(0, pos);
+
+    if (start === null) {
+      // If no IN point was set, default start to 1 bar (4 beats) prior to OUT
+      start = Math.max(0, end - beat * 4);
+    }
+
+    if (end <= start + 0.1) {
+      end = Math.min(this.track.duration, start + beat * 4);
+    }
+
+    if (end <= start) return false;
+
+    return this.setLoop(start, end);
+  }
+
+  /** Leaves the loop and plays on seamlessly from where the loop is now. */
   public exitLoop() {
     if (!this.loop) return;
     const position = this.getCurrentTime();
+    this.lastLoop = { ...this.loop };
     if (this.sourceNode) {
       this.sourceNode.loopStart = 0;
       this.sourceNode.loopEnd = 0; // back to looping the whole buffer (the default)
@@ -392,12 +595,34 @@ export class VirtualDeck {
     this.notifyUpdate();
   }
 
+  /** Toggles loop or re-enters the previous loop. */
+  public reloop(): boolean {
+    if (this.loop) {
+      this.exitLoop();
+      return false;
+    }
+    if (this.lastLoop && this.track) {
+      this.seek(this.lastLoop.start);
+      return this.setLoop(this.lastLoop.start, this.lastLoop.end);
+    }
+    return false;
+  }
+
   public getLoop(): { start: number; end: number } | null {
     return this.loop;
   }
 
+  public getLoopInTime(): number | null {
+    return this.loopInTime;
+  }
+
+  public getLastLoop(): { start: number; end: number } | null {
+    return this.lastLoop;
+  }
+
   public getCurrentTime(): number {
     if (!this.track) return 0;
+    if (this.isStreaming()) return this.isPlaying ? this.mediaEl!.currentTime : this.pausedAt;
     if (this.isPlaying) {
       // Clamped at 0 while a scheduled start is still in the future
       const elapsed = Math.max(0, (this.ctx.currentTime - this.startedAt) * this.playbackRate);
@@ -414,7 +639,8 @@ export class VirtualDeck {
    * so other parts can schedule sounds exactly on this song's beats. Null when stopped.
    */
   public getClockAnchor(): { startedAt: number; rate: number } | null {
-    return this.isPlaying && this.track ? { startedAt: this.startedAt, rate: this.playbackRate } : null;
+    // A stream has no exact audio-clock anchor (and no beat grid yet): drums wait for the buffer
+    return this.isPlaying && this.track && !this.isStreaming() ? { startedAt: this.startedAt, rate: this.playbackRate } : null;
   }
 
   public getTrack(): TrackMetadata | null {
@@ -435,6 +661,11 @@ export class VirtualDeck {
       midGain: this.midGain,
       highGain: this.highGain,
       isCue: false,
+      isStreaming: this.isStreaming(),
+      isBuffering: this.isBuffering(),
+      loop: this.loop,
+      loopInTime: this.loopInTime,
+      hasLastLoop: !!this.lastLoop,
     };
   }
 

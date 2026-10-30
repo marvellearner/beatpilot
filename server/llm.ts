@@ -30,8 +30,8 @@ export async function ollamaGenerate(prompt: string, maxTokens: number, timeoutM
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) throw new Error(`Ollama HTTP ${resp.status}`);
-  const data = await resp.json();
-  return data.response as string;
+  const data = (await resp.json()) as { response?: string };
+  return data.response ?? '';
 }
 
 export let ollamaWarmed = false;
@@ -125,7 +125,7 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
         throw new Error(`Gemini (${model}) HTTP ${resp.status}: ${errorText.slice(0, 200)}`);
       }
 
-      const data = await resp.json();
+      const data = (await resp.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) {
         throw new Error('Gemini returned empty response candidate');
@@ -147,8 +147,8 @@ export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse,
   const geminiCfg = getGeminiConfig();
   let ollamaOnline = false;
   try {
-    const tags = await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })).json();
-    ollamaOnline = (tags.models || []).some((m: { name: string }) => m.name.startsWith(OLLAMA_MODEL));
+    const tags = (await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })).json()) as { models?: Array<{ name: string }> };
+    ollamaOnline = (tags.models || []).some((m) => m.name.startsWith(OLLAMA_MODEL));
     if (ollamaOnline && !ollamaWarmed) {
       ollamaWarmed = true;
       fetch(`${OLLAMA_URL}/api/generate`, {

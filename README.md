@@ -16,7 +16,7 @@
 
 ### Core Differentiating Features:
 1. **Deck P — Live Rhythm Enhancer (real dhol & percussion):**
-   * Real recorded dhol, dholak, tambourine, shaker, conga and more (CC0 samples), in 8 styles from *Dhol Chaal* and *Dholak Keherwa* to *Club Tops* and *Afro Groove*.
+   * Real recorded dhol, dholak, tambourine, shaker, conga and more (CC0 samples), in 7 styles from *Dhol Dhamaal* and *Dholak Keherwa* to *Club Tops* and *Afro Groove*.
    * Decides per song by itself: the AI DJ identifies the song, and the style and level follow from it, the mood and the song's own sound (lighter on songs with heavy drums or vocals, none on devotional songs).
    * Every hit is scheduled on the playing song's own beat grid, so it can't drift and follows tempo changes without changing pitch.
 2. **Plays like a drummer, not a loop:**

@@ -12,7 +12,6 @@ import type { VoiceId } from './kit';
 import type { MoodId } from '../Moods';
 
 export type RhythmStyleId =
-  | 'dhol_chaal'
   | 'dhol_dhamaal'
   | 'dholak_keherwa'
   | 'clap_tambourine'
@@ -36,19 +35,6 @@ export interface RhythmStyle {
 
 export const RHYTHM_STYLES: RhythmStyle[] = [
   {
-    id: 'dhol_chaal',
-    name: 'Dhol Chaal',
-    description: 'The classic bhangra dhol shuffle: boom on the beat, stick crack on the off-beats.',
-    suits: 'Punjabi, bhangra, wedding songs',
-    swing: 0.28,
-    light: { dholBass: ['X.......X.......'], dholCrack: ['....x.......x...'] },
-    full: {
-      dholBass: ['X.....x.X.....x.', 'X.....x.X...x.x.'],
-      dholCrack: ['..x.X.x...x.X.x.', '..x.X.x...x.X.xo'],
-    },
-    fill: { dholBass: 'X.......X...X.X.', dholCrack: '..x.X.x.XoxoXxXX' },
-  },
-  {
     id: 'dhol_dhamaal',
     name: 'Dhol Dhamaal',
     description: 'Peak-time dhol: a boom on every beat and driving cracks for the biggest moments.',
@@ -71,7 +57,6 @@ export const RHYTHM_STYLES: RhythmStyle[] = [
     full: {
       dholakGe: ['X.x.........x...', 'X.x.......x.x...'],
       dholakNa: ['x...x.x.x.o...x.', 'x...x.x.x.o.o.x.'],
-      tambourine: ['....x.......x...'],
     },
     fill: { dholakGe: 'X.x.X.x.X.x.XxXx', dholakNa: 'x.x.x.xox.xoxoxo' },
   },
@@ -141,7 +126,7 @@ export const getRhythmStyle = (id: RhythmStyleId): RhythmStyle =>
 export const STYLE_FOR_MOOD: Record<MoodId, RhythmStyleId> = {
   normal: 'clap_tambourine',
   party: 'dhol_dhamaal',
-  bhangra: 'dhol_chaal',
+  bhangra: 'dhol_dhamaal',
   chill: 'light_shaker',
   romantic: 'light_shaker',
 };

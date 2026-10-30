@@ -41,16 +41,16 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={() => engine.toggleAutoCueHook()}
-            title="When active, songs auto-cue to the phrase leading into the world's most liked part / viral hook"
+            onClick={() => engine.toggleBestParts()}
+            title="For a dancing crowd: each song plays only its build-up and hook (about 1–1.5 min), then mixes into the next"
             className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-lg border transition-all ${
-              engine.autoCueViralHook
+              engine.bestPartsMode
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/20'
                 : 'bg-white/5 text-slate-400 border-white/10 hover:text-white'
             }`}
           >
             <span>🔥</span>
-            <span>Hook Cue: {engine.autoCueViralHook ? 'ACTIVE' : 'OFF'}</span>
+            <span>Best Parts: {engine.bestPartsMode ? 'ON' : 'OFF'}</span>
           </button>
 
           <div className="flex items-center gap-2">

@@ -1,15 +1,15 @@
 import React from 'react';
-import { History, Music, Plus } from 'lucide-react';
+import { History, Music, Zap } from 'lucide-react';
 import { PlayLogEntry } from '../../types';
 import { areSongsConsecutivelySame, songKeys, isSameSong } from '../../audio/songMatch';
 
 interface PreviouslyPlayedPanelProps {
   entries: PlayLogEntry[]; // newest first
-  onQueueAgain: (entry: PlayLogEntry) => void;
+  onMix: (entry: PlayLogEntry) => void; // play it now, or mix into it if a song is on air
   compact?: boolean;
 }
 
-const HOUR_MS = 60 * 60 * 1000;
+const NO_REPEAT_MS = 3 * 60 * 60 * 1000; // Up Next skips songs played this recently (AudioEngine REPLAY_GAP_MS)
 
 /** "just now", "12 min ago", "2 h ago", "yesterday", "3 days ago" */
 export function timeAgo(timestamp: number, now: number = Date.now()): string {
@@ -22,8 +22,8 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
   return days === 1 ? 'yesterday' : `${days} days ago`;
 }
 
-/** Songs that played recently, newest first. Songs from the last hour won't be auto-queued again. */
-export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onQueueAgain, compact }) => {
+/** Songs that played recently, newest first. Songs from the last 3 hours won't be auto-queued again. */
+export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, compact }) => {
   const now = Date.now();
 
   // RULE: In previously played no 2 consecutive songs can be same
@@ -42,7 +42,7 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
     return list;
   }, [entries]);
 
-  const inLastHour = displayEntries.filter((e) => now - e.playedAt < HOUR_MS).length;
+  const inNoRepeatWindow = displayEntries.filter((e) => now - e.playedAt < NO_REPEAT_MS).length;
 
   return (
     <div
@@ -57,9 +57,9 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
             {displayEntries.length}
           </span>
         </div>
-        {inLastHour > 0 && (
-          <span className="text-[10px] text-slate-400" title="Songs played in the last hour aren't added to Up Next automatically">
-            {inLastHour} in the last hour · no repeats
+        {inNoRepeatWindow > 0 && (
+          <span className="text-[10px] text-slate-400" title="Songs played in the last 3 hours aren't added to Up Next automatically">
+            {inNoRepeatWindow} in the last 3 h · no repeats
           </span>
         )}
       </div>
@@ -71,7 +71,7 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
       ) : (
         <div id="previously-played-list" className={`flex flex-col gap-1.5 overflow-y-auto pr-1 ${compact ? 'max-h-56' : 'max-h-[200px]'}`}>
           {displayEntries.map((entry) => {
-            const recent = now - entry.playedAt < HOUR_MS;
+            const recent = now - entry.playedAt < NO_REPEAT_MS;
             return (
               <div
                 id={`previously-played-item-${entry.id}-${entry.playedAt}`}
@@ -97,12 +97,12 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
                   </div>
                 </div>
                 <button
-                  onClick={() => onQueueAgain(entry)}
-                  className="shrink-0 flex items-center gap-1 text-[9px] font-bold text-slate-300 hover:text-white bg-white/5 hover:bg-white/15 border border-white/10 px-1.5 py-0.5 rounded transition-colors"
-                  title={recent ? 'Played within the last hour — add it to Up Next anyway' : 'Add to Up Next'}
+                  onClick={() => onMix(entry)}
+                  className="shrink-0 flex items-center gap-1 text-[9px] font-bold text-cyan-300 hover:text-black bg-cyan-500/15 hover:bg-cyan-400 border border-cyan-500/30 px-1.5 py-0.5 rounded transition-colors"
+                  title={recent ? 'Played within the last 3 hours — mix into it anyway' : 'Mix into this song now'}
                 >
-                  <Plus className="w-3 h-3" />
-                  Queue
+                  <Zap className="w-3 h-3" />
+                  Mix
                 </button>
               </div>
             );

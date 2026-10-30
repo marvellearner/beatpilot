@@ -1,17 +1,22 @@
-/** YouTube search, audio streaming with an on-disk cache, and replay heatmaps. */
+/**
+ * YouTube search, audio streaming with an on-disk cache, and replay heatmaps.
+ * Song audio never comes from YouTube directly: it comes from a third-party front-end (see
+ * audioSource.ts) and is streamed to the browser while it downloads (see audioDownload.ts).
+ */
 import fs from 'fs';
 import path from 'path';
-import { Ytdl } from '@distube/ytdl-core';
-// @ts-expect-error yt-search has untyped default export
-import ytSearch from 'yt-search';
 import { IncomingMessage, ServerResponse } from 'http';
 import { ROOT_DIR } from './paths';
+import { sendFile } from './sendFile';
+import { resolveAudio, searchVideos } from './audioSource';
+import { getDownload, sendFromDownload } from './audioDownload';
+import { logError } from './logger';
 import { isLocalUrl, localById, savedCopyFor, searchLocal, serveLocalFile, toSearchResult } from './localLibrary';
 
-const ytdl = new Ytdl();
 // Downloaded song audio (compressed, as YouTube sends it; ~4 MB per song), one file per video id
 export const AUDIO_CACHE_DIR = path.join(ROOT_DIR, 'cache', 'audio');
 export const AUDIO_CACHE_MAX_BYTES = 2 * 1024 ** 3; // ~500 songs; least recently played go first
+const STALE_PART_MS = 60 * 60 * 1000;
 
 export function cachedAudioPath(videoId: string): string {
   return path.join(AUDIO_CACHE_DIR, `${videoId}.audio`);
@@ -23,7 +28,14 @@ export async function pruneAudioCache() {
   if (pruning) return;
   pruning = true;
   try {
-    const names = (await fs.promises.readdir(AUDIO_CACHE_DIR)).filter((n) => n.endsWith('.audio'));
+    const all = await fs.promises.readdir(AUDIO_CACHE_DIR);
+    // Downloads cut off by a crash or restart leave .part files behind; an hour old means abandoned
+    for (const n of all.filter((n) => n.endsWith('.part'))) {
+      const full = path.join(AUDIO_CACHE_DIR, n);
+      const s = await fs.promises.stat(full).catch(() => null);
+      if (s && Date.now() - s.mtimeMs > STALE_PART_MS) await fs.promises.unlink(full).catch(() => {});
+    }
+    const names = all.filter((n) => n.endsWith('.audio'));
     const files = await Promise.all(
       names.map(async (n) => {
         const full = path.join(AUDIO_CACHE_DIR, n);
@@ -70,63 +82,46 @@ export function extractYouTubeVideoId(input: string): string | null {
 export function canonicalYouTubeUrl(videoId: string): string {
   return `https://www.youtube.com/watch?v=${videoId}`;
 }
+// Heatmap and Search in-memory caches (with TTL and in-flight deduplication)
+const HEATMAP_CACHE = new Map<string, { peakSeconds: number; intensity: number } | null>();
+const HEATMAP_CACHE_MAX = 1000;
+
+interface SearchCacheEntry {
+  results: SearchResult[];
+  savedAt: number;
+}
+const SEARCH_CACHE = new Map<string, SearchCacheEntry>();
+const SEARCH_CACHE_MAX = 500;
+const SEARCH_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function getCachedSearch(key: string): SearchResult[] | null {
+  const entry = SEARCH_CACHE.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.savedAt > SEARCH_CACHE_TTL_MS) {
+    SEARCH_CACHE.delete(key);
+    return null;
+  }
+  return entry.results;
+}
+
+function setCachedSearch(key: string, results: SearchResult[]) {
+  if (SEARCH_CACHE.size >= SEARCH_CACHE_MAX) {
+    const oldestKey = SEARCH_CACHE.keys().next().value;
+    if (oldestKey) SEARCH_CACHE.delete(oldestKey);
+  }
+  SEARCH_CACHE.set(key, { results, savedAt: Date.now() });
+}
+
+const inFlightSearches = new Map<string, Promise<SearchResult[]>>();
 
 /**
- * Scrapes YouTube audience replay heatmap to extract the world's most liked / replayed moment.
- * Only ever fetches youtube.com, built from a validated video ID.
+ * YouTube's audience replay heatmap ("most replayed" moment). It is only on YouTube's own watch
+ * page, so getting it would mean this laptop loading youtube.com for every song: switched off to
+ * keep YouTube from blocking the IP. The best part is found from the audio instead
+ * (HighlightDetector). Kept as a function so callers and cached results still work.
  */
 export async function extractYouTubeHeatmap(videoId: string): Promise<{ peakSeconds: number; intensity: number } | null> {
-  try {
-    const res = await fetch(canonicalYouTubeUrl(videoId), {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    const html = await res.text();
-    const regex = /\{"startMillis":"(\d+)","durationMillis":"(\d+)","intensityScoreNormalized":([\d\.]+)\}/g;
-    let match;
-    let maxOverall = -1;
-    let peakOverallStart = 0;
-    let maxMusical = -1;
-    let peakMusicalStart = 0;
-    let count = 0;
-
-    while ((match = regex.exec(html)) !== null) {
-      count++;
-      const startMs = parseInt(match[1], 10);
-      const intensity = parseFloat(match[3]);
-
-      if (intensity > maxOverall) {
-        maxOverall = intensity;
-        peakOverallStart = startMs;
-      }
-
-      // Ignore first 15 seconds to avoid video-start skew
-      if (startMs >= 15000 && intensity > maxMusical) {
-        maxMusical = intensity;
-        peakMusicalStart = startMs;
-      }
-    }
-
-    if (count > 0) {
-      const selectedStart = (peakMusicalStart > 0 && maxMusical > 0.35)
-        ? peakMusicalStart
-        : peakOverallStart;
-      const intensity = (peakMusicalStart > 0 && maxMusical > 0.35)
-        ? maxMusical
-        : maxOverall;
-
-      return {
-        peakSeconds: Math.round((selectedStart / 1000) * 10) / 10,
-        intensity: Math.min(1.0, Math.round(intensity * 100) / 100),
-      };
-    }
-  } catch (err) {
-    console.error('Heatmap scrape error:', err);
-  }
-  return null;
+  return HEATMAP_CACHE.get(videoId) ?? null;
 }
 
 export function formatDuration(sec: number): string {
@@ -158,54 +153,96 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
     const videoId = extractYouTubeVideoId(query);
 
     if (videoId) {
+      const cacheKey = `url:${videoId}`;
+      const cached = getCachedSearch(cacheKey);
+      if (cached) {
+        res.end(JSON.stringify({ results: cached }));
+        return;
+      }
+
       const cleanUrl = canonicalYouTubeUrl(videoId);
-      const [info, heatmap] = await Promise.all([
-        ytdl.getInfo(cleanUrl),
-        extractYouTubeHeatmap(videoId),
-      ]);
+      const [info, heatmap] = await Promise.all([resolveAudio(videoId), extractYouTubeHeatmap(videoId)]);
 
       const result: SearchResult = {
-        title: info.videoDetails.title,
+        title: info.title,
         url: cleanUrl,
-        author: info.videoDetails.author.name,
-        duration: Number(info.videoDetails.lengthSeconds) || 180,
-        thumbnail: info.videoDetails.thumbnails[0]?.url || '',
-        timestamp: formatDuration(Number(info.videoDetails.lengthSeconds) || 180),
+        author: info.author,
+        duration: info.lengthSeconds || 180,
+        thumbnail: info.thumbnail,
+        timestamp: formatDuration(info.lengthSeconds || 180),
         highlightTime: heatmap?.peakSeconds,
         highlightIntensity: heatmap?.intensity,
       };
+      setCachedSearch(cacheKey, [result]);
       res.end(JSON.stringify({ results: [result] }));
       return;
     }
 
-    // Otherwise, perform title search using yt-search
-    const limit = Math.min(10, Math.max(1, Number(url.searchParams.get('limit')) || 6));
-    const searchResults = await ytSearch(query);
-    const videos: SearchResult[] = (searchResults.videos || []).slice(0, limit).map((v: { title: string; url: string; author: { name: string }; seconds: number; thumbnail: string; timestamp: string }) => ({
-      title: v.title,
-      url: v.url,
-      author: v.author?.name || 'Unknown Artist',
-      duration: v.seconds || 180,
-      thumbnail: v.thumbnail || '',
-      timestamp: v.timestamp || '',
-    }));
-
-    // The client plays the top result, so give it the "most replayed" hook too
-    const topId = videos[0] ? extractYouTubeVideoId(videos[0].url) : null;
-    if (topId) {
-      const heatmap = await extractYouTubeHeatmap(topId);
-      videos[0].highlightTime = heatmap?.peakSeconds;
-      videos[0].highlightIntensity = heatmap?.intensity;
+    // Otherwise, perform title search using yt-search with caching & fast in-flight deduplication
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
+    const cacheKey = `${query.toLowerCase().trim()}:${limit}`;
+    const cachedVideos = getCachedSearch(cacheKey);
+    if (cachedVideos) {
+      res.end(JSON.stringify({ results: [...local, ...cachedVideos.filter((v) => !local.some((l) => l.title === v.title))] }));
+      return;
     }
+
+    // If client disconnected before YouTube fetch, abort early
+    if (req.destroyed || req.socket?.destroyed) return;
+
+    let searchPromise = inFlightSearches.get(cacheKey);
+    if (!searchPromise) {
+      searchPromise = (async () => {
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Search timed out after 15s')), 15_000)
+        );
+        const hits = await Promise.race([searchVideos(query), timeoutPromise]);
+        const videos: SearchResult[] = hits.slice(0, limit).map((v) => ({
+          title: v.title,
+          url: canonicalYouTubeUrl(v.videoId),
+          author: v.author || 'Unknown Artist',
+          duration: v.lengthSeconds || 180,
+          thumbnail: v.thumbnail,
+          timestamp: formatDuration(v.lengthSeconds || 180),
+        }));
+
+        // Non-blocking heatmap: if cached, attach immediately.
+        // If not cached, resolve in background so it's ready when played, without delaying search response!
+        const topId = videos[0] ? extractYouTubeVideoId(videos[0].url) : null;
+        if (topId) {
+          const cachedHeatmap = HEATMAP_CACHE.get(topId);
+          if (cachedHeatmap) {
+            videos[0].highlightTime = cachedHeatmap.peakSeconds;
+            videos[0].highlightIntensity = cachedHeatmap.intensity;
+          } else {
+            void extractYouTubeHeatmap(topId).then((hm) => {
+              if (hm && videos[0]) {
+                videos[0].highlightTime = hm.peakSeconds;
+                videos[0].highlightIntensity = hm.intensity;
+              }
+            });
+          }
+        }
+
+        setCachedSearch(cacheKey, videos);
+        return videos;
+      })().finally(() => {
+        inFlightSearches.delete(cacheKey);
+      });
+      inFlightSearches.set(cacheKey, searchPromise);
+    }
+
+    const videos = await searchPromise;
+    if (req.destroyed || req.socket?.destroyed) return;
 
     res.end(JSON.stringify({ results: [...local, ...videos.filter((v) => !local.some((l) => l.title === v.title))] }));
   } catch (err: unknown) {
     if (local.length) {
-      // Offline (or YouTube failing): the local matches still answer
+      // Offline (or YouTube failing/timing out): the local matches still answer instantly
       res.end(JSON.stringify({ results: local, offline: true }));
       return;
     }
-    console.error('Search error:', err);
+    logError('search', err);
     res.statusCode = 500;
     res.end(JSON.stringify({ error: 'Search failed', details: String(err) }));
   }
@@ -246,7 +283,7 @@ export async function handleStream(req: IncomingMessage, res: ServerResponse, ur
   const requested = url.searchParams.get('url') || '';
   if (isLocalUrl(requested)) {
     const track = localById(requested.slice('local:'.length));
-    if (track) return serveLocalFile(res, track);
+    if (track) return serveLocalFile(req, res, track);
     res.statusCode = 404;
     res.end(JSON.stringify({ error: 'This local song is no longer in the library' }));
     return;
@@ -259,88 +296,47 @@ export async function handleStream(req: IncomingMessage, res: ServerResponse, ur
   }
 
   try {
-    res.setHeader('Content-Type', 'audio/mp4');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-cache');
-
-    // Already on disk: serve it (instant, works offline) and mark it recently used
+    // Already on disk: serve it (instant, works offline, seekable) and mark it recently used
     const cachedFile = cachedAudioPath(videoId);
     const cached = await fs.promises.stat(cachedFile).catch(() => null);
     if (cached?.isFile()) {
       const now = new Date();
       fs.promises.utimes(cachedFile, now, now).catch(() => {});
-      res.setHeader('Content-Length', String(cached.size));
-      res.setHeader('X-Audio-Cache', 'hit');
-      fs.createReadStream(cachedFile).pipe(res);
-      return;
+      return sendFile(req, res, cachedFile, sniffAudioType(cachedFile), { 'Cache-Control': 'no-cache', 'X-Audio-Cache': 'hit' });
     }
     // A most-played song saved for offline: play that copy (instant, no internet needed)
     const saved = savedCopyFor(requested);
-    if (saved) return serveLocalFile(res, saved);
-    res.setHeader('X-Audio-Cache', 'miss');
+    if (saved) return serveLocalFile(req, res, saved);
 
-    // Download audio stream using ytdl
-    const stream = ytdl.download(canonicalYouTubeUrl(videoId), {
-      filter: { hasAudio: true, hasVideo: false },
-      quality: 'highestaudio',
-    });
-
-    // Save a copy while streaming. It is written under a temporary name and only
-    // renamed into the cache once complete, so a broken download is never kept.
+    // Not on this laptop: stream it from the third-party source while it downloads into the cache
     await fs.promises.mkdir(AUDIO_CACHE_DIR, { recursive: true });
-    const partFile = `${cachedFile}.${process.pid}-${Date.now()}.part`;
-    const file = fs.createWriteStream(partFile);
-    let downloaded = false;
-    let failed = false;
-    const discardPart = () => {
-      file.destroy();
-      fs.promises.unlink(partFile).catch(() => {});
-    };
-    stream.on('end', () => {
-      downloaded = !failed;
-    });
-    file.on('finish', () => {
-      if (!downloaded) return discardPart();
-      fs.promises
-        .rename(partFile, cachedFile)
-        .then(() => pruneAudioCache())
-        .catch(() => discardPart());
-    });
-    file.on('error', (err) => {
-      console.warn('Could not save audio to the cache:', err);
-      failed = true;
-      discardPart();
-    });
-
-    // Stop downloading if the browser goes away (tab closed, page reloaded)
-    res.on('close', () => {
-      if (!downloaded) {
-        failed = true;
-        stream.destroy();
-        discardPart();
-      }
-    });
-
-    stream.on('error', (streamErr) => {
-      console.error('Audio stream error:', streamErr);
-      failed = true;
-      discardPart();
-      if (!res.headersSent) {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: 'Stream error', details: String(streamErr) }));
-      }
-    });
-
-    stream.pipe(res);
-    stream.pipe(file);
+    const dl = await getDownload(videoId, cachedFile, () => void pruneAudioCache());
+    await sendFromDownload(req, res, dl, { 'Cache-Control': 'no-cache', 'X-Audio-Cache': 'stream' });
   } catch (err: unknown) {
-    console.error('Stream setup error:', err);
+    logError('stream', err);
     if (!res.headersSent) {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'Stream setup failed', details: String(err) }));
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Could not get this song from the audio source', details: String(err) }));
+    } else {
+      res.destroy();
     }
   }
   return;
+}
+
+/** YouTube audio is MP4 (AAC) or WebM (Opus); the cache file doesn't say which, its first bytes do. */
+function sniffAudioType(file: string): string {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(8);
+    fs.readSync(fd, head, 0, 8, 0);
+    fs.closeSync(fd);
+    if (head.readUInt32BE(0) === 0x1a45dfa3) return 'audio/webm';
+  } catch {
+    // unreadable: sendFile reports it
+  }
+  return 'audio/mp4';
 }
 
 // 4. Query YouTube Audience Replay Heatmap for any URL
@@ -357,7 +353,7 @@ export async function handleHeatmap(req: IncomingMessage, res: ServerResponse, u
     const heatmap = await extractYouTubeHeatmap(videoId);
     res.end(JSON.stringify({ heatmap }));
   } catch (err) {
-    console.error('Heatmap query error:', err);
+    logError('heatmap', err);
     res.statusCode = 500;
     res.end(JSON.stringify({ error: 'Heatmap query failed', details: String(err) }));
   }

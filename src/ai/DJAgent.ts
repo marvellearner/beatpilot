@@ -75,7 +75,7 @@ const SONG_ID_JSON_SCHEMA = {
 const RHYTHM_KEYWORDS: Array<[RegExp, RhythmStyleId]> = [
   [/\bdholak|keherwa|sangeet\b/, 'dholak_keherwa'],
   [/\bdhamaal|peak|hard|heavy\b/, 'dhol_dhamaal'],
-  [/\bdhol|bhangra|chaal|punjabi\b/, 'dhol_chaal'],
+  [/\bdhol|bhangra|punjabi\b/, 'dhol_dhamaal'],
   [/\bkick|four on the floor|4 on the floor\b/, 'club_drive'],
   [/\bhouse|club|edm|electronic\b/, 'club_tops'],
   [/\bafro|amapiano|latin|reggaeton|conga\b/, 'afro_groove'],
@@ -221,15 +221,16 @@ Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
     title: string;
     artist: string;
     bpm?: number;
+    taste?: string; // tasteForPrompt(): the listener's artists, loved and just-played songs
   }): Promise<MoodReadingResult> {
     const prompt = `You are an elite party AI DJ with deep musical psychology and genre expertise.
 A user just searched for and played this song:
 TRACK: "${track.title}" by "${track.artist || 'Unknown'}"${track.bpm ? ` (${Math.round(track.bpm)} BPM)` : ''}.
-
+${track.taste ? `\n${track.taste}\nFit the picks to this listener's taste as well as the mood, and never repeat a song they just played.\n` : ''}
 TASK:
 1. READ THE USER'S MOOD: Analyze the musical vibe, lyrical emotion, cultural context, danceability, and energy of this song to determine what mood the user is in.
 2. RECOMMEND TOP 5 SONGS: Pick the 5 best, most musically compatible songs that match this exact mood and momentum to play immediately next in the DJ set.
-Do NOT suggest the same song that is currently playing. Provide 5 distinct, high-quality songs matching the vibe. All songs MUST be standard radio length (under 5 minutes, avoid long 8+ minute extended mixes or compilations).
+Do NOT suggest the same song that is currently playing. Only well-known hits most people at a party would recognise: no new releases or obscure songs. Provide 5 distinct, high-quality songs matching the vibe. All songs MUST be standard radio length (under 5 minutes, avoid long 8+ minute extended mixes or compilations). NEVER suggest 8D audio, 8D versions, or mashup songs under any circumstances. Suggest only original songs or official versions.
 
 Reply ONLY with valid JSON in this exact structure:
 {
@@ -251,9 +252,12 @@ Reply ONLY with valid JSON in this exact structure:
       if (res && res.data) {
         const parsed = MoodReadingSchema.safeParse(res.data);
         if (parsed.success && parsed.data.top5Songs.length >= 3) {
+          const filteredSongs = parsed.data.top5Songs
+            .filter((s) => !/\b(8|16|24)[-_ ]*d\b/i.test(`${s.title} ${s.artist} ${s.searchPrompt || ''}`) && !/\bmash[-_ ]*up\b/i.test(`${s.title} ${s.artist} ${s.searchPrompt || ''}`))
+            .slice(0, 5);
           return {
             ...parsed.data,
-            top5Songs: parsed.data.top5Songs.slice(0, 5),
+            top5Songs: filteredSongs,
             source: 'ai',
           };
         }

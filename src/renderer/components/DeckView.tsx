@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 import { VirtualDeck } from '../../audio/VirtualDeck';
 import type { AudioEngine } from '../../audio/AudioEngine';
 import { shiftKey, getCamelotDetails, getHarmonicCompatibility } from '../../audio/KeyDetector';
+import { isStrictStartSong } from '../../audio/songMatch';
 import { DeckId } from '../../types';
 import { WaveformCanvas } from './WaveformCanvas';
 import { Play, Pause, FolderPlus, Disc3, RotateCcw, Square } from 'lucide-react';
@@ -94,6 +95,15 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
                   <span>{formatTime(track.musicStartTime)}</span>
                 </span>
               )}
+              {isStrictStartSong(track) && (
+                <span
+                  title="Exception: strictly plays from the starting 0:00 without skipping intro build-up"
+                  className="flex items-center gap-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full text-[10px] font-bold"
+                >
+                  <span>🎯</span>
+                  <span>Start (0:00)</span>
+                </span>
+              )}
               {heardKey && keyDetails && (
                 <span
                   className="flex items-center gap-1 bg-purple-500/20 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold shrink-0"
@@ -141,6 +151,8 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
         color={primaryColor}
         highlightTime={track?.highlightTime}
         cueInTime={track?.cueInTime}
+        loop={state.loop}
+        loopInTime={state.loopInTime}
         onSeek={(time) => deck.seek(time)}
       />
 
@@ -237,6 +249,52 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
           </div>
         ))}
         <div className="flex items-center gap-1 pl-1.5 border-l border-white/10">
+          {/* Manual Loop Controls (Virtual DJ Style) */}
+          <button
+            id={`deck-${deckId.toLowerCase()}-loop-in-btn`}
+            onClick={() => engine.setLoopIn(deckId)}
+            disabled={!state.isPlaying}
+            className={`px-2 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all ${
+              state.loopInTime !== null && !state.loop
+                ? 'bg-amber-500 text-black border-amber-400 animate-pulse'
+                : state.loop
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white'
+            }`}
+            title="Set Loop IN (Start) point (snaps to beat)"
+          >
+            IN
+          </button>
+          <button
+            id={`deck-${deckId.toLowerCase()}-loop-out-btn`}
+            onClick={() => engine.setLoopOut(deckId)}
+            disabled={!state.isPlaying}
+            className={`px-2 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all ${
+              state.loop
+                ? 'bg-emerald-500 text-black border-emerald-400 shadow-sm shadow-emerald-500/40'
+                : state.loopInTime !== null
+                ? 'bg-amber-500/20 text-amber-300 border-amber-400 animate-bounce'
+                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white'
+            }`}
+            title={state.loop ? 'Exit loop (Click to release song)' : 'Set Loop OUT (End) point and start looping'}
+          >
+            OUT
+          </button>
+          <button
+            id={`deck-${deckId.toLowerCase()}-reloop-btn`}
+            onClick={() => engine.reloop(deckId)}
+            disabled={!state.loop && !state.hasLastLoop}
+            className={`px-2 py-1.5 rounded-lg text-[10px] font-mono font-bold border transition-all disabled:opacity-30 ${
+              state.loop
+                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                : 'bg-white/5 border-white/10 text-slate-300 hover:text-white'
+            }`}
+            title={state.loop ? 'Exit current loop' : 'Reloop (re-enter previous loop)'}
+          >
+            {state.loop ? 'EXIT' : 'RELOOP'}
+          </button>
+
+          {/* Quick Beat Loops */}
           {LOOP_BARS.map((bars) => (
             <button
               key={bars}

@@ -9,6 +9,8 @@ interface WaveformCanvasProps {
   color: string;
   highlightTime?: number;
   cueInTime?: number;
+  loop?: { start: number; end: number } | null;
+  loopInTime?: number | null;
   onSeek: (time: number) => void;
   id?: string; // DOM id of the waveform container (unique per deck)
 }
@@ -23,6 +25,8 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
   color,
   highlightTime,
   cueInTime,
+  loop,
+  loopInTime,
   onSeek,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -112,6 +116,42 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
         ctx.lineTo(cueX, height);
         ctx.stroke();
         ctx.setLineDash([]);
+      }
+
+      // Draw Loop Region (Virtual DJ style)
+      if (duration > 0 && loop && loop.end > loop.start) {
+        const loopStartX = (loop.start / duration) * width;
+        const loopEndX = (loop.end / duration) * width;
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.22)';
+        ctx.fillRect(loopStartX, 0, Math.max(2, loopEndX - loopStartX), height);
+
+        ctx.strokeStyle = '#34d399';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(loopStartX, 0);
+        ctx.lineTo(loopStartX, height);
+        ctx.moveTo(loopEndX, 0);
+        ctx.lineTo(loopEndX, height);
+        ctx.stroke();
+
+        ctx.fillStyle = '#34d399';
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('IN', loopStartX + 3, 10);
+        ctx.textAlign = 'right';
+        ctx.fillText('OUT', loopEndX - 3, 10);
+      } else if (duration > 0 && loopInTime !== undefined && loopInTime !== null && loopInTime > 0) {
+        const inX = (loopInTime / duration) * width;
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(inX, 0);
+        ctx.lineTo(inX, height);
+        ctx.stroke();
+        ctx.fillStyle = '#f59e0b';
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('IN', inX + 3, 10);
       }
 
       // Draw Playhead Marker

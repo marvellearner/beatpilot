@@ -12,8 +12,14 @@
  * Pair: the exit and the entry are chosen together, so the stretches that overlap in the blend
  * don't both carry vocals (two singers at once is the clearest sign of a bad mix).
  *
+ * Best Parts mode (MIXING_RULES.md "Best Parts Mode") narrows both: the exit comes no earlier
+ * than `earliestExit` (after the outgoing hook has played) and the entry lies in `entryRange`
+ * (the build-up just before the incoming hook) instead of the intro.
+ *
  * All times are in each song's own seconds. Rules: DJ_KNOWLEDGE_AND_MIXING_RULES.md §5, §7.
  */
+
+import { isStrictStartSong } from './songMatch';
 
 export interface EnergyProfile {
   rate: number; // frames per second
@@ -28,6 +34,9 @@ export interface MixSongInfo {
   duration: number;
   hookTime?: number;
   musicStartTime?: number; // point where music starts, skipping conversation/skit
+  title?: string;
+  artist?: string;
+  isStrictStart?: boolean;
 }
 
 export interface MixOption {
@@ -141,6 +150,8 @@ export function planMix(params: {
   lookAheadSeconds: number; // how far ahead the exit may be (song seconds)
   minLeadSeconds: number; // earliest exit, so the mix can be scheduled precisely
   preferIncomingHook: boolean; // land the incoming hook at the end of the blend
+  earliestExit?: number; // Best Parts: don't leave before this (outgoing song seconds)
+  entryRange?: { from: number; to: number }; // Best Parts: enter in this build-up (incoming song seconds)
 }): MixPlan | null {
   const { out, inc, outPosition, blendBeats } = params;
   const outBlend = (blendBeats * 60) / out.bpm;
@@ -153,7 +164,10 @@ export function planMix(params: {
   const outMidMean = songMean(out.profile.mid) || 1;
   const outShare = outMidMean / outMean;
   const exitLatest = Math.min(outPosition + params.lookAheadSeconds, out.duration - outBlend - 0.5);
-  const exits = barStarts(out, outPosition + params.minLeadSeconds, exitLatest);
+  const exitFrom = outPosition + params.minLeadSeconds;
+  let exits = barStarts(out, Math.max(exitFrom, params.earliestExit ?? 0), exitLatest);
+  // The window may have closed (e.g. no song was ready in time): then the next good bar from here
+  if (exits.length === 0 && params.earliestExit !== undefined) exits = barStarts(out, exitFrom, exitLatest);
   if (exits.length === 0) return null;
 
   const exitOptions: MixOption[] = [];
@@ -195,17 +209,23 @@ export function planMix(params: {
   const incMean = songMean(inc.profile.full) || 1;
   const incMidMean = songMean(inc.profile.mid) || 1;
   const incShare = incMidMean / incMean;
-  const minEntry = inc.musicStartTime && inc.musicStartTime > 0 ? inc.musicStartTime : 0;
+  const isStrict = isStrictStartSong(inc) || inc.isStrictStart === true;
+  const minEntry = isStrict ? 0 : (inc.musicStartTime && inc.musicStartTime > 0 ? inc.musicStartTime : 0);
+  const range = isStrict ? { from: 0, to: 0 } : params.entryRange;
   // Never start from hook because build up is also important!
-  // Entry point must stay within the intro/build-up (first 4-8 bars of music start)
+  // Entry point must stay within the intro/build-up (first 4-8 bars of music start),
+  // or in Best Parts mode within the build-up before the hook (the range already stops short of it)
   const maxIntroLimit = inc.hookTime ? Math.max(minEntry, inc.hookTime - 20) : minEntry + 16 * incBar;
-  const entryLatest = Math.min(minEntry + 8 * incBar, maxIntroLimit, inc.duration * 0.25);
-  const entries = barStarts(inc, minEntry, Math.max(minEntry, entryLatest));
+  const entryFirst = range ? Math.max(minEntry, range.from) : minEntry;
+  const entryLatest = range ? Math.min(range.to, inc.duration - incBlend - 1) : Math.min(minEntry + 8 * incBar, maxIntroLimit, inc.duration * 0.25);
+  const entries = barStarts(inc, entryFirst, Math.max(entryFirst, entryLatest));
   const entryOptions: MixOption[] = [];
   for (const candidate of entries) {
     const e = candidate.time;
     // Don't start at or near the hook - the natural musical buildup must be preserved
-    if (inc.hookTime && e >= inc.hookTime - 8) continue;
+    if (!range && inc.hookTime && e >= inc.hookTime - 8) continue;
+    // Best Parts: the blend should be over when the hook hits, so it isn't heard under the old song
+    const hookInBlend = range && inc.hookTime !== undefined && e + incBlend > inc.hookTime;
     const avg = (from: number, to: number) => average(inc.profile.full, inc.profile.rate, from, to);
     const during = avg(e, e + incBlend);
     const afterBlend = avg(e + incBlend, e + incBlend + 2 * incBar);
@@ -218,16 +238,23 @@ export function planMix(params: {
       1.5 * dropAtEnd +
       0.5 * calm -
       0.5 * Math.max(0, vocals - 1) -
+      (hookInBlend ? 1.5 : 0) -
       0.005 * e;
-    const why =
-      calm > 0.2
+    const why = range && inc.hookTime !== undefined
+      ? `${Math.round((inc.hookTime - e) / incBar)} bars before its hook (best part)`
+      : calm > 0.2
         ? 'on a calm intro phrase (allowing build-up)'
         : dropAtEnd > 0.3
           ? 'on an intro rise'
           : 'on a phrase start (intro build-up)';
     entryOptions.push({ time: e, why, score, vocals: vocalActivity(inc.profile, e, e + incBlend, incShare) });
   }
-  if (entryOptions.length === 0) entryOptions.push({ time: minEntry, why: 'from the music start (full build-up)', score: 0 });
+  if (isStrict) {
+    entryOptions.length = 0;
+    entryOptions.push({ time: 0, why: 'strictly from the beginning (0:00) as requested', score: 10 });
+  } else if (entryOptions.length === 0) {
+    entryOptions.push({ time: entryFirst, why: range ? 'at the build-up to its hook (best part)' : 'from the music start (full build-up)', score: 0 });
+  }
 
   // Best pair: each side's own score, minus the penalty when both sing during the blend
   let best = { exit: exitOptions[0], entry: entryOptions[0], total: -Infinity };

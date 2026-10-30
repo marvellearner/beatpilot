@@ -117,3 +117,55 @@ export function areSongsConsecutivelySame(a?: SongRef | null, b?: SongRef | null
   return isSameSong(songKeys(a), songKeys(b));
 }
 
+/**
+ * Exception songs that must ALWAYS strictly be played from the very beginning (0:00).
+ * Specifically: "Ping Pong Tremor" mashup and festival anthems "Ping Pong" (Armin van Buuren) /
+ * "Tremor" (Martin Garrix & Dimitri Vegas, Like Mike) where the iconic intro (such as the bouncing
+ * ping pong ball clicks) build the entire track energy and must strictly never be skipped or cued mid-song.
+ */
+export function isStrictStartSong(song?: { title?: string; artist?: string; url?: string } | null): boolean {
+  if (!song) return false;
+  const text = `${song.title || ''} ${song.artist || ''} ${song.url || ''}`.toLowerCase();
+  if (!text.trim()) return false;
+
+  // "ping pong" variations (e.g. "ping pong", "ping-pong", "ping_pong")
+  const hasPingPong = /ping\s*[-_ ]*\s*pong/i.test(text);
+  // "tremor" variations
+  const hasTremor = /\btremor\b/i.test(text);
+
+  return (hasPingPong && hasTremor) || hasPingPong || hasTremor;
+}
+
+/**
+ * Detects 8D audio / panning songs (e.g. "8D AUDIO", "8D Version", "8D Remix", "Use Headphones (8D)").
+ * These are strictly excluded from automated queueing and recommendations because artificial
+ * phase shifts and stereo panning hollow out audio on party / club speakers.
+ */
+export function is8dSong(song?: { title?: string; artist?: string; url?: string } | null): boolean {
+  if (!song) return false;
+  const text = `${song.title || ''} ${song.artist || ''} ${song.url || ''}`.toLowerCase();
+  if (!text.trim()) return false;
+  // Matches "8D", "8-D", "8 D", "(8D)", "[8D AUDIO]", "8D Audio", "16D", etc.
+  return /\b(8|16|24)[-_ ]*d\b/i.test(text);
+}
+
+/**
+ * Detects mashup songs (e.g. "Mashup", "Mash-up", "Mash Up").
+ * Mashup tracks are strictly excluded from automated queueing and recommendations on the engine's own accord.
+ */
+export function isMashupSong(song?: { title?: string; artist?: string; url?: string } | null): boolean {
+  if (!song) return false;
+  const text = `${song.title || ''} ${song.artist || ''} ${song.url || ''}`.toLowerCase();
+  if (!text.trim()) return false;
+  return /\bmash[-_ ]*up\b/i.test(text);
+}
+
+/**
+ * Checks whether a track is an 8D or mashup song.
+ * Neither should ever be suggested or added to the Up Next queue automatically.
+ */
+export function is8dOrMashupSong(song?: { title?: string; artist?: string; url?: string } | null): boolean {
+  return is8dSong(song) || isMashupSong(song);
+}
+
+

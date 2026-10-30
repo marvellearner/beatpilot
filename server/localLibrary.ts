@@ -21,9 +21,12 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { parseFile } from 'music-metadata';
 import { ROOT_DIR, DATA_DIR } from './paths';
 import { parseJsonBody } from './http';
+import { writeJsonAtomic } from './jsonFile';
+import { sendFile } from './sendFile';
+import { audioInstances } from './audioSource';
 import { PLAY_HISTORY_FILE, BANNED_SONGS_FILE } from './library';
 import { cachedAudioPath, extractYouTubeVideoId, formatDuration, type SearchResult } from './youtube';
-import { guessLanguage } from '../src/audio/rhythm/rhythmPlan';
+import { guessLanguage } from '../shared/songLanguage';
 
 export const MUSIC_DIR = path.join(ROOT_DIR, 'music');
 const UPLOADS_DIR = path.join(MUSIC_DIR, 'Uploads');
@@ -33,6 +36,7 @@ const AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.o
 const SAVE_AFTER_PLAYS = 3; // a song played this often is kept as an MP3
 const MAX_FILES = 20_000;
 const MAX_UPLOAD_BYTES = 300 * 1024 ** 2;
+const STALE_MS = 60 * 60 * 1000; // a .part or .lock file this old was left by a crash
 
 interface LocalTrack {
   id: string;
@@ -65,8 +69,7 @@ function loadIndex(): LibraryIndex {
 
 function saveIndex() {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(INDEX_FILE, JSON.stringify(index), 'utf-8');
+    writeJsonAtomic(INDEX_FILE, index, false);
   } catch (err) {
     console.warn('Could not save the local library index:', err);
   }
@@ -106,6 +109,7 @@ export function scanLibrary(): Promise<void> {
   if (scanning) return scanning;
   scanning = (async () => {
     await fs.promises.mkdir(MUSIC_DIR, { recursive: true });
+    await cleanStaleFiles();
     const files: string[] = [];
     for (const dir of [MUSIC_DIR, ...index.folders]) await walk(dir, files);
     const known = new Map(index.tracks.map((t) => [t.file, t]));
@@ -206,7 +210,8 @@ let onlineCheck: { at: number; online: boolean } | null = null;
 export async function isOnline(): Promise<boolean> {
   if (onlineCheck && Date.now() - onlineCheck.at < 30_000) return onlineCheck.online;
   const online = await Promise.race([
-    dns.promises.lookup('www.youtube.com').then(() => true, () => false),
+    // Online = the audio source's host resolves (songs come from there, not from YouTube)
+    dns.promises.lookup(new URL(audioInstances()[0]?.base ?? 'https://example.com').hostname).then(() => true, () => false),
     new Promise<boolean>((r) => setTimeout(() => r(false), 2000)),
   ]);
   onlineCheck = { at: Date.now(), online };
@@ -319,11 +324,12 @@ async function processSaveQueue() {
 }
 
 function toMp3(source: string, target: string, title: string, artist: string): Promise<boolean> {
-  const part = `${target}.part.mp3`;
+  // No audio extension, so a crash can't leave a half MP3 that the scanner picks up
+  const part = `${target}.part`;
   return new Promise((resolve) => {
     const proc = spawn(
       'ffmpeg',
-      ['-v', 'error', '-y', '-i', source, '-vn', '-codec:a', 'libmp3lame', '-b:a', '192k', '-id3v2_version', '3', '-metadata', `title=${title}`, '-metadata', `artist=${artist}`, part],
+      ['-v', 'error', '-y', '-i', source, '-vn', '-codec:a', 'libmp3lame', '-b:a', '192k', '-id3v2_version', '3', '-metadata', `title=${title}`, '-metadata', `artist=${artist}`, '-f', 'mp3', part],
       { stdio: 'ignore' }
     );
     proc.on('error', () => resolve(false));
@@ -373,17 +379,29 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 /** Sends a local file (the browser decodes it like any downloaded song). */
-export async function serveLocalFile(res: ServerResponse, track: LocalTrack) {
-  const stat = await fs.promises.stat(track.file).catch(() => null);
-  if (!stat?.isFile()) {
-    res.statusCode = 404;
-    res.end(JSON.stringify({ error: 'The local file is no longer there. Rescan the library.' }));
-    return;
+export function serveLocalFile(req: IncomingMessage, res: ServerResponse, track: LocalTrack) {
+  const type = CONTENT_TYPES[path.extname(track.file).toLowerCase()] ?? 'application/octet-stream';
+  return sendFile(req, res, track.file, type, { 'X-Audio-Cache': 'local' });
+}
+
+/** Removes .part and .lock files a crash left behind in the folders this app writes to. */
+async function cleanStaleFiles() {
+  for (const dir of [UPLOADS_DIR, SAVED_DIR]) {
+    const names = await fs.promises.readdir(dir).catch(() => [] as string[]);
+    for (const n of names.filter((n) => n.endsWith('.part') || n.endsWith('.lock'))) {
+      const full = path.join(dir, n);
+      const s = await fs.promises.stat(full).catch(() => null);
+      if (s && Date.now() - s.mtimeMs > STALE_MS) await fs.promises.unlink(full).catch(() => {});
+    }
   }
-  res.setHeader('Content-Type', CONTENT_TYPES[path.extname(track.file).toLowerCase()] ?? 'application/octet-stream');
-  res.setHeader('Content-Length', String(stat.size));
-  res.setHeader('X-Audio-Cache', 'local');
-  fs.createReadStream(track.file).pipe(res);
+}
+
+/** A file name not taken yet: "Song.mp3", else "Song (2).mp3", "Song (3).mp3", ... */
+async function freeName(dir: string, base: string, ext: string): Promise<string> {
+  for (let i = 1; ; i++) {
+    const candidate = path.join(dir, i === 1 ? `${base}${ext}` : `${base} (${i})${ext}`);
+    if (!(await fs.promises.stat(candidate).catch(() => null))) return candidate;
+  }
 }
 
 /** GET /api/local/library, POST /api/local/rescan, POST|DELETE /api/local/folders, POST /api/local/upload */
@@ -441,8 +459,8 @@ export async function handleLocalLibrary(req: IncomingMessage, res: ServerRespon
       return true;
     }
     await fs.promises.mkdir(UPLOADS_DIR, { recursive: true });
-    const target = path.join(UPLOADS_DIR, safeName(path.basename(name, ext)) + ext);
-    const part = `${target}.part`;
+    // Unique per upload, so two uploads at once never share a temp file
+    const part = path.join(UPLOADS_DIR, `.upload-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.part`);
     let bytes = 0;
     const ok = await new Promise<boolean>((resolve) => {
       const out = fs.createWriteStream(part);
@@ -464,6 +482,8 @@ export async function handleLocalLibrary(req: IncomingMessage, res: ServerRespon
       res.end(JSON.stringify({ error: `Upload failed or too large (max ${MAX_UPLOAD_BYTES / 1024 ** 2} MB): ${name}` }));
       return true;
     }
+    // Named after the upload finishes, so a song already there with that name is never overwritten
+    const target = await freeName(UPLOADS_DIR, safeName(path.basename(name, ext)), ext);
     await fs.promises.rename(part, target);
     await scanLibrary();
     res.end(JSON.stringify({ added: path.basename(target), ...(await summary()) }));

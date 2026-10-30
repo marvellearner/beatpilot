@@ -94,4 +94,56 @@ export class DeckCues {
     if (onAir) this.deps.onAirLoopStarted(bars, track.title);
     this.deps.onChange();
   }
+
+  /** Sets the loop IN point at current playback position (quantized to beat). */
+  public setLoopIn(deckId: DeckId) {
+    const deck = this.deps.deck(deckId);
+    if (!deck.getTrack()) return;
+    deck.setLoopIn();
+    this.deps.onChange();
+  }
+
+  /** Sets the loop OUT point and starts seamless looping until DJ exits. */
+  public setLoopOut(deckId: DeckId) {
+    const deck = this.deps.deck(deckId);
+    const track = deck.getTrack();
+    if (!track) return;
+    const wasLooping = !!deck.getLoop();
+    const ok = deck.setLoopOut();
+    const onAir = this.deps.isOnAir(deck);
+    if (wasLooping && !deck.getLoop()) {
+      if (onAir) this.deps.onAirLoopEnded();
+    } else if (ok && deck.getLoop()) {
+      const bars = Math.max(1, this.getLoopBars(deckId));
+      if (onAir) this.deps.onAirLoopStarted(bars, track.title);
+    }
+    this.deps.onChange();
+  }
+
+  /** Leaves the active loop and plays on normally. */
+  public exitLoop(deckId: DeckId) {
+    const deck = this.deps.deck(deckId);
+    if (!deck.getLoop()) return;
+    deck.exitLoop();
+    if (this.deps.isOnAir(deck)) this.deps.onAirLoopEnded();
+    this.deps.onChange();
+  }
+
+  /** Toggles loop exit or re-enters previous loop. */
+  public reloop(deckId: DeckId) {
+    const deck = this.deps.deck(deckId);
+    const track = deck.getTrack();
+    if (!track) return;
+    const wasLooping = !!deck.getLoop();
+    const ok = deck.reloop();
+    const onAir = this.deps.isOnAir(deck);
+    if (wasLooping && !deck.getLoop()) {
+      if (onAir) this.deps.onAirLoopEnded();
+    } else if (ok && deck.getLoop()) {
+      const bars = Math.max(1, this.getLoopBars(deckId));
+      if (onAir) this.deps.onAirLoopStarted(bars, track.title);
+    }
+    this.deps.onChange();
+  }
 }
+
