@@ -382,6 +382,12 @@ Reply ONLY with valid JSON in this exact structure:
   ): Promise<AIResponseResult> {
     const startTime = performance.now();
 
+    // Song and Up Next requests are understood at once; the model (up to 30 s) is for the rest
+    const quick = parseSongCommand(userInput);
+    if (quick) {
+      return { plan: quick, latencyMs: Math.round(performance.now() - startTime), source: 'fallback_heuristic', provider: 'heuristic' };
+    }
+
     // Extract current DJ system context
     const stateA = engine.deckA.getPlaybackState();
     const stateB = engine.deckB.getPlaybackState();
@@ -425,7 +431,7 @@ ${JSON.stringify(currentContext, null, 2)}
 TASK:
 Interpret the user's natural language instruction and output a STRICT JSON object conforming to this specification:
 {
-  "action": "execute_transition" | "control_percussion" | "adjust_eq" | "tempo_sync" | "playback_control",
+  "action": "execute_transition" | "control_percussion" | "adjust_eq" | "tempo_sync" | "playback_control" | "queue_control" | "unknown",
   "target_deck": "A" | "B" | "both" | "none",
   "transition": {
     "target_deck": "A" | "B",
@@ -447,8 +453,16 @@ Interpret the user's natural language instruction and output a STRICT JSON objec
     "deck": "A" | "B" | "both",
     "command": "play" | "pause" | "stop"
   },
+  "queue": {
+    "focus_artists": ["Artist name", ...],
+    "only": true | false,
+    "clear_focus": true | false,
+    "play_song": "Artist - Song"
+  },
   "explanation": "Brief DJ reason for the action"
 }
+Use "queue_control" for requests about WHICH songs or artists to play: "play only <artist>" sets focus_artists and only=true; "more <artist>" sets focus_artists and only=false; "play anything again" sets clear_focus=true; "play <song>" sets play_song.
+If the instruction doesn't fit any action, use "unknown" and say so in the explanation.
 
 RHYTHM STYLES:
 ${RHYTHM_STYLES.map((st) => `- ${st.id}: ${st.name}, ${st.description} Suits: ${st.suits}.`).join('\n')}
@@ -545,16 +559,11 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
       };
     }
 
-    // Default general transition
+    // Not understood: do nothing rather than guess (a guessed mix would cut the song on air)
     return {
-      action: 'execute_transition',
-      target_deck: 'B',
-      transition: {
-        target_deck: 'B',
-        style: 'bass_swap',
-        duration_seconds: 8,
-      },
-      explanation: 'Interpreted request as a standard 8-bar club bass-swap transition.',
+      action: 'unknown',
+      target_deck: 'none',
+      explanation: 'I didn\'t understand that. Try "play only Diljit Dosanjh songs", "mix now", "kill the bass on deck A" or "start the dhol".',
     };
   }
 
@@ -562,6 +571,16 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
    * Executes a validated AI mixing plan deterministically on the AudioEngine.
    */
   public executePlanOnEngine(plan: AICommandPlan, engine: AudioEngine) {
+    // 0. Which songs play next
+    if (plan.action === 'queue_control' && plan.queue) {
+      const q = plan.queue;
+      if (q.clear_focus) engine.clearArtistFocus();
+      else if (q.focus_artists?.length) engine.setArtistFocus(q.focus_artists, q.only ?? true);
+      if (q.play_song) void engine.acquireTrack(q.play_song, true);
+      return;
+    }
+    if (plan.action === 'unknown') return;
+
     // 1. Execute Transitions
     if (plan.action === 'execute_transition' && plan.transition) {
       // "Mix" means the next song: the off-air deck usually still holds the previous one
@@ -613,4 +632,69 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
       if (plan.playback.deck === 'B' || plan.playback.deck === 'both') applyDeck(engine.deckB);
     }
   }
+}
+
+// Filler words around an artist's name in "play only Diljit Dosanjh songs please"
+const FILLER = /\b(please|pls|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want)\b/gi;
+
+/**
+ * Song and Up Next requests in plain words, understood without the model:
+ * "play only Diljit Dosanjh songs", "only Karan Aujla", "more AP Dhillon", "play anything again",
+ * "play Lover by Diljit Dosanjh". Null for anything else (the model handles it).
+ */
+export function parseSongCommand(input: string): AICommandPlan | null {
+  const text = input.trim().replace(/[.!?]+$/, '');
+  const lower = text.toLowerCase();
+  if (/\bdeck\b|\bdhol|\bdrums?\b|\bbass\b|\beq\b|\bcrossfade|\bpause\b|\bstop the\b|\bresume\b/.test(lower)) return null;
+
+  if (/\b(play (anything|everything|any song|all songs|whatever)|back to normal|any artist|remove (the )?(filter|focus)|clear (the )?(filter|focus|artist)|no (more )?(filter|focus)|stop (only|playing only)|all artists)\b/.test(lower)) {
+    return { action: 'queue_control', target_deck: 'none', queue: { clear_focus: true }, explanation: 'Back to normal: Up Next picks from all your music again.' };
+  }
+
+  const name = (s: string) =>
+    s
+      .replace(FILLER, ' ')
+      .replace(/['"]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const artists = (s: string) =>
+    name(s)
+      .split(/\s*(?:,|\band\b|&|\+)\s*/i)
+      .map((a) => a.trim())
+      .filter((a) => a.length >= 2)
+      .slice(0, 5);
+
+  // "only X" / "just X" / "X only" / "nothing but X"
+  if (/\b(only|just|nothing but)\b/.test(lower)) {
+    const list = artists(text);
+    if (list.length) {
+      return {
+        action: 'queue_control',
+        target_deck: 'none',
+        queue: { focus_artists: list, only: true },
+        explanation: `Playing only ${list.join(' & ')} from now on. Say "play anything" to go back to normal.`,
+      };
+    }
+  }
+
+  // "more X" / "play more X songs"
+  if (/\bmore\b/.test(lower)) {
+    const list = artists(text);
+    if (list.length) {
+      return {
+        action: 'queue_control',
+        target_deck: 'none',
+        queue: { focus_artists: list, only: false },
+        explanation: `More ${list.join(' & ')} in Up Next, mixed with your other music.`,
+      };
+    }
+  }
+
+  // "play Lover by Diljit Dosanjh" / "play Brown Munde"
+  const song = text.match(/^(?:please\s+)?(?:play|put on|queue)\s+(.+)$/i)?.[1];
+  if (song && !/^(it|this|that|music|songs?)$/i.test(song.trim())) {
+    const query = song.replace(/\s+by\s+/i, ' ').trim();
+    return { action: 'queue_control', target_deck: 'none', queue: { play_song: query }, explanation: `Finding "${song.trim()}" and mixing it in next.` };
+  }
+  return null;
 }

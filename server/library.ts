@@ -5,7 +5,7 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { DATA_DIR, ROOT_DIR } from './paths';
 import { parseJsonBody } from './http';
 import { readJsonArray, writeJsonAtomic } from './jsonFile';
-import { maybeSaveMostPlayed } from './localLibrary';
+import { maybeSaveMostPlayed, wakeOfflineSync } from './localLibrary';
 import { logError } from './logger';
 
 export const MY_SONGS_FILE = path.join(ROOT_DIR, 'my_songs.txt');
@@ -155,6 +155,8 @@ export async function handleHistory(req: IncomingMessage, res: ServerResponse, u
 
 // 6. User Favorites (GET /api/favorites & POST /api/favorites/toggle)
 export async function handleFavorites(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  // A newly liked song is downloaded for offline play in the background
+  if (req.method === 'POST') wakeOfflineSync();
   return handleToggleList<FavoriteEntry>(req, res, {
     file: FAVORITES_FILE,
     listKey: 'favorites',

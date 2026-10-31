@@ -47,6 +47,7 @@ import {
 import { DJAgent } from '../ai/DJAgent';
 import { artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
 import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
+import { OutroDetector } from './OutroDetector';
 
 const SOUND_SETTINGS_KEY = 'ai_dj_sound_settings';
 const DOUBLE_CLICK_MS = 1500; // a second Mix click on the same song within this is the same click
@@ -183,9 +184,11 @@ export class AudioEngine {
     }
   })();
   private isFetchingRecommendations: boolean = false;
-  // New picks dropped by expiry or Refresh, so the same songs don't come straight back
+  // Songs dropped by expiry, Refresh or a failed load, so the same songs don't come straight back
   private droppedPicks: Array<{ song: SongLike; at: number }> = [];
   public refreshingQueue = false; // Refresh is rebuilding Up Next
+  // "Play only / more <artist>" from the AI chat: Up Next follows it until cleared (this session)
+  public artistFocus: { artists: string[]; only: boolean } | null = null;
   private stopRefill = false; // set by Refresh: a running fill stops at once
   private refillRequest: AbortController | null = null; // the fill's recommendation request in flight
   // Songs removed from Up Next by hand tonight, per artist (see sessionAvoidArtists)
@@ -438,7 +441,7 @@ export class AudioEngine {
     const health = await this.djAgent.getHealth();
     this.aiStatus = health.online ? 'online' : 'offline';
     this.aiProvider = health.provider || (health.online ? 'ollama' : 'none');
-    this.aiModelName = health.model || (health.provider === 'gemini' ? 'Gemini Flash' : 'Qwen 2.5 3B');
+    this.aiModelName = health.model || (health.provider === 'gemini' ? 'Gemini Flash' : 'Qwen 2.5 1.5B');
     this.aiBackends = {
       ollama: { online: Boolean(health.ollama?.online), model: health.ollama?.model ?? null },
       gemini: {
@@ -591,19 +594,25 @@ export class AudioEngine {
     }
   }
 
-  /** Sets the on-air song to an exact BPM (e.g. typed in by the user). */
+  /** Sets the on-air song to an exact BPM (e.g. typed in, clicked, or nudged by the user). */
   public setBpm(bpm: number) {
+    if (bpm <= 0) return;
+    const cleanBpm = Math.round(bpm * 10) / 10;
+    const deck = this.onAirDeck();
+    const track = deck.getTrack();
     const info = this.getTempoInfo();
-    if (info && bpm > 0) {
-      // In Party mood: never decrease BPM below original natural BPM
-      if (this.mood === 'party' && bpm < info.naturalBpm - 0.5) {
-        this.acquisitionStatus = `Party mood: cannot decrease BPM below original ${Math.round(info.naturalBpm)} BPM to protect dancefloor energy.`;
-        this.notify();
-        return;
-      }
-      this.setTempo(bpm / info.naturalBpm);
-    } else if (bpm > 0) {
-      this.sessionBpm = bpm;
+    const naturalBpm = track?.original?.bpm ?? track?.bpm ?? info?.naturalBpm ?? this.sessionBpm ?? cleanBpm;
+
+    // A manual BPM set updates the whole-set / session BPM if active
+    if (this.sessionBpm !== null) {
+      this.sessionBpm = cleanBpm;
+    }
+
+    if (track) {
+      void this.setTempo(cleanBpm / naturalBpm, { userInitiated: true });
+    } else {
+      this.sessionBpm = cleanBpm;
+      this.acquisitionStatus = `Set tempo changed to ${cleanBpm} BPM.`;
       this.notify();
     }
   }
@@ -613,62 +622,88 @@ export class AudioEngine {
    * Key lock on: the audio is re-timed so the pitch stays the same (takes ~1 s, swapped in
    * seamlessly at the same musical position). Key lock off: vinyl style, pitch follows speed.
    */
-  public async setTempo(ratio: number, options: { fromSetTempo?: boolean; fromOriginalToggle?: boolean } = {}) {
+  public async setTempo(
+    ratio: number,
+    options: { fromSetTempo?: boolean; fromOriginalToggle?: boolean; userInitiated?: boolean } = {}
+  ) {
+    const isUserAction = options.userInitiated || (!options.fromSetTempo && !options.fromOriginalToggle);
     // Picking a speed by hand means the user no longer wants the original tempo
-    if (!options.fromSetTempo && !options.fromOriginalToggle) this.playOriginal = false;
+    if (isUserAction) this.playOriginal = false;
     const deck = this.onAirDeck();
     const track = deck.getTrack();
-    if (!track?.audioBuffer) return;
+
+    let target = Math.max(MIN_TEMPO, Math.min(MAX_TEMPO, Math.round(ratio * 1000) / 1000));
+
+    // When the whole set is locked to a BPM, a manual tempo update sets the session BPM too
+    if (this.sessionBpm !== null && isUserAction) {
+      const baseBpm = track?.original?.bpm ?? track?.bpm ?? this.sessionBpm;
+      this.sessionBpm = Math.round(baseBpm * target * 10) / 10;
+    }
+
+    if (!track) {
+      this.notify();
+      return;
+    }
+
     if (this.isTransitioning) {
       this.acquisitionStatus = 'Tempo can be changed once the current mix finishes.';
       this.notify();
       return;
     }
-    let target = Math.max(MIN_TEMPO, Math.min(MAX_TEMPO, Math.round(ratio * 1000) / 1000));
-    // In Party mood: NEVER decrease BPM of original song (speed ratio must be >= 1.0)
-    if (this.mood === 'party' && target < 1.0) {
-      target = 1.0;
-      this.acquisitionStatus = 'Party mood: cannot decrease BPM below original to protect dancefloor energy.';
-      this.notify();
-    }
+
     this.rememberOriginal(track);
     const job = ++this.tempoJob;
 
-    if (!this.keyLock) {
-      // Vinyl: natural audio, speed and pitch move together
-      if ((track.tempoRatio ?? 1) !== 1) this.swapDeckAudio(deck, track, track.originalBuffer!, 1);
-      deck.setPlaybackRate(target, false);
-    } else {
-      this.tempoBusy = true;
-      this.acquisitionStatus = `Tuning to ${(track.original!.bpm * target).toFixed(1)} BPM (key lock: pitch unchanged)…`;
+    // Apply immediate playbackRate to deck & mediaEl for INSTANT 0ms click responsiveness
+    deck.setPlaybackRate(target, false);
+
+    if (!this.keyLock || !track.audioBuffer) {
+      // Vinyl mode or streaming without full buffer: instant playbackRate only
+      if ((track.tempoRatio ?? 1) !== 1 && track.originalBuffer) {
+        this.swapDeckAudio(deck, track, track.originalBuffer, 1);
+      }
+      track.tempoRatio = target;
+      track.bpm = (track.original?.bpm ?? track.bpm) * target;
+      const newBpm = Math.round(track.bpm * 10) / 10;
+      const pct = (target - 1) * 100;
+      this.acquisitionStatus = `Tempo ${target.toFixed(2)}x (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%) = ${newBpm} BPM.`;
+      this.replanPendingMix();
       this.notify();
-      let stretched: AudioBuffer;
-      try {
-        stretched =
-          Math.abs(target - 1) < 0.002 ? track.originalBuffer! : await stretchAudioBuffer(this.ctx, track.originalBuffer!, target);
-      } catch (err) {
-        console.warn('Key-locked tempo change failed:', err);
-        if (job === this.tempoJob) this.tempoBusy = false;
-        this.acquisitionStatus = 'Could not change the tempo with key lock. Try again, or turn key lock off.';
-        this.notify();
-        return;
-      }
-      // A newer tempo request, a new song, or a mix may have happened while stretching
-      if (job !== this.tempoJob) return;
-      this.tempoBusy = false;
-      if (deck.getTrack() !== track || this.isTransitioning) {
-        this.notify();
-        return;
-      }
-      this.swapDeckAudio(deck, track, stretched, target);
-      deck.setPlaybackRate(1, false);
+      return;
     }
 
-    // "Keep whole set at this BPM": a tempo the user picks becomes the set tempo too.
-    // (Not when the engine is tuning the song to the set tempo itself.)
-    const newBpm = Math.round(track.original!.bpm * target * 10) / 10;
-    if (this.sessionBpm !== null && !options.fromSetTempo && !options.fromOriginalToggle) this.sessionBpm = newBpm;
+    // Key Lock ON with audioBuffer: retimed via Web Worker with pitch preservation
+    this.tempoBusy = true;
+    const naturalBpm = track.original!.bpm;
+    const targetBpm = (naturalBpm * target).toFixed(1);
+    this.acquisitionStatus = `Tuning to ${targetBpm} BPM (key lock: pitch unchanged)…`;
+    this.notify();
 
+    let stretched: AudioBuffer;
+    try {
+      stretched =
+        Math.abs(target - 1) < 0.002
+          ? track.originalBuffer!
+          : await stretchAudioBuffer(this.ctx, track.originalBuffer!, target);
+    } catch (err) {
+      console.warn('Key-locked tempo change failed:', err);
+      if (job === this.tempoJob) this.tempoBusy = false;
+      this.acquisitionStatus = 'Could not change the tempo with key lock. Try again, or turn key lock off.';
+      this.notify();
+      return;
+    }
+
+    if (job !== this.tempoJob) return;
+    this.tempoBusy = false;
+    if (deck.getTrack() !== track || this.isTransitioning) {
+      this.notify();
+      return;
+    }
+
+    this.swapDeckAudio(deck, track, stretched, target);
+    deck.setPlaybackRate(1, false);
+
+    const newBpm = Math.round(naturalBpm * target * 10) / 10;
     const pct = (target - 1) * 100;
     this.acquisitionStatus = options.fromOriginalToggle
       ? `Playing "${track.title}" at its original ${newBpm} BPM.`
@@ -676,7 +711,9 @@ export class AudioEngine {
       ? `Tuned "${track.title}" to ${newBpm} BPM for the set tempo (key lock, pitch unchanged)${
           Math.abs(newBpm - (this.sessionBpm ?? newBpm)) > 1 ? ` — as close to ${this.sessionBpm} as it can go cleanly` : ''
         }.`
-      : `Tempo ${target.toFixed(2)}x (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%) = ${newBpm} BPM, ${this.keyLock ? 'key lock on' : 'vinyl mode (pitch follows speed)'}${this.sessionBpm !== null ? ', whole set follows' : ''}.`;
+      : `Tempo ${target.toFixed(2)}x (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%) = ${newBpm} BPM, key lock on${
+          this.sessionBpm !== null ? ', whole set follows' : ''
+        }.`;
     this.replanPendingMix();
     this.notify();
   }
@@ -771,6 +808,8 @@ export class AudioEngine {
       firstDownbeatTime: track.firstDownbeatTime,
       highlightTime: track.highlightTime,
       cueInTime: track.cueInTime,
+      musicStartTime: track.musicStartTime,
+      musicEndTime: track.musicEndTime,
     };
     track.tempoRatio = 1;
   }
@@ -788,6 +827,7 @@ export class AudioEngine {
     track.highlightTime = original.highlightTime !== undefined ? original.highlightTime / bufferRatio : undefined;
     track.cueInTime = original.cueInTime !== undefined ? original.cueInTime / bufferRatio : undefined;
     track.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / bufferRatio : undefined;
+    track.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / bufferRatio : undefined;
     track.energyProfile = undefined; // recomputed from the new audio when a mix is planned
     deck.replaceAudio(track, naturalPosition / bufferRatio);
   }
@@ -839,6 +879,7 @@ export class AudioEngine {
         highlightTime: item.highlightTime,
         cueInTime: item.cueInTime,
         musicStartTime: item.musicStartTime,
+        musicEndTime: item.musicEndTime,
       };
     }
     const original = item.original;
@@ -852,7 +893,7 @@ export class AudioEngine {
       } else {
         // Back to the natural tempo
         item.audioBuffer = item.originalBuffer;
-        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime });
+        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime, musicEndTime: original.musicEndTime });
         item.energyProfile = undefined;
         item.tempoLockedTo = undefined;
       }
@@ -875,6 +916,7 @@ export class AudioEngine {
       item.highlightTime = original.highlightTime !== undefined ? original.highlightTime / ratio : undefined;
       item.cueInTime = original.cueInTime !== undefined ? original.cueInTime / ratio : undefined;
       item.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / ratio : undefined;
+      item.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / ratio : undefined;
       item.energyProfile = undefined; // recomputed from the tuned audio when needed
       item.tempoLockedTo = target;
     } catch (err) {
@@ -1078,7 +1120,7 @@ export class AudioEngine {
       profile: track.energyProfile,
       bpm: track.bpm,
       downbeat: track.firstDownbeatTime ?? 0,
-      duration: track.duration,
+      duration: Math.min(track.duration, track.musicEndTime ?? track.duration),
       hookTime: track.highlightTime,
       musicStartTime: track.musicStartTime,
       title: track.title,
@@ -1097,7 +1139,7 @@ export class AudioEngine {
     const bar = 240 / track.bpm;
     const from = track.highlightTime + BEST_PART_HOOK_BARS * bar;
     const to = from + BEST_PART_EXIT_BARS * bar;
-    return to < track.duration - OUTRO_PLAN_SECONDS / 2 ? { from, to } : null;
+    return to < this.musicEnd(track) - OUTRO_PLAN_SECONDS / 2 ? { from, to } : null;
   }
 
   /**
@@ -1123,9 +1165,14 @@ export class AudioEngine {
    */
   private mixOutWindow(track: TrackMetadata, position: number): { endsAt: number; earliestExit?: number } {
     const best = this.bestPartExitWindow(track);
-    if (!best) return { endsAt: track.duration };
+    if (!best) return { endsAt: this.musicEnd(track) };
     if (position < best.to - 4) return { endsAt: best.to, earliestExit: best.from };
-    return { endsAt: Math.min(track.duration, position + BEST_PART_EXIT_BARS * (240 / track.bpm)) };
+    return { endsAt: Math.min(this.musicEnd(track), position + BEST_PART_EXIT_BARS * (240 / track.bpm)) };
+  }
+
+  /** Where the song's music ends (a closing scene, dialogue, fade or silence after it doesn't count). */
+  private musicEnd(track: TrackMetadata): number {
+    return Math.min(track.duration, track.musicEndTime ?? track.duration);
   }
 
   /**
@@ -1190,7 +1237,9 @@ export class AudioEngine {
     this.schedulePendingMix();
     const startsIn = this.pendingMixStartsIn() ?? 0;
     const shiftTag = harmonicCompat ? ` [${harmonicCompat.badgeText}]` : '';
-    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag} (following MIXING_RULES.md): ${plan.reason}. Click Mix Now to mix immediately.`;
+    // Say when the song's ending (a closing scene, dialogue, fade) is being skipped
+    const outroTag = outTrack?.outroReason && outTrack.musicEndTime !== undefined && plan.exitTime < outTrack.duration - 5 ? ` (${outTrack.outroReason})` : '';
+    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag} (following MIXING_RULES.md): ${plan.reason}${outroTag}. Click Mix Now to mix immediately.`;
     this.notify();
 
     if (!outTrack || durationSeconds) return true;
@@ -1496,34 +1545,25 @@ export class AudioEngine {
     this.isFetchingRecommendations = true;
     this.lastRefillAttemptAt = Date.now();
     try {
-      const seedList: Array<{ title: string; artist: string }> = [
-        { title: current.title, artist: current.artist },
+      // Seeds: the song on air, what was just played, then favourites and Most Played. The server
+      // also asks about a random handful of liked / most played songs itself (see researchSeeds).
+      const seedList: Array<{ title: string; artist: string; url?: string }> = [
+        { title: current.title, artist: current.artist, url: current.url },
       ];
-      // Add backup seeds from favorites and past played if more recommendations are needed to reach 50
-      for (const f of this.favorites) {
-        if (seedList.length >= 4) break;
-        if (!seedList.some((s) => s.title.toLowerCase() === f.title.toLowerCase())) {
-          seedList.push({ title: f.title, artist: f.artist || '' });
-        }
-      }
-      for (const p of this.library.history) {
-        if (seedList.length >= 6) break;
+      for (const p of [...this.playLog.slice(0, 3), ...this.favorites, ...this.library.history]) {
+        if (seedList.length >= 8) break;
         if (!seedList.some((s) => s.title.toLowerCase() === p.title.toLowerCase())) {
-          seedList.push({ title: p.title, artist: p.artist || '' });
+          seedList.push({ title: p.title, artist: p.artist || '', url: p.url });
         }
       }
 
       const usedSeeds = new Set<string>();
       let iterations = 0;
-      const MAX_ITERATIONS = 8;
+      // Each request researches several seeds at once and returns up to 40 songs: a few fill the queue
+      const MAX_ITERATIONS = 3;
+      const SEEDS_PER_REQUEST = 4;
 
-      while (
-        !isQueueFull(this.queue) &&
-        iterations < MAX_ITERATIONS &&
-        !this.stopRefill
-      ) {
-        iterations++;
-
+      const nextSeed = (): { title: string; artist: string; url?: string } | undefined => {
         // Find next unused seed from seedList
         let seed = seedList.find((s) => !usedSeeds.has(s.title.toLowerCase()));
 
@@ -1563,14 +1603,32 @@ export class AudioEngine {
           }
         }
 
-        if (!seed) break;
-        usedSeeds.add(seed.title.toLowerCase());
+        if (seed) usedSeeds.add(seed.title.toLowerCase());
+        return seed;
+      };
+
+      while (
+        !isQueueFull(this.queue) &&
+        iterations < MAX_ITERATIONS &&
+        !this.stopRefill
+      ) {
+        iterations++;
+        const batch: Array<{ title: string; artist: string; url?: string }> = [];
+        while (batch.length < SEEDS_PER_REQUEST) {
+          const seed = nextSeed();
+          if (!seed) break;
+          batch.push(seed);
+        }
+        if (batch.length === 0) break;
+        const seeds = JSON.stringify(batch.map((sd) => [sd.title.slice(0, 80), (sd.artist || '').slice(0, 40), sd.url?.startsWith('http') ? sd.url : '']));
 
         // What was just played (only this browser knows) shapes the suggestions too
         const recent = JSON.stringify(this.playLog.slice(0, 12).map((e) => [e.title.slice(0, 80), (e.artist || '').slice(0, 40)]));
         const avoid = JSON.stringify(this.sessionAvoidArtists());
         const res = await fetch(
-          `/api/recommend?title=${encodeURIComponent(seed.title)}&artist=${encodeURIComponent(seed.artist)}&mood=${this.mood}&recent=${encodeURIComponent(recent)}&avoid=${encodeURIComponent(avoid)}${
+          `/api/recommend?seeds=${encodeURIComponent(seeds)}&mood=${this.mood}&recent=${encodeURIComponent(recent)}&avoid=${encodeURIComponent(avoid)}${
+            this.artistFocus ? `&focus=${encodeURIComponent(JSON.stringify(this.artistFocus))}` : ''
+          }${
             // The AI (~30 s on CPU) for a background fill's first seed only; Refresh uses quick searches throughout
             iterations > 1 || this.refreshingQueue ? '&ai=0' : ''
           }${
@@ -1599,7 +1657,8 @@ export class AudioEngine {
               this.isSongInQueueOrPlayed({ title: item.title, artist: item.author, url: item.url }) ||
               this.isTitleInQueue(item.title, item.author, item.url) ||
               this.lastPlayedWithinHour({ title: item.title, artist: item.author, url: item.url }) !== null ||
-              this.wasDropped({ title: item.title, artist: item.author, url: item.url });
+              this.wasDropped({ title: item.title, artist: item.author, url: item.url }) ||
+              !this.allowedByFocus({ title: item.title, artist: item.author });
             if (!isDuplicate) {
               this.queue.push({
                 id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1683,6 +1742,10 @@ export class AudioEngine {
             }
           }
         }
+      }
+
+      if (!streamUrl.startsWith('http://') && !streamUrl.startsWith('https://') && !streamUrl.startsWith('local:')) {
+        throw new Error(`no search result for "${item.title}"`);
       }
 
       // A playlist line can resolve to a song that just played: don't auto-queue it again within the hour
@@ -1796,6 +1859,8 @@ export class AudioEngine {
   /** Shows a song as failed briefly, then drops it so it doesn't clutter or block the queue. */
   private markFailed(item: QueuedTrack) {
     item.status = 'failed';
+    // Not added again automatically for 2 hours (unless someone asks for it)
+    this.droppedPicks.push({ song: { title: item.title, artist: item.artist, url: item.url }, at: Date.now() });
     this.notify();
     window.setTimeout(() => {
       this.queue = this.queue.filter((q) => q !== item);
@@ -1932,7 +1997,7 @@ export class AudioEngine {
     return this.playLog.some((e) => e.playedAt >= since && matches(e)) || this.library.history.some((h) => h.lastPlayed >= since && matches(h));
   }
 
-  /** A new pick that expired or was refreshed away in the last 2 hours. */
+  /** A song that expired, was refreshed away or failed to load in the last 2 hours. */
   private wasDropped(song: SongLike): boolean {
     const since = Date.now() - EXPIRED_MEMORY_MS;
     this.droppedPicks = this.droppedPicks.filter((d) => d.at >= since);
@@ -2030,6 +2095,7 @@ export class AudioEngine {
           this.isSongInQueueOrPlayed({ title: s.title, artist: s.artist, url: searchPrompt }) ||
           this.isTitleInQueue(s.title, s.artist, searchPrompt) ||
           this.wasDropped({ title: s.title, artist: s.artist, url: searchPrompt }) ||
+          !this.allowedByFocus({ title: s.title, artist: s.artist }) ||
           cleanCoreTitle(track.title) === cleanCoreTitle(s.title)
         ) {
           continue;
@@ -2240,6 +2306,7 @@ export class AudioEngine {
           highlightTime: track.highlightTime,
           cueInTime: track.cueInTime,
           musicStartTime: track.musicStartTime,
+          musicEndTime: track.musicEndTime,
           introSkipReason: track.introSkipReason,
           bpm: track.bpm,
           bpmConfidence: track.bpmConfidence,
@@ -2284,6 +2351,7 @@ export class AudioEngine {
         highlightTime: t.highlightTime,
         cueInTime: t.cueInTime,
         musicStartTime: t.musicStartTime,
+        musicEndTime: t.musicEndTime,
         introSkipReason: t.introSkipReason,
         bpm: t.bpm || 128,
         bpmConfidence: t.bpmConfidence ?? 0.8,
@@ -2356,6 +2424,8 @@ export class AudioEngine {
         cueInTime: q.cueInTime,
         musicStartTime: q.musicStartTime,
         introSkipReason: q.introSkipReason,
+        musicEndTime: q.musicEndTime,
+        outroReason: q.outroReason,
         status: (q.status === 'ready' || q.status === 'queued') ? 'queued' : q.status,
         isAiRecommended: q.isAiRecommended,
         source: q.source,
@@ -2441,10 +2511,12 @@ export class AudioEngine {
         const artist = song.artist || 'Artist';
         const url = song.url || song.title;
         if (
+          !this.allowedByFocus({ title, artist }) ||
           is8dOrMashupSong({ title, artist, url }) ||
           this.isDontPlayAgain({ title, artist, url }) ||
           this.isSongInQueueOrPlayed({ title, artist, url }) ||
           this.isTitleInQueue(title, artist, url) ||
+          this.wasDropped({ title, artist, url }) ||
           isOnAir(title, url)
         ) {
           continue;
@@ -2481,11 +2553,13 @@ export class AudioEngine {
               const artist = parts.length > 1 ? parts[0].trim() : 'Artist';
               const title = parts.length > 1 ? parts.slice(1).join(' - ').trim() : songTitle.trim();
               if (
+                !this.allowedByFocus({ title, artist }) ||
                 is8dOrMashupSong({ title, artist, url: songTitle }) ||
                 this.isDontPlayAgain({ title, artist, url: songTitle }) ||
                 this.playedRecently({ title, artist, url: songTitle }) ||
                 this.isSongInQueueOrPlayed({ title, artist, url: songTitle }) ||
                 this.isTitleInQueue(title, artist, songTitle) ||
+                this.wasDropped({ title, artist, url: songTitle }) ||
                 this.lastPlayedWithinHour({ title, artist, url: songTitle }) !== null ||
                 (onAirTrack && (onAirTrack.title.toLowerCase() === title.toLowerCase() || onAirTrack.url === songTitle || cleanCoreTitle(onAirTrack.title) === cleanCoreTitle(title)))
               ) {
@@ -2538,6 +2612,55 @@ export class AudioEngine {
    * someone chose and the next few (loading, about to play) stay; the dropped new picks aren't
    * suggested again for 2 hours.
    */
+  /** Whether a song is by one of the focus artists (title or artist names them). */
+  public matchesFocus(song: { title?: string; artist?: string }): boolean {
+    if (!this.artistFocus) return true;
+    const text = artistKey(`${song.title ?? ''} ${song.artist ?? ''}`);
+    return this.artistFocus.artists.some((a) => artistKey(a).length >= 3 && text.includes(artistKey(a)));
+  }
+
+  /** Automatic picks under "play only <artist>" must be by them; "more <artist>" allows anything. */
+  private allowedByFocus(song: { title?: string; artist?: string }): boolean {
+    return !this.artistFocus?.only || this.matchesFocus(song);
+  }
+
+  /**
+   * "Play only Diljit Dosanjh" (only = true): Up Next keeps just their songs (and songs someone
+   * added), is refilled with their hits, and the next one is mixed in now. "More Diljit Dosanjh"
+   * (only = false): new picks lean toward them. Lasts until cleared.
+   */
+  public setArtistFocus(artists: string[], only: boolean) {
+    this.artistFocus = { artists, only };
+    const names = artists.join(' & ');
+    if (only) {
+      this.queue = this.queue.filter((q) => isChosen(q) || this.matchesFocus(q));
+      if (this.pendingMix && !isChosen(this.pendingMix.item) && !this.matchesFocus(this.pendingMix.item)) this.cancelPendingMix();
+      this.queue = this.queue.filter((q) => isChosen(q) || this.matchesFocus(q)); // the cancelled mix's song went back on top
+      this.saveQueueToStorage();
+    }
+    this.noticeMix(only ? `Playing only ${names}: finding their songs…` : `More ${names} coming up…`);
+    this.notify();
+    void this.refreshQueue().then(() => {
+      const onAir = this.onAirDeck().getTrack();
+      if (!only || !this.isAnyDeckPlaying() || this.pendingMix || (onAir && this.matchesFocus(onAir))) return;
+      // The song on air isn't theirs: move to one of theirs now (at the best bar in the next 45 s)
+      const next = this.queue.find((q) => q.status !== 'failed' && this.matchesFocus(q));
+      if (next) this.mixQueuedTrack(next.id);
+      else this.noticeMix(`Couldn't find songs by ${names} right now.`);
+    });
+  }
+
+  /** Back to normal: Up Next picks from all the listener's music again. */
+  public clearArtistFocus() {
+    if (!this.artistFocus) {
+      this.noticeMix('Up Next already plays all your music.');
+      return;
+    }
+    this.artistFocus = null;
+    this.noticeMix('Back to normal: Up Next picks from all your music.');
+    void this.refreshQueue();
+  }
+
   public async refreshQueue(): Promise<void> {
     if (this.refreshingQueue) return;
     this.refreshingQueue = true;
@@ -2635,6 +2758,13 @@ export class AudioEngine {
       track.introSkipReason = intro.reason;
     }
 
+    // Where the music ends: a closing scene, dialogue, fade or silence after it is never waited for
+    if (track.musicEndTime === undefined) {
+      const outro = OutroDetector.detectMusicEnd(track.audioBuffer, bpm, firstDownbeatTime);
+      track.musicEndTime = outro.musicEnd;
+      track.outroReason = outro.cut ? outro.reason : undefined;
+    }
+
     // Key (for harmonic mixing) and loudness (for level matching), ~50 ms
     if (track.keyConfidence === undefined) {
       const key = detectKey(track.audioBuffer);
@@ -2670,6 +2800,8 @@ export class AudioEngine {
     item.cueInTime = isStrict ? 0 : track.cueInTime;
     item.musicStartTime = isStrict ? 0 : track.musicStartTime;
     item.introSkipReason = isStrict ? undefined : track.introSkipReason;
+    item.musicEndTime = track.musicEndTime;
+    item.outroReason = track.outroReason;
     item.energyProfile = track.energyProfile;
     item.key = track.key;
     item.keyConfidence = track.keyConfidence;
@@ -3065,11 +3197,11 @@ export class AudioEngine {
   }
 
   /** Puts a queued song on air right away: straight start if nothing plays, else a mix on the next beat. */
-  public startQueuedMixNow(item: QueuedTrack, durationSeconds?: number): boolean {
+  public startQueuedMixNow(item: QueuedTrack, durationSeconds?: number, style: TransitionConfig['style'] = 'bass_swap'): boolean {
     if (!item.audioBuffer) {
       if (!this.isAnyDeckPlaying() && !this.isTransitioning && this.canStream(item)) return this.startStreaming(item);
       void this.ensureTrackBuffer(item).then((buf) => {
-        if (buf) this.startQueuedMixNow(item, durationSeconds);
+        if (buf) this.startQueuedMixNow(item, durationSeconds, style);
       });
       return true;
     }
@@ -3118,7 +3250,7 @@ export class AudioEngine {
       sourceDeck: this.activeDeck,
       targetDeck: targetDeckId,
       durationSeconds,
-      style: 'bass_swap',
+      style,
     });
 
     if (item.source === 'request') {
@@ -3145,6 +3277,8 @@ export class AudioEngine {
       highlightTime: item.highlightTime,
       cueInTime: isStrict ? 0 : item.cueInTime,
       musicStartTime: isStrict ? 0 : item.musicStartTime,
+      musicEndTime: item.musicEndTime,
+      outroReason: item.outroReason,
       introSkipReason: isStrict ? undefined : item.introSkipReason,
       energyProfile: item.energyProfile,
       key: item.key,
@@ -3629,7 +3763,9 @@ export class AudioEngine {
     // Not matched: a short cut, since unsynced beats flam.
     const blendSeconds = (this.blendBars() * 4 * 60) / sourceBpm;
     let durationSeconds = config.durationSeconds ?? Math.max(4, Math.min(40, blendSeconds));
-    if (match.matched) {
+    if (config.style === 'drop_cut') {
+      durationSeconds = config.durationSeconds ?? 0.3;
+    } else if (match.matched) {
       const shift = (match.rate - 1) * 100;
       this.acquisitionStatus = `Beatmatched mix at ${sourceBpm} BPM (${shift >= 0 ? '+' : ''}${shift.toFixed(1)}% tempo on the new song, gliding back to normal after).`;
     } else if (sourceState.isPlaying) {
@@ -3653,7 +3789,7 @@ export class AudioEngine {
             ? targetTrack.musicStartTime
             : (targetTrack.firstDownbeatTime ?? 0));
       const cuePoint = isStrict ? 0 : (config.targetEntryTime ?? defaultEntry);
-      if (isSourcePlaying) {
+      if (isSourcePlaying && config.style !== 'drop_cut') {
         const toPlannedExit =
           config.sourceExitTime !== undefined
             ? (config.sourceExitTime - sourceState.currentTime) / sourceState.playbackRate
@@ -3692,7 +3828,7 @@ export class AudioEngine {
 
     // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
     // echoes out on its own beat instead of stopping dead
-    const isCut = isSourcePlaying && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01);
+    const isCut = isSourcePlaying && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
     if (isCut) {
       sourceDeck.scheduleEchoOut(startTime + durationSeconds / 2, 60 / Math.max(60, sourceBpm));
       this.acquisitionStatus += ' Echo-out on the old song.';
@@ -3915,15 +4051,101 @@ export class AudioEngine {
       const before = this.queue.length;
       this.queue = this.queue.filter((q) => !this.isDontPlayAgain(q));
       if (this.queue.length !== before) this.saveQueueToStorage();
-      // 2. If it's on air, skip it now
-      const onAir = this.onAirDeck().getTrack();
-      if (onAir && this.isDontPlayAgain(onAir)) {
-        console.log(`[AudioEngine] Currently playing "${onAir.title}" was banned (Thumbs Down) — skipping immediately.`);
-        this.nextTrack();
+
+      // 2. If it's on air or currently playing on any deck, instantly change the song too!
+      const onAirTrack = this.onAirDeck().getTrack();
+      const deckATrack = this.deckA.getTrack();
+      const deckBTrack = this.deckB.getTrack();
+      const isPlayingA = this.deckA.getPlaybackState().isPlaying;
+      const isPlayingB = this.deckB.getPlaybackState().isPlaying;
+
+      const matchesBanned = (t?: TrackMetadata | null) => {
+        if (!t) return false;
+        return (
+          this.isDontPlayAgain(t) ||
+          (song && song.title ? isSameSong(songKeys({ title: song.title, artist: song.artist, url: song.url }), songKeys(t)) : false)
+        );
+      };
+
+      const isCurrentPlayingDisliked =
+        matchesBanned(onAirTrack) ||
+        (isPlayingA && matchesBanned(deckATrack)) ||
+        (isPlayingB && matchesBanned(deckBTrack));
+
+      if (isCurrentPlayingDisliked) {
+        console.log(`[AudioEngine] Currently playing "${title}" was disliked (Thumbs Down) — changing song instantly.`);
+        this.skipDislikedCurrentTrack(title);
       }
     }
     this.notify();
     return synced;
+  }
+
+  /**
+   * Instantly changes the currently playing song when the user clicks Dislike on it.
+   * Cancels any slow mix plans or transitions and immediately cuts/mixes into the next queued song.
+   */
+  public skipDislikedCurrentTrack(_dislikedTitle?: string): boolean {
+    if (this.isTransitioning) {
+      this.cancelTransition();
+    }
+
+    // Cancel pending slow mix if any
+    let pendingItem: QueuedTrack | null = null;
+    if (this.pendingMix) {
+      pendingItem = this.pendingMix.item;
+      window.clearTimeout(this.pendingMix.timer);
+      this.pendingMix = null;
+    }
+
+    // 1. If a planned mix item exists and isn't disliked, cut into it immediately!
+    if (pendingItem && !this.isDontPlayAgain(pendingItem)) {
+      this.acquisitionStatus = `Disliked song skipped — cutting immediately to "${pendingItem.title}"!`;
+      this.startQueuedMixNow(pendingItem, 0.3, 'drop_cut');
+      this.notify();
+      return true;
+    }
+
+    // 2. Find the first ready track in the queue with a decoded buffer
+    const nextReady = this.queue.find((q) => q.status === 'ready' && q.audioBuffer);
+    if (nextReady) {
+      this.acquisitionStatus = `Disliked song skipped — cutting immediately to "${nextReady.title}"!`;
+      this.startQueuedMixNow(nextReady, 0.3, 'drop_cut');
+      this.notify();
+      return true;
+    }
+
+    // 3. Next, check if a track can stream right away
+    const nextStream = this.queue.find((q) => q.status !== 'failed' && this.canStream(q));
+    if (nextStream) {
+      this.deckA.pause();
+      this.deckB.pause();
+      this.acquisitionStatus = `Disliked song skipped — streaming "${nextStream.title}" immediately!`;
+      this.startStreaming(nextStream);
+      this.notify();
+      return true;
+    }
+
+    // 4. If next song is loading/downloading in queue
+    const nextLoading = this.queue.find((q) => q.status !== 'failed');
+    if (nextLoading) {
+      this.deckA.pause();
+      this.deckB.pause();
+      this.acquisitionStatus = `Disliked song stopped — loading "${nextLoading.title}" to play next...`;
+      this.notify();
+      void this.ensureTrackBuffer(nextLoading).then((buf) => {
+        if (buf) this.startQueuedMixNow(nextLoading, 0.3, 'drop_cut');
+      });
+      return true;
+    }
+
+    // 5. Queue is empty: stop playing decks immediately
+    this.deckA.pause();
+    this.deckB.pause();
+    this.acquisitionStatus = 'Disliked song stopped. Up Next queue is empty — searching for new songs...';
+    this.notify();
+    void this.populateQueueTo50();
+    return true;
   }
 
   public async playStarterSong(songId: string) {

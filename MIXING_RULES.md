@@ -269,6 +269,34 @@ On/off, **🤖 AI decides / Choose myself**, volume (0–100 %, multiplied by th
 
 ---
 
+# Music Start and End Rules (Skipping the Wasteful Parts)
+
+These apply always, with or without Best Parts. Both are decided from the audio alone, when a song is analysed (`analyzeTrack`).
+
+## 1. Start: talk before the music is skipped
+- `IntroSkitDetector` finds the first point where the beat is clearly there and holds for 8 s.
+- **Skipped:** what comes before it, if it's talking (dialogue, a movie scene, a skit) or silence. The song starts at the bar where the music begins (`musicStartTime`).
+- **Kept:** a musical intro without the beat (pads, piano, a sung opening), because the build-up matters (Rule 9).
+
+## 2. End: what comes after the music isn't waited for
+- `OutroDetector` looks at the song's last 2.5 minutes. It finds the last point where the beat holds for 8 s, then the last kick or dhol hit (loud in the bass, so a syllable of talk doesn't count).
+- **What follows it is classified:**
+  - **Talking** (≥ 20 % speech-like), **silence**, or a **quiet fade** (≥ 60 % of it below a quarter of the song's level): the music end is the bar line after the last hit.
+  - **A musical outro without the beat:** 16 s of it is kept to blend over; the rest is skipped.
+  - **Less than 10 s after the beat, or no clear beat near the end:** nothing is cut.
+- **How it's used:** the music end (`musicEndTime`) is treated as the song's end.
+  - The auto-mix plans its blend in the 45 s before it.
+  - The blend finishes by it.
+  - In Best Parts mode, the exit window must also end 22 s before it.
+- **It's shown:** the mix banner then says why, e.g. *"Music ends at 2:16; skipping 38 s of talking/dialogue"*.
+- **Stays correct when the tempo changes:** the music end moves with the song like its other timings, and is saved with the queue.
+
+## 3. What doesn't change
+- **Manual control:** Mix and Next work as before. If no next song is ready, the song plays on to the end of the file.
+- **Measured result:** on 24 cached songs, the end was cut on 6 (dialogue 12–38 s, a 16 s fade, two long beatless outros). The start detection gave identical results before and after the shared beat analysis was split out (`beatPresence.ts`).
+
+---
+
 # Best Parts Mode (Dance Floor) Rules
 
 When people are dancing they want the energy of each song, not its full length. **Best Parts** mode plays every song from its build-up through its hook, then mixes into the next song's build-up. Each song is on air for about **1–1.5 minutes** (≈ 40 bars at 120 BPM) instead of 3–4.
@@ -538,11 +566,26 @@ The listener should know most of what plays. Up Next is built so that about 70 %
 4. **Refresh button** (top of Up Next, laptop and phone):
    - Rebuilds Up Next from the song on air, the listener's taste and the mood.
    - It keeps the songs someone added and the first 3.
-   - It stops any fill already running, then uses quick searches only (no AI wait), so it takes about 20 s.
-   - Familiar songs appear at once and new picks as each search returns.
+   - It stops any fill already running, then researches without the AI, so it takes about 8 s for about 28 songs.
+   - Familiar songs appear at once and new picks as each request returns.
    - It reports *"Up Next refreshed: N new songs"*. The new picks it dropped aren't suggested again for 2 hours.
 5. **Removing songs teaches it:** removing **2 or more** automatically picked songs by the same artist from Up Next makes that artist avoided for the rest of the session. They're left out of AI suggestions, ranked down in searches, and sent to the server as `?avoid=`.
-6. **Speed:**
-   - The AI (about 30 s per answer on this laptop's CPU) is asked once per background fill, for its first seed; the other seeds use quick searches.
-   - Quick searches start from the seed song's own artist and rotate through the listener's top artists, so each seed finds different songs.
-   - If the AI times out, it is skipped for 5 minutes.
+6. **How new picks are researched** (`handleRecommend` in `server/recommendations.ts`, `server/discover.ts`). One request researches several seeds at once, in parallel:
+   - **Songs played together with yours:**
+     - YouTube's related list, built from what listeners play together, fetched through the Invidious/Piped instances (never YouTube directly).
+     - It's fetched for up to 10 songs: the seeds (the song on air counts 3, recent plays 2) and a random handful of liked and most-played songs (1 each).
+     - A song recommended from several of your songs collects points from each.
+   - **Artists fans of yours also like:** Deezer's related artists (public API, no key) for the seed's artist and your top 4 artists. The 4 new artists named most often are searched for their hits (top 20 results, 2 kept per artist).
+   - **Your own artists:** the seed's artist and your top 3, 2 hits each.
+   - **The AI DJ's ideas:** 12 songs for this listener and mood, one search each. Only on a background fill's first request (the AI takes about 30 s on this CPU), never on Refresh.
+   - **Hand-made mood list:** only if fewer than 10 candidates came back.
+   - **One ranking:**
+     - Every candidate gets `scoreHit` (popularity, age, your artists, proper versions) plus its points from each source.
+     - Kept: songs between 90 s and 5 minutes. Dropped: 8D, mashup and jhankar versions, and banned songs.
+     - The best 40 are returned with the reason each was picked.
+   - **Caching:** related lists and searches are kept 10 minutes, and "fans also like" 1 hour, so picks follow what's popular now.
+   - **Speed:**
+     - About 2–4 s per request.
+     - The browser sends 4 seeds per request, at most 3 requests per fill.
+     - If the AI times out, it's skipped for 5 minutes.
+   - **Limit:** the related lists don't know the party mood, so a calm song can come in during Party mood. Only the AI's ideas follow the mood.

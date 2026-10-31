@@ -8,6 +8,7 @@ export const AICommandSchema = z.object({
     'adjust_eq',
     'tempo_sync',
     'playback_control',
+    'queue_control',
     'unknown',
   ]),
   target_deck: z.enum(['A', 'B', 'both', 'none']).default('none'),
@@ -38,6 +39,15 @@ export const AICommandSchema = z.object({
     .object({
       deck: z.enum(['A', 'B', 'both']),
       command: z.enum(['play', 'pause', 'stop']),
+    })
+    .optional(),
+  // Songs and Up Next: play only / more of some artists, back to normal, or play a song now
+  queue: z
+    .object({
+      focus_artists: z.array(z.string().min(1)).max(5).optional(),
+      only: z.boolean().optional(), // true: nothing else plays; false: just more of them
+      clear_focus: z.boolean().optional(),
+      play_song: z.string().min(1).optional(),
     })
     .optional(),
   explanation: z.string().describe('Short explanation of DJ mixing decision and musical reasoning'),

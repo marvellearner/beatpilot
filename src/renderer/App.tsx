@@ -37,6 +37,14 @@ const SYNC_THROTTLE_MS = 150;
 // The full state is resent at least this often, in case a change slipped past the signature
 const FULL_SYNC_EVERY_MS = 5000;
 
+const formatAiModelDisplay = (name: string | null | undefined): string => {
+  if (!name) return 'Qwen 2.5 1.5B';
+  if (/1\.5b/i.test(name)) return 'Qwen 2.5 1.5B';
+  if (/3b/i.test(name)) return 'Qwen 2.5 3B';
+  if (/0\.5b/i.test(name)) return 'Qwen 2.5 0.5B';
+  return name.replace(/^gemini-/, '');
+};
+
 export const App: React.FC = () => {
   const engineRef = useRef<AudioEngine | null>(null);
   const agentRef = useRef<DJAgent | null>(null);
@@ -458,7 +466,7 @@ export const App: React.FC = () => {
                     ? 'Checking Ollama…'
                     : b.ollama.online
                       ? `Ollama is running with ${b.ollama.model} (used first)`
-                      : 'Ollama is not running, or the qwen2.5:3b model is missing. Start Ollama to use the local AI.',
+                      : 'Ollama is not running, or the qwen2.5:1.5b model is missing. Start Ollama to use the local AI.',
                 },
                 {
                   id: 'gemini',
@@ -892,11 +900,11 @@ export const App: React.FC = () => {
             <Sparkles className={`w-3.5 h-3.5 ${isAiThinking ? 'animate-spin' : 'animate-pulse'}`} />
             <span>
               {engine.aiProvider === 'ollama'
-                ? 'Qwen 2.5 3B (Local Primary)'
+                ? `${formatAiModelDisplay(engine.aiModelName)} (Local Primary)`
                 : engine.aiProvider === 'gemini'
-                ? `Gemini ${engine.aiModelName ? engine.aiModelName.replace(/^gemini-/, '') : 'Flash'} (Cloud Backup)`
+                ? `Gemini ${formatAiModelDisplay(engine.aiModelName)} (Cloud Backup)`
                 : engine.aiStatus === 'online'
-                ? 'Qwen 2.5 3B (Local)'
+                ? `${formatAiModelDisplay(engine.aiModelName)} (Local)`
                 : 'AI DJ (Offline Heuristics)'}
             </span>
           </div>

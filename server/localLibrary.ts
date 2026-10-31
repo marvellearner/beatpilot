@@ -8,6 +8,9 @@
  * - Most played: once a YouTube song has been played SAVE_AFTER_PLAYS times, its cached audio is
  *   converted to MP3 (192 kbps, tagged) into music/Most Played/ "Artist - Title [videoId].mp3",
  *   so it survives the download cache being trimmed. Without ffmpeg the original audio is copied.
+ * - Offline sync: in the background, liked songs and most played songs that aren't saved yet are
+ *   downloaded (one at a time, from the third-party audio source, never YouTube itself) and saved
+ *   the same way. See runOfflineSync.
  *
  * Local songs have URLs "local:<id>", so the app's normal search -> stream -> decode path plays
  * them; a YouTube URL with a saved copy plays that copy (instant, and works offline).
@@ -23,9 +26,12 @@ import { ROOT_DIR, DATA_DIR } from './paths';
 import { parseJsonBody } from './http';
 import { writeJsonAtomic } from './jsonFile';
 import { sendFile } from './sendFile';
-import { audioInstances } from './audioSource';
-import { PLAY_HISTORY_FILE, BANNED_SONGS_FILE } from './library';
-import { cachedAudioPath, extractYouTubeVideoId, formatDuration, type SearchResult } from './youtube';
+import { audioInstances, searchVideos } from './audioSource';
+import { downloadToCache } from './audioDownload';
+import { PLAY_HISTORY_FILE, BANNED_SONGS_FILE, FAVORITES_FILE } from './library';
+import { cachedAudioPath, extractYouTubeVideoId, formatDuration, pruneAudioCache, type SearchResult } from './youtube';
+import { EMPTY_TASTE, rankHits } from '../shared/taste';
+import { logError } from './logger';
 import { guessLanguage } from '../shared/songLanguage';
 
 export const MUSIC_DIR = path.join(ROOT_DIR, 'music');
@@ -33,7 +39,11 @@ const UPLOADS_DIR = path.join(MUSIC_DIR, 'Uploads');
 const SAVED_DIR = path.join(MUSIC_DIR, 'Most Played');
 const INDEX_FILE = path.join(DATA_DIR, 'local_library.json');
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.webm']);
-const SAVE_AFTER_PLAYS = 3; // a song played this often is kept as an MP3
+const SAVE_AFTER_PLAYS = 2; // a song played this often is kept as an MP3 (liked songs always are)
+const SYNC_EVERY_MS = 30 * 60_000; // look for liked / most played songs to save every 30 minutes
+const SYNC_START_DELAY_MS = 20_000; // ...first 20 s after startup, once the library is scanned
+const SYNC_GAP_MS = 15_000; // pause between two downloads, to go easy on the public instance
+const SYNC_RETRY_MS = 6 * 60 * 60_000; // a song that failed is tried again after 6 hours
 const MAX_FILES = 20_000;
 const MAX_UPLOAD_BYTES = 300 * 1024 ** 2;
 const STALE_MS = 60 * 60 * 1000; // a .part or .lock file this old was left by a crash
@@ -280,6 +290,10 @@ const safeName = (s: string) => s.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').repl
 export function maybeSaveMostPlayed(song: { url?: string; title?: string; artist?: string }, playCount: number) {
   const videoId = song.url ? extractYouTubeVideoId(song.url) : null;
   if (!videoId || playCount < SAVE_AFTER_PLAYS || localByVideoId(videoId) || saveQueue.some((s) => s.videoId === videoId)) return;
+  if (!fs.existsSync(cachedAudioPath(videoId))) {
+    wakeOfflineSync(); // not downloaded (or trimmed from the cache): the sync fetches it
+    return;
+  }
   saveQueue.push({ videoId, title: song.title || 'Unknown Track', artist: song.artist || 'Unknown Artist' });
   void processSaveQueue();
 }
@@ -363,6 +377,110 @@ export function backfillMostPlayed() {
   for (const h of readJson<Array<{ url?: string; title?: string; artist?: string; playCount?: number }>>(PLAY_HISTORY_FILE, [])) {
     maybeSaveMostPlayed(h, h.playCount || 0);
   }
+  setTimeout(() => void runOfflineSync(), SYNC_START_DELAY_MS).unref?.();
+  setInterval(() => void runOfflineSync(), SYNC_EVERY_MS).unref?.();
+}
+
+// --- Offline sync: liked and most played songs saved in the background ---
+
+type SyncSong = { url?: string; title?: string; artist?: string; playCount?: number };
+const syncFailedAt = new Map<string, number>(); // song key -> when it last failed
+const syncVideoIds = new Map<string, string>(); // song key -> video id found by search (liked songs saved without a link)
+let syncing = false;
+let syncAgain = false;
+const syncState = { current: '', lastRunAt: 0 };
+
+/** Runs the sync soon (after a like, or a song reaching SAVE_AFTER_PLAYS without a cached copy). */
+export function wakeOfflineSync() {
+  if (syncing) syncAgain = true;
+  else setTimeout(() => void runOfflineSync(), 2_000).unref?.();
+}
+
+const songKey = (s: SyncSong) => (s.url && extractYouTubeVideoId(s.url)) || `${s.artist ?? ''} - ${s.title ?? ''}`.toLowerCase();
+
+/** Liked songs first, then most played (by plays), without banned songs or duplicates. */
+function songsToKeep(): SyncSong[] {
+  const banned = readJson<SyncSong[]>(BANNED_SONGS_FILE, []);
+  const bannedKeys = new Set(banned.map(songKey));
+  const liked = readJson<SyncSong[]>(FAVORITES_FILE, []);
+  const played = readJson<SyncSong[]>(PLAY_HISTORY_FILE, [])
+    .filter((h) => (h.playCount || 0) >= SAVE_AFTER_PLAYS)
+    .sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+  const seen = new Set<string>();
+  return [...liked, ...played].filter((s) => {
+    if (!s.title || /^https?:\/\//i.test(s.title)) return false; // a failed lookup saved its link as the title
+    const key = songKey(s);
+    if (seen.has(key) || bannedKeys.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** The song's video id: from its link, or (a liked song saved without one) the best search hit. */
+async function videoIdFor(song: SyncSong): Promise<string | null> {
+  const fromUrl = song.url ? extractYouTubeVideoId(song.url) : null;
+  if (fromUrl) return fromUrl;
+  const known = syncVideoIds.get(songKey(song));
+  if (known) return known;
+  const query = `${song.artist && !/^unknown/i.test(song.artist) ? song.artist + ' ' : ''}${song.title}`;
+  const best = rankHits((await searchVideos(query)).filter((h) => h.lengthSeconds <= 600), EMPTY_TASTE, query, 1)[0];
+  if (best) syncVideoIds.set(songKey(song), best.videoId);
+  return best?.videoId ?? null;
+}
+
+/** How far the sync has got, for the Local Music panel. */
+function syncSummary() {
+  const songs = songsToKeep();
+  const saved = songs.filter((s) => {
+    const id = (s.url && extractYouTubeVideoId(s.url)) || syncVideoIds.get(songKey(s));
+    return id && localByVideoId(id);
+  }).length;
+  const failed = [...syncFailedAt.values()].filter((t) => t > Date.now() - SYNC_RETRY_MS).length;
+  return { wanted: songs.length, saved, failed, current: syncState.current, running: syncing };
+}
+
+/**
+ * Goes through the liked and most played songs and saves each one that isn't in the offline
+ * library yet: from the download cache if it's there, otherwise downloaded first through the
+ * third-party audio source. One song at a time, SYNC_GAP_MS apart; stops while offline.
+ */
+export async function runOfflineSync(): Promise<void> {
+  if (syncing) return;
+  syncing = true;
+  try {
+    do {
+      syncAgain = false;
+      const songs = songsToKeep();
+      syncState.lastRunAt = Date.now();
+      for (const song of songs) {
+        const key = songKey(song);
+        if ((syncFailedAt.get(key) ?? 0) > Date.now() - SYNC_RETRY_MS) continue;
+        if (!(await isOnline())) break;
+        let videoId: string | null = null;
+        try {
+          videoId = await videoIdFor(song);
+          if (!videoId) throw new Error('not found by search');
+          if (localByVideoId(videoId)) continue;
+          if (saveQueue.some((s) => s.videoId === videoId)) continue;
+          const cacheFile = cachedAudioPath(videoId);
+          if (!fs.existsSync(cacheFile)) {
+            syncState.current = song.title || videoId;
+            await downloadToCache(videoId, cacheFile, () => void pruneAudioCache());
+            await new Promise((r) => setTimeout(r, SYNC_GAP_MS));
+          }
+          saveQueue.push({ videoId, title: song.title || 'Unknown Track', artist: song.artist || 'Unknown Artist' });
+          await processSaveQueue();
+        } catch (err) {
+          syncFailedAt.set(key, Date.now());
+          logError('offline-sync', `${song.artist ?? ''} - ${song.title ?? ''} (${videoId ?? 'no id'}): ${(err as Error)?.message ?? err}`);
+        } finally {
+          syncState.current = '';
+        }
+      }
+    } while (syncAgain);
+  } finally {
+    syncing = false;
+  }
 }
 
 // --- Serving and routes ---
@@ -417,6 +535,7 @@ export async function handleLocalLibrary(req: IncomingMessage, res: ServerRespon
     ffmpeg: ffmpegAvailable,
     online: await isOnline(),
     saveAfterPlays: SAVE_AFTER_PLAYS,
+    sync: syncSummary(),
   });
 
   if (url.pathname === '/api/local/library' && req.method === 'GET') {

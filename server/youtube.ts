@@ -224,7 +224,8 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
           }
         }
 
-        setCachedSearch(cacheKey, videos);
+        // An empty answer is usually a busy instance, not a missing song: ask again next time
+        if (videos.length) setCachedSearch(cacheKey, videos);
         return videos;
       })().finally(() => {
         inFlightSearches.delete(cacheKey);

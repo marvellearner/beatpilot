@@ -11,6 +11,7 @@ interface LibrarySummary {
   ffmpeg: boolean;
   online: boolean;
   saveAfterPlays: number;
+  sync?: { wanted: number; saved: number; current: string; failed: number; running: boolean };
 }
 
 interface LocalLibraryPanelProps {
@@ -244,8 +245,16 @@ export const LocalLibraryPanel: React.FC<LocalLibraryPanelProps> = ({ offlineOnl
       )}
       {summary && (
         <div className="text-[10px] text-slate-500 leading-snug">
-          Songs played {summary.saveAfterPlays}+ times are saved here as {summary.ffmpeg ? 'MP3' : 'their original audio (install ffmpeg for MP3)'} by
-          themselves, so they play without internet. Search finds local songs first.
+          Liked songs and songs played {summary.saveAfterPlays}+ times are downloaded and saved here as{' '}
+          {summary.ffmpeg ? 'MP3' : 'their original audio (install ffmpeg for MP3)'} in the background, so they play without internet.
+          Search finds local songs first.
+          {summary.sync && summary.sync.wanted > 0 && (
+            <span className="block text-emerald-300/80 pt-0.5">
+              Offline sync: {summary.sync.saved} of {summary.sync.wanted} liked / most played saved
+              {summary.sync.current ? ` · downloading "${summary.sync.current}"…` : ''}
+              {summary.sync.failed ? ` · ${summary.sync.failed} failed (retry in 6 h)` : ''}
+            </span>
+          )}
         </div>
       )}
     </div>

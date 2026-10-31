@@ -154,7 +154,7 @@ export function tasteForPrompt(t: TasteProfile): string {
 
 // Versions that don't belong in a DJ set (unless the search asked for one)
 const UNWANTED =
-  /\b(slowed|reverb|lo-?fi|8d|nightcore|sped up|speed up|karaoke|instrumental|cover|reaction|jukebox|mashup|non[- ]?stop|1 hour|hour loop|ringtone|status|teaser|trailer|unplugged|live (at|in|from|performance|concert|show)|tonight show|show starring|interview|vlog)\b/i;
+  /\b(slowed|reverb|lo-?fi|8d|nightcore|sped up|speed up|karaoke|instrumental|cover|reaction|jukebox|mashup|non[- ]?stop|1 hour|hour loop|ringtone|status|teaser|trailer|unplugged|live (at|in|from|performance|concert|show)|tonight show|show starring|interview|vlog|jhankar)\b/i;
 const OFFICIAL = /\b(official (music )?(video|audio)|full (video|song))\b/i;
 
 /**

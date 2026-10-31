@@ -27,6 +27,8 @@ export interface TrackMetadata {
   firstDownbeatTime?: number;      // Estimated bar downbeat ("1") within the first bar, in seconds
   musicStartTime?: number;         // Timestamp (seconds) where music/beat begins, skipping initial conversation/skits
   introSkipReason?: string;        // Explanation of initial conversation skip (Ollama AI / Audio MIR)
+  musicEndTime?: number;           // Where the music ends, before a closing scene / dialogue / fade / silence (OutroDetector)
+  outroReason?: string;            // Why (shown in the mix status)
   energyProfile?: EnergyProfile;   // Loudness / vocal-band envelopes used to plan mix points
   // Key-locked tempo: the song as downloaded, and the tempo multiple its current audio is stretched to
   originalBuffer?: AudioBuffer;
@@ -42,6 +44,7 @@ export interface OriginalTiming {
   highlightTime?: number;
   cueInTime?: number;
   musicStartTime?: number;
+  musicEndTime?: number;
 }
 
 /** On-air tempo for the Tempo control. */
@@ -120,6 +123,8 @@ export interface QueuedTrack {
   firstDownbeatTime?: number;
   musicStartTime?: number;
   introSkipReason?: string;
+  musicEndTime?: number;
+  outroReason?: string;
   energyProfile?: EnergyProfile;
   // Key-locked tempo lock (Party mood): the song as downloaded, and the tempo it was stretched to
   originalBuffer?: AudioBuffer;

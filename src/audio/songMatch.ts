@@ -4,6 +4,8 @@
  * "Artist - Title (Official Video)" from YouTube.
  */
 
+import { songArtists } from '../../shared/taste';
+
 export interface SongRef {
   id?: string;
   title: string;
@@ -38,14 +40,21 @@ export function cleanCoreTitle(raw: string): string {
   return s.replace(/[^a-z0-9]/g, '').trim();
 }
 
-/** Extracts all distinct segments from a title string (e.g. artist and title parts). */
-export function titleSegments(raw: string): string[] {
+/**
+ * The parts of a title ("Artist - Song", "Artist: Song") that can name the song, without
+ * `exclude` (its artists: a piece like "diljitdosanjh" is shared by all of their songs) and
+ * without what follows the first "|" (credits: director, label, "Latest Punjabi Songs 2024").
+ */
+export function titleSegments(raw: string, exclude: string[] = []): string[] {
   if (!raw) return [];
-  let s = raw.toLowerCase();
+  let s = raw.toLowerCase().split('|')[0];
   s = s.replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, ' ');
   s = s.replace(/\b(official|music|video|audio|lyrics?|lyrical|full song|hd|4k|visualizer|remix|club mix|extended)\b/g, ' ');
-  const parts = s.split(/[-|:]/).map((p) => p.replace(/[^a-z0-9]/g, '').trim()).filter((p) => p.length >= 3);
-  return parts;
+  const skip = new Set(exclude.map((e) => e.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean));
+  return s
+    .split(/[-:]/)
+    .map((p) => p.replace(/[^a-z0-9]/g, '').trim())
+    .filter((p) => p.length >= 3 && !skip.has(p));
 }
 
 /** A stable id for storing per-song data (hot cues, AI answers): the URL, else title + artist. */
@@ -67,7 +76,8 @@ export function songKeys(song: SongRef): string[] {
   if (normTitle) keys.push(normTitle);
   const coreTitle = cleanCoreTitle(song.title);
   if (coreTitle && coreTitle !== normTitle) keys.push(coreTitle);
-  for (const seg of titleSegments(song.title)) {
+  // Not the artist's name on its own: every song of theirs has that piece
+  for (const seg of titleSegments(song.title, songArtists(song))) {
     keys.push(seg);
   }
   if (song.artist && !/searching|^artist$/i.test(song.artist)) {

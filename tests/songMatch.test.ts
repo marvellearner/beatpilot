@@ -113,3 +113,18 @@ describe('is8dOrMashupSong', () => {
 });
 
 
+
+describe('same artist, different songs', () => {
+  it("doesn't treat an artist's songs (or shared credits) as one song", () => {
+    const lover = { title: 'Diljit Dosanjh: LOVER (Official Music Video) Intense | Raj Ranjodh | MoonChild Era', artist: 'Diljit Dosanjh' };
+    expect(same(lover, { title: 'Diljit Dosanjh - G.O.A.T. (Official Music Video)', artist: 'Diljit Dosanjh' })).toBe(false);
+    expect(same(lover, { title: 'Charmer | Raj Ranjodh | Avvy Sra', artist: 'Diljit Dosanjh' })).toBe(false);
+    expect(same({ title: 'Guru Randhawa: Lahore (Official Video) | T-Series', artist: 'T-Series' }, { title: 'Guru Randhawa: High Rated Gabru', artist: 'T-Series' })).toBe(false);
+    expect(same({ title: 'Diljit Dosanjh - Lover' }, { title: 'Diljit Dosanjh - Born To Shine' })).toBe(false);
+  });
+
+  it('still matches the same song written differently', () => {
+    expect(same({ title: 'Diljit Dosanjh - Lover' }, { title: 'Diljit Dosanjh: LOVER (Official Music Video) Intense | Raj Ranjodh', artist: 'Diljit Dosanjh' })).toBe(true);
+    expect(same({ title: 'Shubh - Baller' }, { title: 'Shubh - Baller (Official Music Video)', artist: 'SHUBH' })).toBe(true);
+  });
+});

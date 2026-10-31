@@ -323,6 +323,27 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 </div>
               </div>
 
+              {/* "Play only / more <artist>" from the AI chat */}
+              {engine.artistFocus && (
+                <div
+                  id="party-console-artist-focus"
+                  className="flex items-center justify-between gap-2 text-[11px] bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-lg px-2.5 py-1.5"
+                >
+                  <span className="text-fuchsia-100 truncate">
+                    {engine.artistFocus.only ? 'Only' : 'More'}: <span className="font-bold">{engine.artistFocus.artists.join(' & ')}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => engine.clearArtistFocus()}
+                    className="p-0.5 rounded text-fuchsia-200 hover:text-white hover:bg-white/10 shrink-0"
+                    title="Back to normal: play all your music"
+                    aria-label="Clear artist filter"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {/* Easy Song Request Input with Matching Songs Dropdown */}
               <div ref={searchContainerRef} className="relative z-30">
                 <form id="party-console-song-request-form" onSubmit={(e) => handleSearchSubmit(e, false)} className="flex gap-1.5">
@@ -1113,22 +1134,29 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                             ? 'key lock off'
                             : `this song ${Math.round(playbackState.effectiveBpm)}`;
                       return (
-                        <span
+                        <button
+                          type="button"
                           id="party-console-party-tempo-badge"
-                          className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                          onClick={() => {
+                            const el = document.getElementById('tempo-control');
+                            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            const input = el?.querySelector('input');
+                            input?.focus();
+                          }}
+                          className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border cursor-pointer hover:scale-105 active:scale-95 transition-all ${
                             onTempo || engine.tempoBusy
-                              ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/25'
-                              : 'text-amber-300 bg-amber-500/10 border-amber-500/25'
+                              ? 'text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border-emerald-500/25'
+                              : 'text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/25'
                           }`}
                           title={
                             onTempo
-                              ? 'Every song, including this one, plays at this tempo with key lock (pitch unchanged).'
-                              : `This song is ${Math.round(originalBpm ?? 0)} BPM originally. Key lock can stretch about ±25% cleanly, so it is played as close to ${Math.round(sessionBpm)} as possible without distorting voices. The next songs are tuned exactly.`
+                              ? `Click to edit tempo. Currently ${Math.round(sessionBpm)} BPM (key lock on).`
+                              : `Click to edit tempo. Currently target ${Math.round(sessionBpm)} BPM (${detail}).`
                           }
                         >
                           <Lock className="w-2.5 h-2.5" />
                           {label} {Math.round(sessionBpm)} · {detail}
-                        </span>
+                        </button>
                       );
                     })()}
                     {currentTrack?.highlightTime !== undefined && (

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Gauge, Lock, Unlock, Minus, Plus } from 'lucide-react';
 import { TempoInfo } from '../../types';
 
@@ -29,6 +29,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
   compact,
 }) => {
   const [bpmInput, setBpmInput] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const disabled = !tempo;
   const ratio = tempo?.ratio ?? 1;
   const pct = (ratio - 1) * 100;
@@ -53,20 +54,31 @@ export const TempoControl: React.FC<TempoControlProps> = ({
             <span className="text-[11px] font-extrabold text-white tracking-wide">TEMPO</span>
           </div>
 
-          <div id="tempo-control-original-bpm" className="flex flex-col items-center px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 min-w-[54px] sm:min-w-[64px]">
+          <button
+            type="button"
+            id="tempo-control-original-bpm"
+            onClick={() => onSetTempo(1)}
+            disabled={disabled}
+            title="Click to reset to original BPM (1.0x)"
+            className="flex flex-col items-center px-2 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 min-w-[54px] sm:min-w-[64px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-30 active:scale-95"
+          >
             <span className="text-[9px] uppercase tracking-wider text-slate-400">Original</span>
             <span className="text-xs font-mono font-bold text-slate-200">{tempo ? tempo.naturalBpm.toFixed(1) : '—'}</span>
-          </div>
+          </button>
 
-          <div
+          <button
+            type="button"
             id="tempo-control-current-bpm"
-            className={`flex flex-col items-center px-2 py-0.5 rounded-lg border min-w-[54px] sm:min-w-[64px] ${
-              Math.abs(pct) > 0.05 ? 'bg-cyan-500/10 border-cyan-500/30' : 'bg-white/5 border-white/10'
+            onClick={() => inputRef.current?.focus()}
+            disabled={disabled}
+            title="Click to type exact BPM"
+            className={`flex flex-col items-center px-2 py-0.5 rounded-lg border min-w-[54px] sm:min-w-[64px] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-30 active:scale-95 ${
+              Math.abs(pct) > 0.05 ? 'bg-cyan-500/10 hover:bg-cyan-500/20 border-cyan-500/30' : 'bg-white/5 hover:bg-white/10 border-white/10'
             }`}
           >
             <span className="text-[9px] uppercase tracking-wider text-slate-400">Current</span>
             <span className="text-xs font-mono font-bold text-white">{tempo ? tempo.currentBpm.toFixed(1) : '—'}</span>
-          </div>
+          </button>
 
           {tempo && (
             <span className={`text-[10px] font-mono font-bold ${pct > 0.05 ? 'text-emerald-300' : pct < -0.05 ? 'text-rose-300' : 'text-slate-500'}`}>
@@ -130,6 +142,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
 
         <form onSubmit={submitBpm} className="flex items-center gap-1 ml-auto">
           <input
+            ref={inputRef}
             type="number"
             inputMode="decimal"
             min={30}

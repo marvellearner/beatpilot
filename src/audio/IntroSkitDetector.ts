@@ -26,12 +26,10 @@ export interface IntroAnalysisResult {
   profile?: { beat: number[]; bass: number[]; speech: number[] };
 }
 
-const FRAME_RATE = 100; // 10 ms frames
-const WINDOW_SECONDS = 6; // beat-strength window
+import { FRAME_RATE, WINDOW_SECONDS, measureBeatPresence, quantile, speechAt as speechKind } from './beatPresence';
+
 const SUSTAIN_SECONDS = 8; // the beat must hold this long to count as "music started"
 const MAX_SCAN_SECONDS = 150;
-const MIN_LAG = 30; // 0.3 s = 200 BPM
-const MAX_LAG = 100; // 1.0 s = 60 BPM
 
 const NO_INTRO = (reason: string, confidence = 0.9, profile?: IntroAnalysisResult['profile']): IntroAnalysisResult => ({
   hasConversationPreamble: false,
@@ -61,117 +59,20 @@ export class IntroSkitDetector {
     // Also analyse a stretch past the scan so "normal for this song" levels are known
     const refSeconds = Math.min(duration, scanSeconds + 60);
 
-    // --- 10 ms envelopes: low band (≤150 Hz), mid band (300 Hz–3 kHz, voice), full band ---
-    const hop = Math.floor(sampleRate / FRAME_RATE);
-    const frames = Math.floor((refSeconds * sampleRate) / hop);
-    const low = new Float32Array(frames);
-    const mid = new Float32Array(frames);
-    const full = new Float32Array(frames);
-    const lpLow = 1 - Math.exp((-2 * Math.PI * 150) / sampleRate);
-    const hpMid = Math.exp((-2 * Math.PI * 300) / sampleRate);
-    const lpMid = 1 - Math.exp((-2 * Math.PI * 3000) / sampleRate);
-    let lowState = 0;
-    let hpPrevIn = 0;
-    let hpOut = 0;
-    let midState = 0;
-    for (let f = 0; f < frames; f++) {
-      let sLow = 0;
-      let sMid = 0;
-      let sFull = 0;
-      const base = f * hop;
-      for (let i = 0; i < hop; i++) {
-        const x = data[base + i];
-        lowState += lpLow * (x - lowState);
-        hpOut = hpMid * (hpOut + x - hpPrevIn);
-        hpPrevIn = x;
-        midState += lpMid * (hpOut - midState);
-        sLow += lowState * lowState;
-        sMid += midState * midState;
-        sFull += x * x;
-      }
-      low[f] = Math.sqrt(sLow / hop);
-      mid[f] = Math.sqrt(sMid / hop);
-      full[f] = Math.sqrt(sFull / hop);
-    }
-
-    const peakFull = full.reduce((m, v) => Math.max(m, v), 0);
+    // --- Beat presence per second (envelopes, low-end onsets, pulse strength; see beatPresence.ts) ---
+    const presence = measureBeatPresence(data, sampleRate, 0, refSeconds);
+    const { onset, beatStrength, lowLevel, seconds, peakFull } = presence;
     if (peakFull < 0.005) return NO_INTRO('Very quiet audio', 0.5);
-
-    // --- Low-end onset strength (rise in log energy), the "beat" signal ---
-    const peakLow = low.reduce((m, v) => Math.max(m, v), 1e-9);
-    const onset = new Float32Array(frames);
-    for (let f = 1; f < frames; f++) {
-      const d = Math.log1p((100 * low[f]) / peakLow) - Math.log1p((100 * low[f - 1]) / peakLow);
-      onset[f] = d > 0 ? d : 0;
-    }
-
-    // --- Beat strength per second ---
     const win = WINDOW_SECONDS * FRAME_RATE;
-    const seconds = Math.floor((frames - win - MAX_LAG - 2) / FRAME_RATE);
     if (seconds < SUSTAIN_SECONDS + 2) return NO_INTRO('Not enough audio to analyse', 0.5);
 
-    // Pulse strength = best normalised autocorrelation over every plausible beat period
-    // (0.3–1.0 s = 60–200 BPM), so it doesn't depend on the BPM reading being right.
-    const beatStrength = new Float32Array(seconds);
-    const lowLevel = new Float32Array(seconds);
-    const centered = new Float32Array(win + MAX_LAG + 2);
-    for (let s = 0; s < seconds; s++) {
-      const start = s * FRAME_RATE;
-      let mean = 0;
-      for (let f = start; f < start + win; f++) mean += onset[f];
-      mean /= win;
-      for (let i = 0; i < centered.length; i++) centered[i] = onset[start + i] - mean;
-      let energy = 0;
-      for (let i = 0; i < win; i++) energy += centered[i] * centered[i];
-      let best = 0;
-      if (energy > 0) {
-        for (let lag = MIN_LAG; lag <= MAX_LAG; lag++) {
-          let sum = 0;
-          for (let i = 0; i < win; i++) {
-            // ±1 frame tolerance: real beats wobble a little
-            const c = centered[i + lag];
-            const n = centered[i + lag + 1];
-            const p = centered[i + lag - 1];
-            sum += centered[i] * (c > n ? (c > p ? c : p) : n > p ? n : p);
-          }
-          if (sum / energy > best) best = sum / energy;
-        }
-      }
-      beatStrength[s] = best;
-      let lowSum = 0;
-      for (let f = start; f < start + win; f++) lowSum += low[f];
-      lowLevel[s] = lowSum / win;
-    }
-
     // "Normal" beat strength / bass level for this song: upper quartile of the analysed stretch
-    const quantile = (arr: Float32Array, q: number) => {
-      const sorted = Array.from(arr).sort((a, b) => a - b);
-      return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
-    };
     const refBeat = Math.max(0.05, quantile(beatStrength, 0.75));
     const refLow = Math.max(1e-6, quantile(lowLevel, 0.75));
     const hasBeat = (s: number) => beatStrength[s] >= 0.45 * refBeat && lowLevel[s] >= 0.3 * refLow;
 
     /** One second of audio: 1 = talking-like (choppy voice band with pauses), 0 = not, -1 = silent. */
-    const speechAt = (s: number): number => {
-      const a = s * FRAME_RATE;
-      let sum = 0;
-      let max = 0;
-      for (let f = a; f < a + FRAME_RATE; f++) {
-        sum += mid[f];
-        if (mid[f] > max) max = mid[f];
-      }
-      const meanMid = sum / FRAME_RATE;
-      if (max < 0.02 * peakFull) return -1;
-      let variance = 0;
-      let pauses = 0;
-      for (let f = a; f < a + FRAME_RATE; f++) {
-        variance += (mid[f] - meanMid) ** 2;
-        if (mid[f] < 0.15 * max) pauses++;
-      }
-      const choppiness = Math.sqrt(variance / FRAME_RATE) / (meanMid || 1);
-      return choppiness > 0.5 && pauses >= 8 ? 1 : 0;
-    };
+    const speechAt = (s: number) => speechKind(presence, s);
 
     const round2 = (v: number) => Math.round(v * 100) / 100;
     const profileSeconds = Math.min(seconds, Math.floor(scanSeconds) + SUSTAIN_SECONDS);

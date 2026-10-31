@@ -217,6 +217,71 @@ export async function searchVideos(query: string): Promise<VideoHit[]> {
   throw new Error(`Search is unavailable (${errors.join('; ') || 'no sources set up'})`);
 }
 
+/** "45M views", "1.2B views", "123,456 views" -> a number. */
+function parseViews(text?: string): number | undefined {
+  const m = text?.replace(/,/g, '').match(/([\d.]+)\s*([KMB])?/i);
+  if (!m) return undefined;
+  const scale = { K: 1e3, M: 1e6, B: 1e9 }[(m[2] || '').toUpperCase() as 'K' | 'M' | 'B'] ?? 1;
+  return Math.round(Number(m[1]) * scale) || undefined;
+}
+
+async function relatedInvidious(inst: Instance, videoId: string): Promise<VideoHit[]> {
+  const j = await getJson(`${inst.base}/api/v1/videos/${videoId}?fields=recommendedVideos`);
+  type Rec = { videoId: string; title: string; author: string; lengthSeconds: number; viewCountText?: string; published?: number; videoThumbnails?: Array<{ url: string; quality?: string }> };
+  return (j.recommendedVideos || []).map((v: Rec) => {
+    const thumb = v.videoThumbnails?.find((t) => t.quality === 'medium') ?? v.videoThumbnails?.[0];
+    return {
+      videoId: v.videoId,
+      title: v.title,
+      author: v.author,
+      lengthSeconds: Number(v.lengthSeconds) || 0,
+      thumbnail: thumb ? new URL(thumb.url, inst.base).href : '',
+      viewCount: parseViews(v.viewCountText),
+      publishedAt: v.published ? v.published * 1000 : undefined,
+    };
+  });
+}
+
+async function relatedPiped(inst: Instance, videoId: string): Promise<VideoHit[]> {
+  const j = await getJson(`${inst.base}/streams/${videoId}`);
+  type Rel = { url?: string; title: string; uploaderName: string; duration: number; thumbnail: string; views?: number; uploaded?: number };
+  return (j.relatedStreams || [])
+    .filter((v: Rel) => v.url?.startsWith('/watch?v='))
+    .map((v: Rel) => ({
+      videoId: v.url!.slice('/watch?v='.length, '/watch?v='.length + 11),
+      title: v.title,
+      author: v.uploaderName,
+      lengthSeconds: Number(v.duration) || 0,
+      thumbnail: v.thumbnail || '',
+      viewCount: Number(v.views) > 0 ? Number(v.views) : undefined,
+      publishedAt: Number(v.uploaded) > 0 ? Number(v.uploaded) : undefined,
+    }));
+}
+
+/**
+ * The songs YouTube lists next to this one ("people who played this also played"), through the
+ * third-party instances. It's built from what listeners actually play together, which makes it
+ * the best signal for "what people with this taste like".
+ */
+export async function relatedVideos(videoId: string): Promise<VideoHit[]> {
+  const now = Date.now();
+  const instances = audioInstances();
+  const ordered = [
+    ...instances.filter((i) => now - (failedAt.get(i.base) ?? 0) > FAILED_SKIP_MS),
+    ...instances.filter((i) => now - (failedAt.get(i.base) ?? 0) <= FAILED_SKIP_MS),
+  ];
+  const errors: string[] = [];
+  for (const inst of ordered) {
+    try {
+      const hits = inst.kind === 'invidious' ? await relatedInvidious(inst, videoId) : await relatedPiped(inst, videoId);
+      return hits.filter((h) => /^[A-Za-z0-9_-]{11}$/.test(h.videoId) && h.lengthSeconds > 0);
+    } catch (err) {
+      errors.push(`${new URL(inst.base).host}: ${(err as Error).message}`);
+    }
+  }
+  throw new Error(`Related songs unavailable (${errors.join('; ') || 'no sources set up'})`);
+}
+
 /** Forget a resolved link (e.g. it expired or the instance stopped serving it), so the next try re-resolves. */
 export function forgetAudio(videoId: string, source?: string) {
   infoCache.delete(videoId);

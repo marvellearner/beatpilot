@@ -16,7 +16,7 @@ Do this once, on the laptop.
    ```
 3. *(Optional)* Install [Ollama](https://ollama.com/) and download the AI model. This lets the app understand typed instructions. Everything else works without it.
    ```powershell
-   ollama pull qwen2.5:3b
+   ollama pull qwen2.5:1.5b
    ```
 4. *(Only if you'll use the iPhone remote)* Allow the phone to reach the laptop. Open PowerShell **as Administrator** and run:
    ```powershell
@@ -94,6 +94,18 @@ Once a song is playing, the app looks after the party:
 | **Original: ON / OFF** | **ON:** songs play at their **original BPM**, ignoring the party/set tempo and any speed change. It stays on for the next songs too. **OFF:** the set tempo (if any) applies again. Pressing a speed button or **Set** turns it off. |
 
 The display shows **Original** BPM and **Current** BPM side by side, plus the speed (e.g. `1.10x (+10%)`). The setting applies to the song that's playing; with **Whole set** on, it carries on to the next songs.
+
+**AI chat** (the instruction box at the bottom). Song requests take effect at once; mixing, drum and EQ instructions go to the AI DJ.
+
+| Type | What happens |
+| :--- | :--- |
+| `play only Diljit Dosanjh songs` (also `only …`, `just …`, `… only`, several artists with `and`) | Up Next keeps only that artist's songs and refills with their hits. If the song on air is by someone else, the app mixes into one of theirs within 45 s. A chip on Up Next shows **Only: Diljit Dosanjh**, with ✕ to clear it. |
+| `play more AP Dhillon` | New picks favour that artist; other songs still play. |
+| `play anything` / `back to normal` | Clears the artist filter. |
+| `play Lover by Diljit Dosanjh` | Finds the song and mixes it in next. |
+| `kill the bass on deck A`, `start the dhol`, `smooth crossfade` | Handled by the AI DJ (it can take up to 30 s on a laptop CPU). |
+
+An instruction the app doesn't understand does nothing, and the reply says so. It no longer guesses a mix.
 
 ---
 
@@ -205,7 +217,7 @@ https://www.youtube.com/watch?v=kJQP7kiw5Fk
 
 The **📁 Local Music** card (Party console, middle column) keeps songs on the laptop, so the party carries on without internet.
 
-**Your most-played songs are saved by themselves.** Once a song has played **3 times**, the app saves it as an **MP3** in the `music/Most Played` folder. It then plays from that file, instantly and offline, even after the download cache has been cleaned up.
+**Your liked and most-played songs are saved by themselves.** Every song you **like** (♥) and every song played **2 times** is saved as an **MP3** in the `music/Most Played` folder. Songs that aren't downloaded yet are fetched in the background, one at a time, through the same third-party source the app plays from (never from YouTube directly). The sync runs at startup, every 30 minutes, and right after you like a song. The Local Music panel shows how far it has got, e.g. *"Offline sync: 57 of 58 liked / most played saved"*. A song that can't be fetched is tried again after 6 hours. Saved songs play instantly and offline, even after the download cache has been cleaned up.
 
 **Add your own music** (MP3, WAV, FLAC, M4A, AAC, OGG, Opus):
 

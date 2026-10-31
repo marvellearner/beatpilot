@@ -21,42 +21,38 @@ This guide covers the host hardware, how to run the local LLM, the audio memory 
 
 ---
 
-## 2. Local LLM: CPU-Only Ollama
+## 2. Local LLM: CPU-Only Ollama (`qwen2.5:1.5b`)
 
-### 2.1 Why not the GPU
-Loading `qwen2.5:3b` on the GTX 1050 crashed with `0xe06d7363` (CUDA out of memory). The VRAM needed did not fit:
+### 2.1 Why `qwen2.5:1.5b` on CPU
+Loading `qwen2.5:3b` on the GTX 1050 crashed with `0xe06d7363` (CUDA out of memory), and on CPU under real workload it took 30s+ per answer (triggering hundreds of timeouts).
+Switching to `qwen2.5:1.5b` (~986 MB) with `num_ctx: 2048` resolved the issue:
+- Model size: 986 MB (vs 1.98 GB for 3B).
+- CPU generation is ~3x–10x faster: warm structured completions take **~2.1 seconds** on CPU.
+- Never times out against the 12 s failover window.
 
-| VRAM consumer | Size |
-| :--- | :--- |
-| Q4_K_M weights | ~1.98 GB |
-| 4k-token KV cache | ~0.45–0.65 GB |
-| Windows DWM reservation | ~0.8–1.2 GB |
-| **Total** | **~3.6 GB**, more than the card's 3 GB |
-
-### 2.2 Decision: force CPU inference
+### 2.2 Inference Configuration
 ```json
-{ "options": { "num_gpu": 0, "num_thread": 8, "temperature": 0.2 } }
+{ "options": { "num_gpu": 0, "temperature": 0.2, "num_ctx": 2048 } }
 ```
-**Measured on this laptop (2026-10-28), `qwen2.5:3b` Q4_K_M, CPU only:**
+**Measured on this laptop, `qwen2.5:1.5b` Q4_K_M, CPU only:**
 
 | | Time |
 | :--- | :--- |
-| Cold start (model not yet in RAM) | ~12.6 s total, ~3.4 s of it loading the model |
-| Warm answer, ~340-token prompt | ~4.2 s (prompt read 0.15 s, generation ~7 tokens/s) |
-| AI DJ mix decision (~50 output tokens) | ~7 s |
-| AI DJ next-song pick | ~3 s |
-
-> The previous version of this section claimed 28 tokens/s and about 1 s per plan. That was not reproducible; the measured generation speed is about 7 tokens/s.
+| Cold start (loading model into RAM) | ~8.3 s total |
+| Warm structured answer (e.g. language/mix) | **~2.1 s** |
+| AI DJ mix decision | ~2–3 s |
 
 ### 2.5 Cloud Acceleration: Google Gemini (Sub-Second Latency)
-To eliminate the ~4–7 s CPU wait during live sets, BeatPilot supports a **Hybrid Brain**:
+To eliminate CPU wait during live sets, BeatPilot supports a **Hybrid Brain**:
 - Create a `.env` file (copied from `.env.example`):
   ```env
   GEMINI_API_KEY=your_key_here
   GEMINI_MODEL=gemini-2.0-flash
+  # Optional: override Ollama model (defaults to qwen2.5:1.5b)
+  # OLLAMA_MODEL=qwen2.5:1.5b
   ```
-- **Performance:** Reduces AI mix planning and DJ command interpretation latency from **~4,000–7,000 ms down to ~300–600 ms**.
-- **Order of preference:** local CPU Ollama (`qwen2.5:3b`) is always tried first. Gemini is the backup: it is used when Ollama is offline, fails, or takes longer than 12 s (when a Gemini key is set, Ollama is cut off at 12 s so the backup still answers in time). If both fail, the app uses its built-in mixing rules, so the music never stops. See `/api/llm` in `server/apiPlugin.ts`.
+- **Performance:** Reduces AI mix planning and DJ command interpretation latency from **~2,000 ms down to ~300–600 ms**.
+- **Order of preference:** local CPU Ollama (`qwen2.5:1.5b`) is always tried first. Gemini is the backup: it is used when Ollama is offline, fails, or takes longer than 12 s. If both fail, the app uses its built-in mixing rules, so the music never stops. See `/api/llm` in `server/llm.ts`.
 
 How the app copes with this speed:
 
@@ -124,7 +120,7 @@ New-NetFirewallRule -DisplayName "AI-DJ-DevServer" -Direction Inbound -LocalPort
   - Replays and page refreshes load from disk (about 0.03 s vs about 2 s), and cached songs play without internet.
   - The folder is capped at 2 GB (~500 songs). The least recently played files are deleted first.
   - It isn't committed to git. Deleting the folder is always safe; songs just download again.
-- **Offline library:** `music/` holds your own songs (uploads go to `music/Uploads`) and, in `music/Most Played`, an MP3 (192 kbps, tagged) of every song played 3+ times, named "Artist - Title [videoId].mp3". Unlike the cache it isn't trimmed. Extra folders you add are scanned in place and only listed in `data/local_library.json`. Neither is committed to git. Deleting `music/Most Played` is safe: songs are saved again from the cache after their next play.
+- **Offline library:** `music/` holds your own songs (uploads go to `music/Uploads`) and, in `music/Most Played`, an MP3 (192 kbps, tagged) of every liked song and every song played 2+ times, named "Artist - Title [videoId].mp3". A background sync (`runOfflineSync` in `server/localLibrary.ts`: at startup, every 30 min, and after a like) downloads any that aren't cached yet through the third-party audio source, one at a time with 15 s between downloads; failures are logged to `logs/server-issues.log` as `[offline-sync]` and retried after 6 h. Unlike the cache it isn't trimmed. Extra folders you add are scanned in place and only listed in `data/local_library.json`. Neither is committed to git. Deleting `music/Most Played` is safe: the sync saves the songs again.
   - The MP3s need **ffmpeg** on the PATH (here it came with yt-dlp: `winget install yt-dlp.FFmpeg`). Without it the original audio is copied instead, which plays just as well.
 - **Decoded audio in memory:** only the 8 most recent songs (about 90 MB each) are kept decoded for instant replay. Older ones are re-read from the disk cache.
 - **Future:** embedded file-based SQLite (`better-sqlite3`, `library.db`), added only if the library grows large (around 5,000+ tracks), for search and analysis caching.

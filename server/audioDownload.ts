@@ -79,6 +79,21 @@ export function getDownload(videoId: string, cacheFile: string, onComplete: () =
   return job;
 }
 
+/** Downloads the whole song into the cache (sharing a download already running) and waits for it to finish. */
+export async function downloadToCache(videoId: string, cacheFile: string, onComplete: () => void): Promise<void> {
+  const dl = await getDownload(videoId, cacheFile, onComplete);
+  while (!dl.done) {
+    if (dl.error) throw dl.error;
+    await new Promise<void>((resolve) => {
+      const w = () => {
+        dl.wake.delete(w);
+        resolve();
+      };
+      dl.wake.add(w);
+    });
+  }
+}
+
 async function run(dl: Download, first: Response, cacheFile: string, onComplete: () => void) {
   const fd = await fs.promises.open(dl.path, 'w');
   try {

@@ -6,8 +6,9 @@ import { ROOT_DIR } from './paths';
 import { parseJsonBody } from './http';
 
 export const OLLAMA_URL = 'http://localhost:11434';
-export const OLLAMA_MODEL = 'qwen2.5:3b';
-// Keep the model in RAM: a cold load takes ~3–12 s on this laptop, a warm answer ~4 s
+export const DEFAULT_OLLAMA_MODEL = 'qwen2.5:1.5b';
+export let OLLAMA_MODEL = (process.env.OLLAMA_MODEL || '').trim() || DEFAULT_OLLAMA_MODEL;
+// Keep the model in RAM: a cold load takes ~2–5 s on this laptop, a warm answer ~1–3 s
 export const OLLAMA_KEEP_ALIVE = '30m';
 
 /**
@@ -15,17 +16,18 @@ export const OLLAMA_KEEP_ALIVE = '30m';
  * With a JSON schema the answer is constrained to it (e.g. one value from an enum), which a
  * small model needs for reliable classification; such answers also use temperature 0.
  */
-export async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number, schema?: object): Promise<string> {
+export async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number, schema?: object, modelOverride?: string): Promise<string> {
+  const modelToUse = modelOverride || OLLAMA_MODEL;
   const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: OLLAMA_MODEL,
+      model: modelToUse,
       prompt,
       stream: false,
       format: schema ?? 'json',
       keep_alive: OLLAMA_KEEP_ALIVE,
-      options: { num_gpu: 0, temperature: schema ? 0 : 0.2, num_predict: maxTokens },
+      options: { num_gpu: 0, temperature: schema ? 0 : 0.2, num_predict: maxTokens, num_ctx: 2048 },
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -148,7 +150,26 @@ export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse,
   let ollamaOnline = false;
   try {
     const tags = (await (await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) })).json()) as { models?: Array<{ name: string }> };
-    ollamaOnline = (tags.models || []).some((m) => m.name.startsWith(OLLAMA_MODEL));
+    const installed = (tags.models || []).map((m) => m.name);
+
+    // Candidates in order of preference: configured env var, lightweight 1.5b (fast on CPU), 3b, 0.5b
+    const candidates = [
+      (process.env.OLLAMA_MODEL || '').trim(),
+      'qwen2.5:1.5b',
+      'qwen2.5:3b',
+      'qwen2.5:0.5b',
+      'qwen2.5',
+    ].filter(Boolean);
+
+    const matched = candidates.find((cand) => installed.some((m) => m === cand || m.startsWith(`${cand}:`) || m.startsWith(cand)));
+    if (matched) {
+      const full = installed.find((m) => m === matched || m.startsWith(`${matched}:`) || m.startsWith(matched));
+      OLLAMA_MODEL = full || matched;
+      ollamaOnline = true;
+    } else {
+      ollamaOnline = installed.some((m) => m === OLLAMA_MODEL || m.startsWith(`${OLLAMA_MODEL}:`) || m.startsWith(OLLAMA_MODEL));
+    }
+
     if (ollamaOnline && !ollamaWarmed) {
       ollamaWarmed = true;
       fetch(`${OLLAMA_URL}/api/generate`, {
@@ -202,9 +223,10 @@ export async function handleLlm(req: IncomingMessage, res: ServerResponse, url: 
     const started = Date.now();
     const geminiCfg = getGeminiConfig();
 
-    // 1. First preference: Local Ollama (Qwen 2.5 3B)
+    // 1. First preference: Local Ollama (Qwen 2.5 1.5B / configured model)
     try {
-      // If Gemini is available as backup, cap Ollama at 12s so it fails over quickly instead of hanging
+      // If Gemini is available as backup, cap Ollama at 12s so it fails over quickly instead of hanging.
+      // With qwen2.5:1.5b on CPU, completions typically take 2-5s.
       const ollamaTimeout = geminiCfg ? Math.min(12_000, timeoutMs) : timeoutMs;
       const schema = body?.schema && typeof body.schema === 'object' ? body.schema : undefined;
       const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, ollamaTimeout, schema);
