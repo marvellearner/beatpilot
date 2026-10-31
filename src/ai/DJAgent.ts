@@ -230,7 +230,7 @@ ${track.taste ? `\n${track.taste}\nFit the picks to this listener's taste as wel
 TASK:
 1. READ THE USER'S MOOD: Analyze the musical vibe, lyrical emotion, cultural context, danceability, and energy of this song to determine what mood the user is in.
 2. RECOMMEND TOP 5 SONGS: Pick the 5 best, most musically compatible songs that match this exact mood and momentum to play immediately next in the DJ set.
-Do NOT suggest the same song that is currently playing. Only well-known hits most people at a party would recognise: no new releases or obscure songs. Provide 5 distinct, high-quality songs matching the vibe. All songs MUST be standard radio length (under 5 minutes, avoid long 8+ minute extended mixes or compilations). NEVER suggest 8D audio, 8D versions, or mashup songs under any circumstances. Suggest only original songs or official versions.
+Do NOT suggest the same song that is currently playing. Only well-known hits most people at a party would recognise: no new releases or obscure songs. Provide 5 distinct, high-quality songs matching the vibe. All songs MUST be standard radio length (under 6 minutes, avoid long 8+ minute extended mixes or compilations). NEVER suggest 8D audio, 8D versions, or mashup songs under any circumstances. Suggest only original songs or official versions.
 
 Reply ONLY with valid JSON in this exact structure:
 {
@@ -635,7 +635,14 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
 }
 
 // Filler words around an artist's name in "play only Diljit Dosanjh songs please"
-const FILLER = /\b(please|pls|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want)\b/gi;
+const FILLER = /\b(please|pls|plz|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|gaane|gane|gaana|gana|ke|ki|ka|wale|waale|sirf|bas|chalao|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want)\b/gi;
+
+/** A typo of "song(s)" ("osngs", "sogns", "sngs", "songz"): same letters, or one letter off. */
+const isSongTypo = (w: string) => {
+  const sorted = (x: string) => [...x].sort().join('');
+  if (/^(sngs|songz|sonsg|snog|sogn|sogns|snogs|songss)$/.test(w)) return true;
+  return w.length >= 4 && w.length <= 6 && (sorted(w) === sorted('songs') || sorted(w) === sorted('song'));
+};
 
 /**
  * Song and Up Next requests in plain words, understood without the model:
@@ -653,6 +660,9 @@ export function parseSongCommand(input: string): AICommandPlan | null {
 
   const name = (s: string) =>
     s
+      .split(/\s+/)
+      .filter((w) => !isSongTypo(w.toLowerCase().replace(/[^a-z]/g, '')))
+      .join(' ')
       .replace(FILLER, ' ')
       .replace(/['"]/g, '')
       .replace(/\s+/g, ' ')
@@ -665,7 +675,7 @@ export function parseSongCommand(input: string): AICommandPlan | null {
       .slice(0, 5);
 
   // "only X" / "just X" / "X only" / "nothing but X"
-  if (/\b(only|just|nothing but)\b/.test(lower)) {
+  if (/\b(only|just|nothing but|sirf)\b/.test(lower)) {
     const list = artists(text);
     if (list.length) {
       return {

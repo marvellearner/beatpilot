@@ -1,10 +1,11 @@
 /**
  * Research behind Up Next beyond plain search: which songs people who play the listener's songs
- * also play (YouTube's related list, through the third-party instances), and which artists fans
- * of their artists also like (Deezer's public API, no key). Results are kept only briefly
+ * also play (YouTube's related list, through the third-party instances), which artists fans
+ * of their artists also like (Deezer's public API, no key), and an artist's biggest songs (their
+ * channel's most viewed uploads, via Invidious). Results are kept only briefly
  * (RESEARCH_TTL_MS) so suggestions follow what's popular now.
  */
-import { relatedVideos, searchVideos, type VideoHit } from './audioSource';
+import { channelPopular, relatedVideos, searchVideos, type VideoHit } from './audioSource';
 import { artistKey } from '../shared/taste';
 
 const RESEARCH_TTL_MS = 10 * 60_000; // related songs and search results: reused within one refill, fresh soon after
@@ -46,6 +47,28 @@ export function fansAlsoLike(name: string): Promise<string[]> {
     if (!artist || !artistKey(artist.name).includes(artistKey(name).slice(0, 6))) return [];
     const rel = await deezer<{ data?: Array<{ name: string }> }>(`/artist/${artist.id}/related?limit=15`);
     return (rel.data ?? []).map((a) => a.name);
+  });
+}
+
+/** "The Chainsmokers" / "ChainsmokersVEVO" / "chainsmokers" are one name. */
+// ("K.K. - Topic" is YouTube's own channel of an artist's songs: theirs too)
+const bareName = (name: string) => artistKey(name).replace(/^the(?=.{3})/, '').replace(/(vevo|official|music|topic)$/, '');
+
+/**
+ * An artist's most viewed uploads on their own channel (found from a search for their name):
+ * their hits, biggest first. Empty when no channel of theirs shows up.
+ */
+export function artistHits(name: string): Promise<VideoHit[]> {
+  return remember(`hits:${bareName(name)}`, RESEARCH_TTL_MS, async () => {
+    const want = bareName(name);
+    const isTheirs = (h: VideoHit) => !!h.authorId && bareName(h.author) === want;
+    // Their own channel, or YouTube's "<artist> - Topic" channel of their songs (common for singers
+    // whose songs are on film labels' channels, e.g. "K.K. - Topic")
+    const [byName, byTopic] = await Promise.all([search(name), search(`${name} topic`).catch(() => [] as VideoHit[])]);
+    const channel = (byName.find(isTheirs) ?? byTopic.find(isTheirs))?.authorId;
+    // Topic channels can't be listed by popularity through the instance: their search hits instead
+    const popular = channel ? await channelPopular(channel).catch(() => [] as VideoHit[]) : [];
+    return [...popular, ...byTopic.filter(isTheirs)];
   });
 }
 

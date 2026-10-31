@@ -50,11 +50,13 @@ export function titleSegments(raw: string, exclude: string[] = []): string[] {
   let s = raw.toLowerCase().split('|')[0];
   s = s.replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, ' ');
   s = s.replace(/\b(official|music|video|audio|lyrics?|lyrical|full song|hd|4k|visualizer|remix|club mix|extended)\b/g, ' ');
-  const skip = new Set(exclude.map((e) => e.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean));
+  // "The Chainsmokers" and "Chainsmokers" are the same name
+  const bare = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/^the(?=.{3})/, '');
+  const skip = new Set(exclude.map(bare).filter(Boolean));
   return s
     .split(/[-:]/)
     .map((p) => p.replace(/[^a-z0-9]/g, '').trim())
-    .filter((p) => p.length >= 3 && !skip.has(p));
+    .filter((p) => p.length >= 3 && !skip.has(bare(p)));
 }
 
 /** A stable id for storing per-song data (hot cues, AI answers): the URL, else title + artist. */
@@ -77,7 +79,8 @@ export function songKeys(song: SongRef): string[] {
   const coreTitle = cleanCoreTitle(song.title);
   if (coreTitle && coreTitle !== normTitle) keys.push(coreTitle);
   // Not the artist's name on its own: every song of theirs has that piece
-  for (const seg of titleSegments(song.title, songArtists(song))) {
+  // (named in the artist field, e.g. the "ChainsmokersVEVO" channel, or in the title: "The Chainsmokers - …")
+  for (const seg of titleSegments(song.title, [...songArtists(song), ...songArtists({ title: song.title })])) {
     keys.push(seg);
   }
   if (song.artist && !/searching|^artist$/i.test(song.artist)) {

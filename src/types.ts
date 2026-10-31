@@ -160,6 +160,13 @@ export interface HostSyncState {
   aiStatus: 'checking' | 'online' | 'offline';
   lastAiDecision: string;
   tempo: TempoInfo | null;
+  masterVolume: number;
+  laptopVolume?: number; // 0.0 to 1.0 (Windows laptop master volume)
+  laptopMuted?: boolean;
+  aiProvider?: 'gemini' | 'ollama' | 'none';
+  aiModelName?: string | null;
+  isAiThinking?: boolean;
+  aiResult?: { explanation: string; source: string; latencyMs: number } | null;
 }
 
 /** The big, slowly changing parts of HostSyncState: sent only when they change. */
@@ -246,6 +253,11 @@ export type MobileAction =
   | { type: 'CMD_RESET_EQ' }
   | { type: 'CMD_SET_TEMPO'; ratio: number }
   | { type: 'CMD_SET_BPM'; bpm: number }
+  | { type: 'CMD_SET_MASTER_VOLUME'; volume: number }
+  | { type: 'CMD_SET_LAPTOP_VOLUME'; volume: number }
+  | { type: 'CMD_MUTE_LAPTOP'; muted?: boolean }
+  | { type: 'CMD_TOGGLE_LAPTOP_MUTE' }
+  | { type: 'CMD_AI_INSTRUCT'; command: string }
   | { type: 'CMD_TOGGLE_KEY_LOCK' }
   | { type: 'CMD_TOGGLE_SET_TEMPO_LOCK' }
   | { type: 'CMD_TOGGLE_PLAY_ORIGINAL' }

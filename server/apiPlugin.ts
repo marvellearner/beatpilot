@@ -11,6 +11,7 @@ import { handleRecommend } from './recommendations';
 import { handleLlmHealth, handleLlm } from './llm';
 import { handleHistory, handleFavorites, handleBanned, handleMySongs } from './library';
 import { handleSystemMemory } from './system';
+import { handleLaptopVolume } from './laptopAudio';
 import { handleLocalLibrary, scanLibrary, backfillMostPlayed } from './localLibrary';
 
 export function aiDjApiPlugin(): Plugin {
@@ -50,6 +51,7 @@ function attachApi(httpServer: HttpServer, middlewares: Connect.Server) {
     if ((path === '/api/banned' || path === '/api/banned/toggle') && (await handleBanned(req, res, url))) return;
     if (path === '/api/my-songs' && (await handleMySongs(req, res, url))) return;
     if (path === '/api/system/memory') return handleSystemMemory(req, res, url);
+    if (path === '/api/system/volume') return handleLaptopVolume(req, res, url);
     // Offline library: songs on this laptop (see localLibrary.ts)
     if (path.startsWith('/api/local/') && (await handleLocalLibrary(req, res, url))) return;
 

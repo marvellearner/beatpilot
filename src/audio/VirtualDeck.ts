@@ -20,6 +20,8 @@ export class VirtualDeck {
   // Streaming: a song that isn't downloaded yet plays through an <audio> element while it buffers,
   // then hands over to the decoded buffer (see attachStream / upgradeToBuffer)
   private mediaEl: HTMLAudioElement | null = null;
+  // Key lock for a streaming song: the browser re-times it so speed changes keep the pitch
+  private keepStreamPitch = false;
   private mediaSource: MediaElementAudioSourceNode | null = null;
   private mediaGain: GainNode | null = null;
   private gainNode: GainNode;
@@ -296,7 +298,7 @@ export class VirtualDeck {
     this.releaseStream();
     const el = new Audio();
     el.preload = 'auto';
-    el.preservesPitch = false; // speed changes move the pitch too ("vinyl"), like the buffer source
+    el.preservesPitch = this.keepStreamPitch; // key lock on: speed changes keep the pitch; off: vinyl
     el.src = src;
     this.mediaEl = el;
     this.mediaSource = this.ctx.createMediaElementSource(el);
@@ -469,6 +471,12 @@ export class VirtualDeck {
     this.volume = Math.max(0, Math.min(1, vol));
     this.gainNode.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.02);
     this.notifyUpdate();
+  }
+
+  /** Key lock for streaming: with it on, a speed change of the stream keeps its pitch. */
+  public setKeepStreamPitch(on: boolean) {
+    this.keepStreamPitch = on;
+    if (this.mediaEl) this.mediaEl.preservesPitch = on;
   }
 
   public setPlaybackRate(rate: number, automatic: boolean = false) {

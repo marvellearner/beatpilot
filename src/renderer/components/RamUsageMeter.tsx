@@ -133,7 +133,8 @@ export const RamUsageMeter: React.FC = () => {
         {/* Stats text */}
         <div className="flex items-center gap-1.5">
           <span className="font-extrabold text-[11px]">{percent ? `${percent}%` : '...'}</span>
-          <span className="hidden md:inline text-[10px] text-slate-400">
+          {/* Wide screens only: on a laptop the top bar fits on one line without it (details are in the panel) */}
+          <span className="hidden min-[1800px]:inline text-[10px] text-slate-400">
             ({usedGb}/{totalGb} GB)
           </span>
         </div>

@@ -484,21 +484,35 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
 
 ---
 
-# Maximum 5-Minute Song Duration Rule for Auto-Queue (User Search Exempt)
+# Maximum 6-Minute Song Duration Rule for Auto-Queue (User Search Exempt)
 
-1. **Strict 5-Minute (300 Seconds) Limit for Engine-Added Songs:**
-   - **Never add any song longer than 5 minutes on your own in the Up Next queue.**
+1. **Strict 6-Minute (360 Seconds) Limit for Engine-Added Songs:**
+   - **Never add any song longer than 6 minutes on your own in the Up Next queue.** (It was 5 minutes; many Bollywood songs run 5–6 minutes. One shared value: `MAX_AUTO_SONG_SECONDS` in `shared/taste.ts`.)
    - Applies to:
      - Autonomous queue replenishment and recommendations (`refillQueueWithRecommendations`, `/api/recommend`).
      - AI Mood-Reading recommendations (`readMoodAndPushTop5`).
      - Background preloading and decoding (`preloadQueuedTrack`).
      - Auto-seeding from text playlists (`restoreOrSeedQueue`, `loadSongsFromTextFile`).
      - Queue sanitization (`deduplicateQueue()`).
-   - Any automatically acquired song with a duration exceeding 300 seconds ($> 5\text{ minutes}$) is immediately rejected or pruned from the queue.
+   - Any automatically acquired song with a duration exceeding 360 seconds ($> 6\text{ minutes}$) is immediately rejected or pruned from the queue.
 
 2. **Exemption for Explicit User Search & Play:**
    - **If the user explicitly searches for a song and queues or plays it (`source === 'request'`), it is permitted regardless of duration.**
    - The user has complete freedom to enjoy long mixes, extended club tracks, or live sets when explicitly requested.
+
+---
+
+# No Mashups or 8D Audio in Up Next (Unless Liked)
+
+1. **Never picked automatically:**
+   - Mashups (titles with "mashup", "mash-up", "mash up") are never added to Up Next by the app.
+   - 8D / 16D / 24D audio is never added either.
+   - This covers recommendations, AI suggestions, AI mood picks, familiar songs (Most Played, Previously Played), `my_songs.txt`, choosing a search result for a song, preloading and queue clean-up (`autoBlocked` in `AudioEngine.ts`; `/api/recommend` drops them too).
+2. **Exception: a mashup you liked.** It's treated like any other liked song and can be queued automatically.
+   - It must be that exact mashup: the same video, or exactly the same title.
+   - Another mashup with a similar name still isn't picked.
+   - 8D audio has no exception.
+3. **Songs you ask for are always allowed:** searching, requesting from the phone, or typing "play …" in the AI chat plays a mashup if that's what you picked.
 
 ---
 
@@ -540,7 +554,7 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
 
 3. **Combined Exclusion Filters:**
    - Candidates are automatically rejected if they:
-     - Exceed the **5-minute duration limit** ($> 300\text{ seconds}$).
+     - Exceed the **6-minute duration limit** ($> 360\text{ seconds}$).
      - Are already present in the **Up Next queue** or **currently on air**.
      - Were **played in the last 3 hours**.
      - Are in the **"Don't Play Again Ever"** blacklist (`bannedSongs`).
@@ -581,7 +595,7 @@ The listener should know most of what plays. Up Next is built so that about 70 %
    - **Hand-made mood list:** only if fewer than 10 candidates came back.
    - **One ranking:**
      - Every candidate gets `scoreHit` (popularity, age, your artists, proper versions) plus its points from each source.
-     - Kept: songs between 90 s and 5 minutes. Dropped: 8D, mashup and jhankar versions, and banned songs.
+     - Kept: songs between 90 s and 6 minutes. Dropped: 8D, mashup and jhankar versions, and banned songs.
      - The best 40 are returned with the reason each was picked.
    - **Caching:** related lists and searches are kept 10 minutes, and "fans also like" 1 hour, so picks follow what's popular now.
    - **Speed:**

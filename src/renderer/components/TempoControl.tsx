@@ -101,7 +101,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
           }`}
           title="ON: songs play at their original BPM, ignoring the party/set tempo and speed changes"
         >
-          Original: {tempo?.playOriginal ? 'ON' : 'OFF'}
+          Always original BPM: {tempo?.playOriginal ? 'ON' : 'OFF'}
         </button>
       </div>
 
@@ -160,7 +160,7 @@ export const TempoControl: React.FC<TempoControlProps> = ({
             disabled={disabled || !bpmInput}
             className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-30 active:scale-95 transition-all"
           >
-            Set
+            Set BPM
           </button>
         </form>
       </div>

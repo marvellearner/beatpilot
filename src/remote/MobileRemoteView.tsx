@@ -1,4 +1,38 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+
+/**
+ * A slider driven by the laptop's value that follows the finger while dragging: the synced value
+ * arrives a moment late and would pull the thumb back. Sends at most every SEND_EVERY_MS while
+ * dragging, and the final value on release.
+ */
+const SEND_EVERY_MS = 80;
+function useDragSlider(synced: number, send: (v: number) => void) {
+  const [dragging, setDragging] = useState<number | null>(null);
+  const lastSent = useRef(0);
+  const latest = useRef(synced);
+  const onChange = (v: number) => {
+    latest.current = v;
+    setDragging(v);
+    if (Date.now() - lastSent.current >= SEND_EVERY_MS) {
+      lastSent.current = Date.now();
+      send(v);
+    }
+  };
+  const release = () => {
+    if (dragging === null) return;
+    send(latest.current);
+    // Hold the thumb until the laptop's answer has had time to arrive
+    window.setTimeout(() => setDragging(null), 600);
+  };
+  return {
+    value: dragging ?? synced,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(parseFloat(e.target.value)),
+    onPointerUp: release,
+    onTouchEnd: release,
+    onKeyUp: release,
+    onBlur: release,
+  };
+}
 import { HostSyncState, MobileAction, SearchResult, TempoInfo } from '../types';
 import { MoodEqPanel } from '../renderer/components/MoodEqPanel';
 import { RhythmPanel } from '../renderer/components/RhythmPanel';
@@ -31,6 +65,14 @@ import {
   X,
   ArrowUp,
   RefreshCw,
+  Volume2,
+  Volume1,
+  VolumeX,
+  Laptop,
+  Send,
+  Cpu,
+  CheckCircle,
+  Terminal,
 } from 'lucide-react';
 
 interface MobileRemoteViewProps {
@@ -39,13 +81,142 @@ interface MobileRemoteViewProps {
   onSendAction: (action: MobileAction) => void;
 }
 
+const formatAiModelDisplay = (name: string | null | undefined): string => {
+  if (!name) return 'Qwen 2.5 1.5B';
+  if (/1\.5b/i.test(name)) return 'Qwen 2.5 1.5B';
+  if (/3b/i.test(name)) return 'Qwen 2.5 3B';
+  if (/0\.5b/i.test(name)) return 'Qwen 2.5 0.5B';
+  return name.replace(/^gemini-/, '');
+};
+
+const samplePrompts = ['Play only Diljit Dosanjh', 'Play more AP Dhillon', 'Start the dhol', 'Mix now', 'Play anything'];
+
+
+/**
+ * The phone's volume card: the laptop's Windows volume (set by the server, see remoteHub.ts) and
+ * the DJ app's own gain. Its own component so that moving a slider redraws only this card, not
+ * the whole remote page (queue, history…), which made dragging crawl on a phone.
+ */
+const VolumeCard: React.FC<{
+  laptopVolume: number | null;
+  laptopMuted: boolean;
+  masterVolume: number;
+  send: (action: MobileAction) => void;
+}> = ({ laptopVolume, laptopMuted, masterVolume, send }) => {
+  const laptopSlider = useDragSlider(laptopMuted ? 0 : (laptopVolume ?? 0), (volume) => send({ type: 'CMD_SET_LAPTOP_VOLUME', volume }));
+  const appGainSlider = useDragSlider(masterVolume, (volume) => send({ type: 'CMD_SET_MASTER_VOLUME', volume }));
+  return (
+    <div id="remote-master-volume-card" className="w-full rounded-xl bg-white/5 border border-white/10 p-2.5 space-y-2">
+      {/* Laptop Master Volume Header */}
+      <div className="flex items-center justify-between text-[11px] text-slate-300">
+        <div className="flex items-center gap-1.5 font-bold text-cyan-300">
+          <Laptop className="w-3.5 h-3.5" />
+          <span>Laptop Master</span>
+          {laptopMuted && (
+            <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-400 text-[9px] font-mono font-bold">
+              MUTED
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => send({ type: 'CMD_SET_LAPTOP_VOLUME', volume: 0.3 })}
+            className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-[9px] font-mono text-slate-400 active:scale-95"
+          >
+            30%
+          </button>
+          <button
+            type="button"
+            onClick={() => send({ type: 'CMD_SET_LAPTOP_VOLUME', volume: 0.7 })}
+            className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-[9px] font-mono text-slate-400 active:scale-95"
+          >
+            70%
+          </button>
+          <button
+            type="button"
+            onClick={() => send({ type: 'CMD_SET_LAPTOP_VOLUME', volume: 1.0 })}
+            className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-[9px] font-mono text-slate-400 active:scale-95"
+          >
+            100%
+          </button>
+        </div>
+      </div>
+
+      {/* Main Laptop Hardware Volume Slider */}
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          id="remote-volume-mute-btn"
+          onClick={() => send({ type: 'CMD_TOGGLE_LAPTOP_MUTE' })}
+          className="text-slate-400 hover:text-white transition-colors shrink-0 active:scale-90"
+          title={laptopMuted ? 'Unmute Laptop' : 'Mute Laptop'}
+        >
+          {laptopMuted || laptopSlider.value === 0 ? (
+            <VolumeX className="w-4 h-4 text-rose-400" />
+          ) : laptopSlider.value < 0.5 ? (
+            <Volume1 className="w-4 h-4 text-slate-300" />
+          ) : (
+            <Volume2 className="w-4 h-4 text-cyan-400" />
+          )}
+        </button>
+        <div className="flex-1 flex items-center gap-2">
+          <input
+            id="remote-volume-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            {...laptopSlider}
+            disabled={laptopVolume === null}
+            className="w-full h-1.5 bg-white/15 rounded-lg appearance-none cursor-pointer accent-cyan-400 disabled:opacity-40"
+            title={laptopVolume === null ? 'Reading the laptop volume…' : `Laptop Hardware Volume: ${Math.round(laptopSlider.value * 100)}%`}
+          />
+        </div>
+        <span className="text-[10px] font-mono font-bold text-slate-300 w-8 text-right shrink-0">
+          {laptopVolume === null ? '…' : `${Math.round(laptopSlider.value * 100)}%`}
+        </span>
+      </div>
+
+      {/* Secondary: DJ App Gain Slider */}
+      <div className="pt-1.5 border-t border-white/5 flex items-center justify-between text-[10px] text-slate-400">
+        <span className="text-slate-400 text-[10px]">DJ App Gain</span>
+        <div className="flex items-center gap-2 flex-1 max-w-[180px] ml-auto">
+          <input
+            id="remote-app-volume-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            {...appGainSlider}
+            className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-slate-400"
+            title={`DJ App Gain: ${Math.round(appGainSlider.value * 100)}%`}
+          />
+          <span className="font-mono text-[9px] w-6 text-right text-slate-400">
+            {Math.round(appGainSlider.value * 100)}%
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, connected, onSendAction }) => {
   const [query, setQuery] = useState('');
+  const [aiPrompt, setAiPrompt] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const searchAbortControllerRef = useRef<AbortController | null>(null);
+
+  const handleAiSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cmd = aiPrompt.trim();
+    if (!cmd || syncState.isAiThinking) return;
+    onSendAction({ type: 'CMD_AI_INSTRUCT', command: cmd });
+    setAiPrompt('');
+  };
 
   const acquisitionStatus = syncState.acquisitionStatus;
 
@@ -69,6 +240,222 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
   };
 
   const currentTrack = syncState.currentTrack;
+
+  const mixPreviouslyPlayed = useCallback(
+    (entry: { url?: string; artist: string; title: string }) =>
+      sendMixRef.current({ type: 'CMD_MIX_NOW', query: entry.url || `${entry.artist} ${entry.title}` }, entry.title),
+    []
+  );
+  // The Up Next list (often 1,000+ elements) is rebuilt only when the queue, the key of the song on
+  // air or the mixing state change, not on every live update (time, tempo…) a few times a second:
+  // redrawing it each time kept a phone busy and made the sliders crawl.
+  const sendMixRef = useRef<(action: MobileAction, title: string) => void>(() => {});
+  sendMixRef.current = sendMix;
+  const stableSendMix = useCallback((action: MobileAction, title: string) => sendMixRef.current(action, title), []);
+  const queueList = useMemo(() => {
+    const sendMix = stableSendMix;
+    return (
+syncState.queue.length === 0 ? (
+              <div id="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
+                Queue empty — request a song above, or the AI fills it once music plays.
+              </div>
+            ) : (
+              <div id="remote-queue-list" className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5">
+                {syncState.queue.map((item, idx) => {
+                  const keyDetails = item.key ? getCamelotDetails(item.key) : null;
+                  const curKey = currentTrack?.key;
+                  const compat = curKey && item.key ? getHarmonicCompatibility(curKey, item.key) : null;
+                  const colorClass = compat
+                    ? compat.color === 'emerald'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : compat.color === 'amber'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : compat.color === 'cyan'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                      : compat.color === 'teal'
+                      ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                      : compat.color === 'purple'
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                      : compat.color === 'rose'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : 'bg-white/10 text-slate-300 border-white/10'
+                    : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
+
+                  if (idx === 0) {
+                    // Mobile #1 On-Deck Hero
+                    return (
+                      <div
+                        id={`remote-queue-hero-${item.id}`}
+                        key={item.id}
+                        className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
+                      >
+                        <div className="flex items-center justify-between gap-1.5 text-[9px] font-mono flex-wrap">
+                          <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase shrink-0 min-w-0">
+                            <span className="relative flex h-2 w-2 shrink-0">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
+                            </span>
+                            <span className="whitespace-nowrap shrink-0">#1 ON DECK • UP NEXT</span>
+                          </div>
+                          <span
+                            className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black shrink-0 whitespace-nowrap ml-auto ${
+                              item.status === 'ready'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : item.status === 'failed'
+                                ? 'bg-red-500/20 text-red-300'
+                                : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                            }`}
+                          >
+                            {item.status === 'ready' ? 'READY' : item.status.toUpperCase()}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-cyan-500/30 bg-slate-900">
+                              {item.thumbnail ? (
+                                <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-slate-800">
+                                  <Music className="w-3.5 h-3.5 text-cyan-400" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-col min-w-0 flex-1">
+                              <span className="font-extrabold text-white text-xs line-clamp-2 leading-snug break-words" title={item.title}>
+                                {item.title}
+                              </span>
+                              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-300 pt-0.5">
+                                <span className="text-slate-400 truncate max-w-[110px]">{item.artist}</span>
+                                {item.key && keyDetails && (
+                                  <span
+                                    className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${colorClass}`}
+                                  >
+                                    <span>{item.key}</span>
+                                    {compat && compat.relation !== 'usable' && (
+                                      <span className="font-black ml-0.5">{compat.badgeText}</span>
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {item.status !== 'failed' && (
+                              <button
+                                onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
+                                disabled={syncState.isTransitioning}
+                                className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[10px] transition-colors shadow-md active:scale-95 disabled:opacity-40"
+                              >
+                                MIX NOW
+                              </button>
+                            )}
+                            <button
+                              onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
+                              className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
+                              title="Remove from queue"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Mobile #2+ Items
+                  return (
+                    <div
+                      id={`remote-queue-item-${item.id}`}
+                      key={item.id}
+                      className="flex items-center justify-between p-2 bg-black/40 hover:bg-[#121827]/90 rounded-xl border border-white/5 text-xs transition-all"
+                    >
+                      <div id={`remote-queue-item-info-${item.id}`} className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="font-mono text-slate-500 text-[9px] w-3 text-center shrink-0">#{idx + 1}</span>
+                        <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0 border border-white/10 bg-slate-800">
+                          {item.thumbnail ? (
+                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Music className="w-3 h-3 text-slate-400" />
+                            </div>
+                          )}
+                        </div>
+                        <div id={`remote-queue-item-meta-${item.id}`} className="flex flex-col min-w-0 flex-1">
+                          <div id={`remote-queue-item-title-row-${item.id}`} className="flex items-center gap-1.5">
+                            <span className="font-bold text-white line-clamp-2 leading-snug break-words text-[11px]" title={item.title}>
+                              {item.title}
+                            </span>
+                            {item.isAiRecommended && (
+                              <span className="text-[7px] font-mono bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/30 font-bold shrink-0">
+                                AI
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                            <span className="text-[9px] text-slate-400 truncate max-w-[100px]">
+                              {item.artist}
+                            </span>
+                            {item.key && keyDetails && (
+                              <span
+                                className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1 py-0.2 rounded border shrink-0 ${colorClass}`}
+                              >
+                                <span>{item.key}</span>
+                                {compat && compat.relation !== 'usable' && (
+                                  <span className="font-extrabold ml-0.5">{compat.badgeText}</span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div id={`remote-queue-item-actions-${item.id}`} className="flex items-center gap-1 shrink-0">
+                        <span
+                          className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
+                            item.status === 'ready'
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : item.status === 'failed'
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                          }`}
+                        >
+                          {item.status.toUpperCase()}
+                        </span>
+
+                        {item.status !== 'failed' && (
+                          <button
+                            onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
+                            disabled={syncState.isTransitioning}
+                            className="px-2 py-0.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-500 text-cyan-300 hover:text-black font-bold text-[9px] border border-cyan-500/40 transition-colors disabled:opacity-40"
+                          >
+                            MIX
+                          </button>
+                        )}
+                        <button
+                          onClick={() => onSendAction({ type: 'CMD_MOVE_QUEUED', itemId: item.id, direction: 'top' })}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-cyan-300 text-[10px] transition-colors"
+                          title="Play Next (Move to top)"
+                        >
+                          <ArrowUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
+                          title="Remove from queue"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncState.queue, currentTrack?.key, syncState.isTransitioning, onSendAction, stableSendMix]);
   const isPlaying = syncState.isPlaying;
 
   const fallbackBpm = (syncState.bpm && syncState.bpm > 0)
@@ -407,6 +794,14 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           </button>
         </div>
 
+        {/* Laptop Master Volume & App Gain Control (its own component: dragging redraws only it) */}
+        <VolumeCard
+          laptopVolume={syncState.laptopVolume ?? null}
+          laptopMuted={!!syncState.laptopMuted}
+          masterVolume={syncState.masterVolume ?? 0.9}
+          send={onSendAction}
+        />
+
         {/* Planned mix: waits for the best blend point instead of mixing immediately */}
         {syncState.pendingMix && (
           <div id="remote-pending-mix" className="w-full flex items-center justify-between gap-2 bg-cyan-500/10 border border-cyan-500/30 rounded-xl px-3 py-2 text-[11px]">
@@ -454,7 +849,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
             className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-extrabold text-xs bg-gradient-to-r from-amber-500 to-orange-500 text-black shadow-lg shadow-amber-500/30 active:scale-95 transition-all disabled:opacity-40"
           >
             <span className="text-sm">🔥</span>
-            <span>PLAY BEST PART</span>
+            <span>BEST PART</span>
           </button>
 
           <button
@@ -465,7 +860,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                 : 'bg-white/5 text-slate-400 border-white/10'
             }`}
           >
-            <span>Best Parts:</span>
+            <span>Best parts only:</span>
             <span className="font-extrabold">{syncState.bestPartsMode ? 'ON' : 'OFF'}</span>
           </button>
         </div>
@@ -604,7 +999,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
             className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs bg-cyan-600 hover:bg-cyan-500 text-white shadow-lg shadow-cyan-600/20 transition-all disabled:opacity-40"
           >
             <Zap className="w-3.5 h-3.5" />
-            <span>MIX NOW</span>
+            <span>PLAY</span>
           </button>
 
           <button
@@ -613,7 +1008,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
             className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs bg-white/10 hover:bg-white/20 text-white border border-white/15 transition-all disabled:opacity-40"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>ADD TO QUEUE</span>
+            <span>QUEUE</span>
           </button>
         </div>
 
@@ -623,7 +1018,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl font-bold text-[11px] bg-cyan-950/40 hover:bg-cyan-900/40 text-cyan-300 border border-cyan-500/30 transition-all shadow-sm active:scale-98"
         >
           <FileText className="w-3.5 h-3.5 text-cyan-400" />
-          <span>LOAD CUSTOM PLAYLIST (my_songs.txt)</span>
+          <span>LOAD MY_SONGS</span>
         </button>
 
         {/* Acquisition Status Telemetry */}
@@ -639,22 +1034,19 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
       <PreviouslyPlayedPanel
         compact
         entries={syncState.recentlyPlayed ?? []}
-        onMix={(entry) => sendMix({ type: 'CMD_MIX_NOW', query: entry.url || `${entry.artist} ${entry.title}` }, entry.title)}
+        onMix={mixPreviouslyPlayed}
       />
 
-      {/* Most Played Bangers (Quick Starters) */}
+      {/* Most Played */}
       {syncState.mostPlayedSongs && syncState.mostPlayedSongs.length > 0 && (
         <div id="remote-most-played" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#141824] to-[#0a0d16]">
           <div id="remote-most-played-header" className="flex items-center justify-between">
             <div id="remote-most-played-title-group" className="flex items-center gap-1.5">
               <Star className="w-4 h-4 text-amber-400 fill-current" />
               <span className="font-extrabold text-xs text-white uppercase tracking-wider">
-                MOST PLAYED BANGERS
+                MOST PLAYED
               </span>
             </div>
-            <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
-              Quick Starters
-            </span>
           </div>
 
           <div id="remote-most-played-list" className="flex flex-col gap-2 max-h-56 overflow-y-auto">
@@ -689,7 +1081,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                   onClick={() => onSendAction({ type: 'CMD_PLAY_STARTER_SONG', songId: song.id })}
                   className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-[10px] transition-colors shrink-0 shadow-sm"
                 >
-                  START
+                  PLAY
                 </button>
               </div>
             ))}
@@ -733,11 +1125,11 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
                   <button
                     id="remote-sort-harmonic-btn"
                     onClick={() => onSendAction({ type: 'CMD_SORT_QUEUE_HARMONICALLY' })}
-                    className="flex items-center gap-1 text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
-                    title="Sort queue into a continuous, clash-free Camelot wheel journey"
+                    className="flex items-center gap-1 whitespace-nowrap text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
+                    title="Sort by key: reorder Up Next so each song's key fits the next (no clashes)"
                   >
                     <Sparkles className="w-2.5 h-2.5 text-purple-300 animate-pulse" />
-                    <span>Harmonic</span>
+                    <span>Sort</span>
                   </button>
                 )}
                 <button
@@ -752,204 +1144,7 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
               </div>
             </div>
 
-            {syncState.queue.length === 0 ? (
-              <div id="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
-                Queue empty — request a song above, or the AI fills it once music plays.
-              </div>
-            ) : (
-              <div id="remote-queue-list" className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5">
-                {syncState.queue.map((item, idx) => {
-                  const keyDetails = item.key ? getCamelotDetails(item.key) : null;
-                  const curKey = currentTrack?.key;
-                  const compat = curKey && item.key ? getHarmonicCompatibility(curKey, item.key) : null;
-                  const colorClass = compat
-                    ? compat.color === 'emerald'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : compat.color === 'amber'
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                      : compat.color === 'cyan'
-                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                      : compat.color === 'teal'
-                      ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-                      : compat.color === 'purple'
-                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                      : compat.color === 'rose'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                      : 'bg-white/10 text-slate-300 border-white/10'
-                    : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
-
-                  if (idx === 0) {
-                    // Mobile #1 On-Deck Hero
-                    return (
-                      <div
-                        id={`remote-queue-hero-${item.id}`}
-                        key={item.id}
-                        className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
-                      >
-                        <div className="flex items-center justify-between gap-1.5 text-[9px] font-mono flex-wrap">
-                          <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase shrink-0 min-w-0">
-                            <span className="relative flex h-2 w-2 shrink-0">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
-                            </span>
-                            <span className="whitespace-nowrap shrink-0">#1 ON DECK • UP NEXT</span>
-                          </div>
-                          <span
-                            className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-black shrink-0 whitespace-nowrap ml-auto ${
-                              item.status === 'ready'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                                : item.status === 'failed'
-                                ? 'bg-red-500/20 text-red-300'
-                                : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                            }`}
-                          >
-                            {item.status === 'ready' ? 'READY' : item.status.toUpperCase()}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0 flex-1">
-                            <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-cyan-500/30 bg-slate-900">
-                              {item.thumbnail ? (
-                                <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center bg-slate-800">
-                                  <Music className="w-3.5 h-3.5 text-cyan-400" />
-                                </div>
-                              )}
-                            </div>
-                            <div className="flex flex-col min-w-0 flex-1">
-                              <span className="font-extrabold text-white text-xs line-clamp-2 leading-snug break-words" title={item.title}>
-                                {item.title}
-                              </span>
-                              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-300 pt-0.5">
-                                <span className="text-slate-400 truncate max-w-[110px]">{item.artist}</span>
-                                {item.key && keyDetails && (
-                                  <span
-                                    className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${colorClass}`}
-                                  >
-                                    <span>{item.key}</span>
-                                    {compat && compat.relation !== 'usable' && (
-                                      <span className="font-black ml-0.5">{compat.badgeText}</span>
-                                    )}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {item.status !== 'failed' && (
-                              <button
-                                onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
-                                disabled={syncState.isTransitioning}
-                                className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[10px] transition-colors shadow-md active:scale-95 disabled:opacity-40"
-                              >
-                                MIX NOW
-                              </button>
-                            )}
-                            <button
-                              onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
-                              className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
-                              title="Remove from queue"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  // Mobile #2+ Items
-                  return (
-                    <div
-                      id={`remote-queue-item-${item.id}`}
-                      key={item.id}
-                      className="flex items-center justify-between p-2 bg-black/40 hover:bg-[#121827]/90 rounded-xl border border-white/5 text-xs transition-all"
-                    >
-                      <div id={`remote-queue-item-info-${item.id}`} className="flex items-center gap-2 min-w-0 flex-1">
-                        <span className="font-mono text-slate-500 text-[9px] w-3 text-center shrink-0">#{idx + 1}</span>
-                        <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0 border border-white/10 bg-slate-800">
-                          {item.thumbnail ? (
-                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Music className="w-3 h-3 text-slate-400" />
-                            </div>
-                          )}
-                        </div>
-                        <div id={`remote-queue-item-meta-${item.id}`} className="flex flex-col min-w-0 flex-1">
-                          <div id={`remote-queue-item-title-row-${item.id}`} className="flex items-center gap-1.5">
-                            <span className="font-bold text-white line-clamp-2 leading-snug break-words text-[11px]" title={item.title}>
-                              {item.title}
-                            </span>
-                            {item.isAiRecommended && (
-                              <span className="text-[7px] font-mono bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/30 font-bold shrink-0">
-                                AI
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                            <span className="text-[9px] text-slate-400 truncate max-w-[100px]">
-                              {item.artist}
-                            </span>
-                            {item.key && keyDetails && (
-                              <span
-                                className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1 py-0.2 rounded border shrink-0 ${colorClass}`}
-                              >
-                                <span>{item.key}</span>
-                                {compat && compat.relation !== 'usable' && (
-                                  <span className="font-extrabold ml-0.5">{compat.badgeText}</span>
-                                )}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div id={`remote-queue-item-actions-${item.id}`} className="flex items-center gap-1 shrink-0">
-                        <span
-                          className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold ${
-                            item.status === 'ready'
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : item.status === 'failed'
-                              ? 'bg-red-500/20 text-red-300'
-                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                          }`}
-                        >
-                          {item.status.toUpperCase()}
-                        </span>
-
-                        {item.status !== 'failed' && (
-                          <button
-                            onClick={() => sendMix({ type: 'CMD_MIX_QUEUED', itemId: item.id }, item.title)}
-                            disabled={syncState.isTransitioning}
-                            className="px-2 py-0.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-500 text-cyan-300 hover:text-black font-bold text-[9px] border border-cyan-500/40 transition-colors disabled:opacity-40"
-                          >
-                            MIX
-                          </button>
-                        )}
-                        <button
-                          onClick={() => onSendAction({ type: 'CMD_MOVE_QUEUED', itemId: item.id, direction: 'top' })}
-                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-cyan-300 text-[10px] transition-colors"
-                          title="Play Next (Move to top)"
-                        >
-                          <ArrowUp className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => onSendAction({ type: 'CMD_REMOVE_QUEUED', itemId: item.id })}
-                          className="p-1 rounded-lg bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white text-[10px] transition-colors"
-                          title="Remove from queue"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            {queueList}
 
             {syncState.queue.length > 0 && (
               <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 pt-1.5 border-t border-white/10 px-1">
@@ -960,6 +1155,106 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
           </div>
         );
       })()}
+
+      {/* Mobile AI DJ Bottom Chat Bar & Live Telemetry Panel */}
+      <div id="remote-ai-command-bar" className="dj-panel rounded-2xl p-3.5 border border-purple-500/30 bg-purple-950/15 flex flex-col gap-2.5 mt-2">
+        {/* Header / Model Indicator */}
+        <div id="remote-ai-header" className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-extrabold text-white">
+            <Sparkles className={`w-3.5 h-3.5 ${syncState.isAiThinking ? 'animate-spin text-purple-400' : 'text-purple-400 animate-pulse'}`} />
+            <span>AI DJ COMMAND</span>
+          </div>
+
+          <span
+            className={`text-[9px] font-mono px-2 py-0.5 rounded-full font-bold border ${
+              syncState.aiProvider === 'gemini'
+                ? 'text-cyan-300 bg-cyan-500/15 border-cyan-500/30'
+                : syncState.aiStatus === 'online'
+                ? 'text-purple-300 bg-purple-500/15 border-purple-500/30'
+                : 'text-slate-400 bg-white/5 border-white/10'
+            }`}
+          >
+            {syncState.aiProvider === 'gemini'
+              ? `⚡ Gemini ${formatAiModelDisplay(syncState.aiModelName)}`
+              : syncState.aiStatus === 'online'
+              ? `🦙 ${formatAiModelDisplay(syncState.aiModelName)}`
+              : 'AI DJ (Rules)'}
+          </span>
+        </div>
+
+        {/* Quick Prompts scrollable horizontal row */}
+        <div id="remote-ai-quick-prompts" className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+          {samplePrompts.map((p, idx) => (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => onSendAction({ type: 'CMD_AI_INSTRUCT', command: p })}
+              disabled={syncState.isAiThinking}
+              className="text-[10px] bg-white/5 hover:bg-white/10 text-slate-300 px-2.5 py-1 rounded-xl border border-white/10 whitespace-nowrap shrink-0 active:scale-95 transition-all disabled:opacity-40"
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+
+        {/* Input Form */}
+        <form onSubmit={handleAiSubmit} className="flex items-center gap-2">
+          <input
+            type="text"
+            value={aiPrompt}
+            onChange={(e) => setAiPrompt(e.target.value)}
+            disabled={syncState.isAiThinking}
+            placeholder={syncState.isAiThinking ? 'AI DJ is thinking...' : "Ask AI (e.g. 'Mix with Dhol')..."}
+            className="flex-1 bg-black/60 border border-white/15 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 font-mono disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={syncState.isAiThinking || !aiPrompt.trim()}
+            className="flex items-center justify-center p-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white shadow-md shadow-purple-600/30 active:scale-95 disabled:opacity-40 transition-all shrink-0"
+            title="Send Instruction to AI DJ"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </form>
+
+        {/* Live Reasoning / Telemetry Pill */}
+        <div id="remote-ai-telemetry" className="flex items-center justify-between gap-2 bg-black/50 px-2.5 py-1.5 rounded-xl border border-white/5 font-mono text-[10px]">
+          <div className="flex items-center gap-1.5 text-slate-300 truncate flex-1 min-w-0">
+            {syncState.isAiThinking ? (
+              <span className="text-purple-400 flex items-center gap-1 animate-pulse">
+                <Cpu className="w-3 h-3 animate-spin shrink-0" />
+                Interpreting instruction...
+              </span>
+            ) : syncState.aiResult ? (
+              <div className="flex items-center gap-1.5 truncate">
+                <CheckCircle className="w-3 h-3 text-emerald-400 shrink-0" />
+                <span className="text-white font-semibold truncate">{syncState.aiResult.explanation}</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-slate-400 truncate">
+                <Terminal className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span className="truncate">
+                  {syncState.acquisitionStatus || 'AI DJ standing by'}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {syncState.aiResult && !syncState.isAiThinking && (
+            <span
+              className={`text-[8px] font-mono px-1.5 py-0.5 rounded shrink-0 font-bold ${
+                syncState.aiResult.source === 'gemini_flash'
+                  ? 'text-cyan-300 bg-cyan-500/20 border border-cyan-500/30'
+                  : syncState.aiResult.source === 'ollama_qwen'
+                  ? 'text-purple-300 bg-purple-500/20 border border-purple-500/30'
+                  : 'text-amber-300 bg-amber-500/20 border border-amber-500/30'
+              }`}
+            >
+              {syncState.aiResult.latencyMs}ms
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

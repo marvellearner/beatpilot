@@ -31,7 +31,13 @@ export const RemoteClient: React.FC = () => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'SYNC_STATE') {
-            setHostState(data as HostSyncState);
+            // (keep the laptop volume if this state doesn't carry it, so the slider never blanks)
+            const next = data as HostSyncState;
+            setHostState((prev) =>
+              next.laptopVolume === undefined && prev?.laptopVolume !== undefined
+                ? { ...next, laptopVolume: prev.laptopVolume, laptopMuted: prev.laptopMuted }
+                : next
+            );
             setHostGone(false);
           } else if (data.type === 'SYNC_LIVE') {
             // The frequent small update: merged into the last full state (queue, history… stay as they were)

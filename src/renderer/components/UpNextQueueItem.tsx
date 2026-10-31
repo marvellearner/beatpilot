@@ -204,7 +204,7 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
               type="button"
               onClick={() => engine.toggleDontPlayAgain(item)}
               className="text-slate-500 hover:text-red-400 p-1 rounded-lg hover:bg-white/5 transition-all shrink-0"
-              title="Don't play again ever (Dislike)"
+              title="Don't play again"
             >
               <ThumbsDown className="w-3.5 h-3.5" />
             </button>
@@ -369,7 +369,7 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
             type="button"
             onClick={() => engine.toggleDontPlayAgain(item)}
             className="text-slate-400 hover:text-red-400 hover:bg-white/10 p-1 rounded transition-all"
-            title="Don't play again ever (Thumbs Down)"
+            title="Don't play again"
           >
             <ThumbsDown className="w-3 h-3" />
           </button>

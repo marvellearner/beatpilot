@@ -160,12 +160,13 @@ export interface VideoHit {
   thumbnail: string;
   viewCount?: number;
   publishedAt?: number; // ms timestamp of the upload
+  authorId?: string; // the uploading channel (Invidious), for its most popular uploads
 }
 
 async function searchInvidious(inst: Instance, query: string): Promise<VideoHit[]> {
   const j = await getJson(`${inst.base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&fields=title,videoId,author,lengthSeconds,videoThumbnails,viewCount,published`);
   if (!Array.isArray(j)) throw new Error('unexpected search answer');
-  type Hit = { videoId: string; title: string; author: string; lengthSeconds: number; viewCount?: number; published?: number; videoThumbnails?: Array<{ url: string; quality?: string }> };
+  type Hit = { videoId: string; title: string; author: string; authorId?: string; lengthSeconds: number; viewCount?: number; published?: number; videoThumbnails?: Array<{ url: string; quality?: string }> };
   return j.map((v: Hit) => {
     const thumb = v.videoThumbnails?.find((t) => t.quality === 'medium') ?? v.videoThumbnails?.[0];
     return {
@@ -175,6 +176,7 @@ async function searchInvidious(inst: Instance, query: string): Promise<VideoHit[
       lengthSeconds: Number(v.lengthSeconds) || 0,
       thumbnail: thumb ? new URL(thumb.url, inst.base).href : '',
       viewCount: Number(v.viewCount) || undefined,
+      authorId: v.authorId,
       publishedAt: v.published ? v.published * 1000 : undefined, // Invidious gives seconds
     };
   });
@@ -215,6 +217,33 @@ export async function searchVideos(query: string): Promise<VideoHit[]> {
     }
   }
   throw new Error(`Search is unavailable (${errors.join('; ') || 'no sources set up'})`);
+}
+
+/**
+ * A channel's uploads, most viewed first (Invidious). For an artist's official channel this is
+ * their list of hits, which plain searches (newest uploads first) miss.
+ */
+export async function channelPopular(channelId: string): Promise<VideoHit[]> {
+  const inst = audioInstances().find((i) => i.kind === 'invidious');
+  if (!inst) return [];
+  const j = await getJson(`${inst.base}/api/v1/channels/${encodeURIComponent(channelId)}/videos?sort_by=popular`);
+  const list: Array<{ videoId: string; title: string; author: string; lengthSeconds: number; viewCount?: number; published?: number; videoThumbnails?: Array<{ url: string; quality?: string }> }> =
+    Array.isArray(j) ? j : j.videos ?? [];
+  return list
+    .filter((v) => /^[A-Za-z0-9_-]{11}$/.test(v.videoId) && v.lengthSeconds > 0)
+    .map((v) => {
+      const thumb = v.videoThumbnails?.find((t) => t.quality === 'medium') ?? v.videoThumbnails?.[0];
+      return {
+        videoId: v.videoId,
+        title: v.title,
+        author: v.author,
+        authorId: channelId,
+        lengthSeconds: Number(v.lengthSeconds) || 0,
+        thumbnail: thumb ? new URL(thumb.url, inst.base).href : '',
+        viewCount: Number(v.viewCount) || undefined,
+        publishedAt: v.published ? v.published * 1000 : undefined,
+      };
+    });
 }
 
 /** "45M views", "1.2B views", "123,456 views" -> a number. */

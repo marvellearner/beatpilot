@@ -30,7 +30,7 @@ import { audioInstances, searchVideos } from './audioSource';
 import { downloadToCache } from './audioDownload';
 import { PLAY_HISTORY_FILE, BANNED_SONGS_FILE, FAVORITES_FILE } from './library';
 import { cachedAudioPath, extractYouTubeVideoId, formatDuration, pruneAudioCache, type SearchResult } from './youtube';
-import { EMPTY_TASTE, rankHits } from '../shared/taste';
+import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, rankHits } from '../shared/taste';
 import { logError } from './logger';
 import { guessLanguage } from '../shared/songLanguage';
 
@@ -252,7 +252,7 @@ export function localRecommendations(title: string, artist: string, limit: numbe
   const language = guessLanguage(title, artist).language;
   const current = norm(title);
   const scored = index.tracks
-    .filter((t) => norm(t.title) !== current && !bannedTitles.has(norm(t.title)) && (!t.duration || t.duration <= 300))
+    .filter((t) => norm(t.title) !== current && !bannedTitles.has(norm(t.title)) && (!t.duration || t.duration <= MAX_AUTO_SONG_SECONDS))
     .map((t) => {
       const count = (t.videoId ? plays.get(t.videoId) : undefined) ?? plays.get(norm(t.title)) ?? 0;
       const sameLanguage = guessLanguage(t.title, t.artist).language === language;

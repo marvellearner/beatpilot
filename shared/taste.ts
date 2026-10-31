@@ -24,6 +24,12 @@ export interface TasteProfile {
 
 export const EMPTY_TASTE: TasteProfile = { artists: [], loved: [], recent: [], avoidArtists: [], avoidSongs: [] };
 
+/**
+ * RULE: the app never adds a song longer than 6 minutes to Up Next on its own (a song someone asks
+ * for may be any length). Many Bollywood songs run 5–6 minutes. Shared by the browser and server.
+ */
+export const MAX_AUTO_SONG_SECONDS = 360;
+
 const DAY_MS = 86_400_000;
 const MAX_ARTISTS = 8;
 
@@ -34,6 +40,30 @@ const NOT_ARTIST = /^(unknown artist|unknown|artist|artists|searching\.*|various
 
 /** Lower case letters and digits only, so "LuisFonsiVEVO", "Luis Fonsi" and "LUIS FONSI" agree. */
 export const artistKey = (name: string) => name.toLowerCase().replace(/vevo$/, '').replace(/[^\p{L}\p{N}]/gu, '');
+
+// Dotted initials are one word: "K.K." is "kk", "A.R. Rahman" is "ar rahman"
+const words = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/\b(\p{L})\.(?=\p{L}\b)/gu, '$1')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+/**
+ * Whether a song's title / channel names the artist: as whole words ("KK" in "Tadap Tadap | KK |
+ * Hum Dil De Chuke Sanam", not in "Ikky"), or, for names of 5+ letters, also written together
+ * ("APDHILLON", "ChainsmokersVEVO"). "The Chainsmokers" and "Chainsmokers" are the same name.
+ */
+export function namesArtist(text: string, artist: string): boolean {
+  const want = words(artist).filter((w, i, all) => !(i === 0 && w === 'the' && all.length > 1));
+  if (!want.length) return false;
+  const have = words(text);
+  for (let i = 0; i + want.length <= have.length; i++) {
+    if (want.every((w, k) => have[i + k] === w)) return true;
+  }
+  const key = want.join('');
+  return key.length >= 5 && artistKey(text).includes(key);
+}
 
 function cleanName(name: string): string {
   return name

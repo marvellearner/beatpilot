@@ -20,7 +20,7 @@ const levelWord = (level: number) => (level < 0.5 ? 'soft' : level < 0.8 ? 'medi
 
 /**
  * Live Rhythm Enhancer controls. In AI mode (the default) the AI DJ decides per song, so the
- * panel is just on/off, volume and what the AI chose; "Choose myself" shows the styles.
+ * panel is just on/off, volume and what the AI chose; "Pick drum style" shows the styles.
  * Shared by the laptop console (Party and Pro views) and the phone remote.
  */
 export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, compact }) => {
@@ -68,7 +68,7 @@ export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, com
             }`}
             aria-pressed={rhythm.enabled}
           >
-            {rhythm.enabled ? 'ON' : 'OFF'}
+            Drums: {rhythm.enabled ? 'ON' : 'OFF'}
           </button>
         </div>
       </div>
@@ -85,7 +85,7 @@ export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, com
             }`}
             aria-pressed={rhythm.mode === m}
           >
-            {m === 'ai' ? '🤖 AI decides' : 'Choose myself'}
+            {m === 'ai' ? '🤖 AI decides' : 'Pick drum style'}
           </button>
         ))}
       </div>

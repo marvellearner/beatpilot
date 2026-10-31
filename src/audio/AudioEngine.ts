@@ -30,7 +30,7 @@ import { HighlightDetector } from './HighlightDetector';
 import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
-import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dOrMashupSong, type SongRef } from './songMatch';
+import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dSong, isMashupSong, type SongRef } from './songMatch';
 import {
   KEEP_AT_TOP,
   MAX_QUEUE_TARGET,
@@ -45,7 +45,7 @@ import {
   type SongLike,
 } from './engine/queueRules';
 import { DJAgent } from '../ai/DJAgent';
-import { artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
+import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, namesArtist, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
 import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
 import { OutroDetector } from './OutroDetector';
 
@@ -102,6 +102,8 @@ const OFFLINE_ONLY_KEY = 'ai_dj_offline_only';
 // Best Parts mode (dance floor): each song plays its build-up and hook, then mixes out.
 // Rules: MIXING_RULES.md "Best Parts Mode".
 const BEST_PARTS_KEY = 'ai_dj_best_parts';
+// What the AI chat was told to keep doing ("play only <artist>"), remembered across reloads
+const AI_INSTRUCTIONS_KEY = 'ai_dj_ai_instructions';
 const BEST_PART_HOOK_BARS = 16; // play at least this much from the hook (a full chorus) before leaving
 const BEST_PART_EXIT_BARS = 16; // ...then mix out at the best phrase within the next 16 bars
 const BEST_PART_BUILD_BARS = 16; // incoming songs enter up to 16 bars before their hook
@@ -124,9 +126,9 @@ export const BPM_LIMITS = {
 const MIN_TEMPO = 0.5;
 const MAX_TEMPO = 1.5;
 const MIN_QUEUE_TARGET = 45; // Maintain ~50 songs in queue at all times
-// RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue.
+// RULE: Never add any song longer than 6 minutes (360 s) on your own in up next queue.
 // If the user explicitly searches and plays then it is fine (source === 'request').
-export const MAX_AUTO_QUEUE_SONG_DURATION = 300;
+export const MAX_AUTO_QUEUE_SONG_DURATION = MAX_AUTO_SONG_SECONDS;
 
 export class AudioEngine {
   public ctx: AudioContext;
@@ -145,6 +147,7 @@ export class AudioEngine {
   public mood: MoodId = 'normal';
   private limiter: DynamicsCompressorNode;
   private masterGain: GainNode;
+  public masterVolume: number = 0.9;
   public masterAnalyser: AnalyserNode;
   public masterAnalyserL: AnalyserNode;
   public masterAnalyserR: AnalyserNode;
@@ -187,8 +190,16 @@ export class AudioEngine {
   // Songs dropped by expiry, Refresh or a failed load, so the same songs don't come straight back
   private droppedPicks: Array<{ song: SongLike; at: number }> = [];
   public refreshingQueue = false; // Refresh is rebuilding Up Next
-  // "Play only / more <artist>" from the AI chat: Up Next follows it until cleared (this session)
-  public artistFocus: { artists: string[]; only: boolean } | null = null;
+  // "Play only / more <artist>" from the AI chat: Up Next follows it until cleared. Remembered.
+  public artistFocus: { artists: string[]; only: boolean } | null = (() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(AI_INSTRUCTIONS_KEY) || 'null');
+      const artists = Array.isArray(saved?.artistFocus?.artists) ? saved.artistFocus.artists.filter((a: unknown) => typeof a === 'string' && a.trim()) : [];
+      return artists.length ? { artists, only: saved.artistFocus.only !== false } : null;
+    } catch {
+      return null;
+    }
+  })();
   private stopRefill = false; // set by Refresh: a running fill stops at once
   private refillRequest: AbortController | null = null; // the fill's recommendation request in flight
   // Songs removed from Up Next by hand tonight, per artist (see sessionAvoidArtists)
@@ -259,6 +270,8 @@ export class AudioEngine {
     gemini: { configured: boolean; online: boolean; model: string | null; error: string | null };
   } | null = null;
   public lastAiDecision: string = '';
+  public isAiThinking: boolean = false;
+  public lastAiResult: { explanation: string; source: string; latencyMs: number } | null = null;
   // Disk Cache stats (cache/audio directory on disk)
   public diskCacheCount: number = 0;
   public diskCacheMb: number = 0;
@@ -654,14 +667,14 @@ export class AudioEngine {
     this.rememberOriginal(track);
     const job = ++this.tempoJob;
 
-    // Apply immediate playbackRate to deck & mediaEl for INSTANT 0ms click responsiveness
-    deck.setPlaybackRate(target, false);
-
     if (!this.keyLock || !track.audioBuffer) {
-      // Vinyl mode or streaming without full buffer: instant playbackRate only
+      // Vinyl mode, or a song still streaming: an instant speed change. A stream keeps its pitch
+      // with key lock on (the browser re-times it); vinyl mode moves the pitch with the speed.
+      deck.setKeepStreamPitch(this.keyLock);
       if ((track.tempoRatio ?? 1) !== 1 && track.originalBuffer) {
         this.swapDeckAudio(deck, track, track.originalBuffer, 1);
       }
+      deck.setPlaybackRate(target, false);
       track.tempoRatio = target;
       track.bpm = (track.original?.bpm ?? track.bpm) * target;
       const newBpm = Math.round(track.bpm * 10) / 10;
@@ -672,7 +685,9 @@ export class AudioEngine {
       return;
     }
 
-    // Key Lock ON with audioBuffer: retimed via Web Worker with pitch preservation
+    // Key Lock ON with the song decoded: re-timed in a worker with the pitch kept, and swapped in
+    // when ready (~1 s). The speed is NOT changed before that: a plain speed change would shift the
+    // pitch for that second (the "Tuning…" status shows meanwhile).
     this.tempoBusy = true;
     const naturalBpm = track.original!.bpm;
     const targetBpm = (naturalBpm * target).toFixed(1);
@@ -720,6 +735,7 @@ export class AudioEngine {
 
   public toggleKeyLock() {
     this.keyLock = !this.keyLock;
+    for (const deck of [this.deckA, this.deckB]) deck.setKeepStreamPitch(this.keyLock);
     this.saveSoundSettings();
     // Re-apply the current speed in the new mode
     const info = this.getTempoInfo();
@@ -946,6 +962,7 @@ export class AudioEngine {
       if (saved?.mood) this.mood = getMood(saved.mood).id;
       this.sessionBpm = getMood(this.mood).tempoLock?.preferred ?? null;
       if (typeof saved?.keyLock === 'boolean') this.keyLock = saved.keyLock;
+      for (const deck of [this.deckA, this.deckB]) deck.setKeepStreamPitch(this.keyLock);
       const eq = { ...getMood(this.mood).eq, ...(saved?.eq ?? {}) };
       for (const band of EQ_BANDS) this.setEqBand(band.id, Number(eq[band.id]) || 0, false);
     } catch {
@@ -1239,7 +1256,7 @@ export class AudioEngine {
     const shiftTag = harmonicCompat ? ` [${harmonicCompat.badgeText}]` : '';
     // Say when the song's ending (a closing scene, dialogue, fade) is being skipped
     const outroTag = outTrack?.outroReason && outTrack.musicEndTime !== undefined && plan.exitTime < outTrack.duration - 5 ? ` (${outTrack.outroReason})` : '';
-    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag} (following MIXING_RULES.md): ${plan.reason}${outroTag}. Click Mix Now to mix immediately.`;
+    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag}: ${plan.reason}${outroTag}. Click Mix Now to mix immediately.`;
     this.notify();
 
     if (!outTrack || durationSeconds) return true;
@@ -1432,7 +1449,7 @@ export class AudioEngine {
     const startsIn = Math.round(this.pendingMixStartsIn() ?? 0);
     const how = choice.style === 'cut' ? 'cut on the beat' : `${choice.bars}-bar blend`;
     this.lastAiDecision = `${choice.reason} (${how})`;
-    this.acquisitionStatus = `🤖 AI DJ: ${choice.reason} — ${how} into "${pending.item.title}" in ${startsIn}s (following MIXING_RULES.md). Click Mix Now to mix immediately.`;
+    this.acquisitionStatus = `🤖 AI DJ: ${choice.reason} — ${how} into "${pending.item.title}" in ${startsIn}s. Click Mix Now to mix immediately.`;
     this.notify();
   }
 
@@ -1643,10 +1660,10 @@ export class AudioEngine {
 
           for (const item of recs) {
             if (isQueueFull(this.queue)) break;
-            // RULE: Never add any song longer than 5 minutes (300s) on your own in up next queue
+            // RULE: Never add any song longer than 6 minutes on your own in up next queue
             if (item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
             // RULE: Never include 8D or mashup songs in next queue on your own
-            if (is8dOrMashupSong({ title: item.title, artist: item.author, url: item.url })) continue;
+            if (this.autoBlocked({ title: item.title, artist: item.author, url: item.url })) continue;
 
             // Avoid duplicates of the queue, the current song, and songs already played this session
             const isDuplicate =
@@ -1694,7 +1711,7 @@ export class AudioEngine {
 
     try {
       // RULE: Never include 8D or mashup songs in next queue on your own
-      if (item.source !== 'request' && is8dOrMashupSong(item)) {
+      if (item.source !== 'request' && this.autoBlocked(item)) {
         console.log(`[AudioEngine] Dropping "${item.title}" from auto-queue: 8D / mashup audio not allowed.`);
         this.queue = this.queue.filter((q) => q !== item);
         this.saveQueueToStorage();
@@ -1713,7 +1730,7 @@ export class AudioEngine {
           const searchData = await searchRes.json();
           if (searchData.results && searchData.results.length > 0) {
             const match = (item.source !== 'request')
-              ? (searchData.results.find((r: { title: string; author?: string; url?: string }) => !is8dOrMashupSong({ title: r.title, artist: r.author, url: r.url })) || searchData.results[0])
+              ? (searchData.results.find((r: { title: string; author?: string; url?: string }) => !this.autoBlocked({ title: r.title, artist: r.author, url: r.url })) || searchData.results[0])
               : searchData.results[0];
             item.url = match.url;
             item.title = match.title;
@@ -1724,7 +1741,7 @@ export class AudioEngine {
             streamUrl = match.url;
 
             // RULE: Never include 8D or mashup songs in next queue on your own
-            if (item.source !== 'request' && is8dOrMashupSong(item)) {
+            if (item.source !== 'request' && this.autoBlocked(item)) {
               console.log(`[AudioEngine] Dropping "${item.title}" from auto-queue: 8D / mashup audio not allowed.`);
               this.queue = this.queue.filter((q) => q !== item);
               this.saveQueueToStorage();
@@ -1732,9 +1749,9 @@ export class AudioEngine {
               return;
             }
 
-            // RULE: Never add/keep any song longer than 5 minutes on your own in up next queue
+            // RULE: Never add/keep any song longer than 6 minutes on your own in up next queue
             if (item.source !== 'request' && item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
-              console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 5 minutes limit.`);
+              console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 6 minutes limit.`);
               this.queue = this.queue.filter((q) => q !== item);
               this.saveQueueToStorage();
               this.notify();
@@ -1774,7 +1791,7 @@ export class AudioEngine {
       item.isDiskCached = true;
 
       // RULE: Never include 8D or mashup songs in next queue on your own
-      if (item.source !== 'request' && is8dOrMashupSong(item)) {
+      if (item.source !== 'request' && this.autoBlocked(item)) {
         console.log(`[AudioEngine] Dropping "${item.title}" from auto-queue: 8D / mashup audio not allowed.`);
         this.queue = this.queue.filter((q) => q !== item);
         this.saveQueueToStorage();
@@ -1782,9 +1799,9 @@ export class AudioEngine {
         return;
       }
 
-      // RULE: Never add/keep any song longer than 5 minutes on your own in up next queue
+      // RULE: Never add/keep any song longer than 6 minutes on your own in up next queue
       if (item.source !== 'request' && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
-        console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 5 minutes limit.`);
+        console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.duration)}s) from auto-queue: exceeds 6 minutes limit.`);
         this.queue = this.queue.filter((q) => q !== item);
         this.saveQueueToStorage();
         this.notify();
@@ -2049,11 +2066,13 @@ export class AudioEngine {
         // RULE: If any song is in previously played, same name song should NOT be there in up next queue!
         this.playedRecently(item) ||
         this.isDontPlayAgain(item) ||
-        // RULE: Never add or keep any song longer than 5 minutes on your own in up next queue.
+        // "Play only <artist>" (remembered across reloads): automatic picks must be theirs
+        (!isChosen(item) && !this.allowedByFocus(item)) ||
+        // RULE: Never add or keep any song longer than 6 minutes on your own in up next queue.
         // Explicit user searches and requests (source === 'request') are permitted.
         (item.source !== 'request' && !!item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) ||
         // RULE: Never include 8D or mashup songs in next queue on your own.
-        (item.source !== 'request' && is8dOrMashupSong(item))
+        (item.source !== 'request' && this.autoBlocked(item))
     );
     if (uniqueQueue.length !== this.queue.length) {
       this.queue = uniqueQueue;
@@ -2086,7 +2105,7 @@ export class AudioEngine {
         const searchPrompt = s.searchPrompt || `${s.artist} - ${s.title}`;
 
         // RULE: Never include 8D or mashup songs in next queue on your own
-        if (is8dOrMashupSong({ title: s.title, artist: s.artist, url: searchPrompt })) continue;
+        if (this.autoBlocked({ title: s.title, artist: s.artist, url: searchPrompt })) continue;
 
         // Skip if this song is in previously played, already in queue, or in Don't Play Again Ever
         if (
@@ -2110,7 +2129,7 @@ export class AudioEngine {
           if (res.ok) {
             const data = await res.json();
             if (data.results && data.results.length > 0) {
-              const r = data.results.find((res: { title: string; author?: string; url?: string }) => !is8dOrMashupSong({ title: res.title, artist: res.author, url: res.url })) || data.results[0];
+              const r = data.results.find((res: { title: string; author?: string; url?: string }) => !this.autoBlocked({ title: res.title, artist: res.author, url: res.url })) || data.results[0];
               url = r.url || url;
               duration = r.duration || duration;
               thumbnail = r.thumbnail;
@@ -2121,9 +2140,9 @@ export class AudioEngine {
         }
 
         // RULE: Never include 8D or mashup songs in next queue on your own
-        if (is8dOrMashupSong({ title: s.title, artist: s.artist, url })) continue;
+        if (this.autoBlocked({ title: s.title, artist: s.artist, url })) continue;
 
-        // RULE: Never add any song longer than 5 minutes on your own in up next queue
+        // RULE: Never add any song longer than 6 minutes on your own in up next queue
         if (duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
 
         const queuedItem: QueuedTrack = {
@@ -2512,7 +2531,7 @@ export class AudioEngine {
         const url = song.url || song.title;
         if (
           !this.allowedByFocus({ title, artist }) ||
-          is8dOrMashupSong({ title, artist, url }) ||
+          this.autoBlocked({ title, artist, url }) ||
           this.isDontPlayAgain({ title, artist, url }) ||
           this.isSongInQueueOrPlayed({ title, artist, url }) ||
           this.isTitleInQueue(title, artist, url) ||
@@ -2554,7 +2573,7 @@ export class AudioEngine {
               const title = parts.length > 1 ? parts.slice(1).join(' - ').trim() : songTitle.trim();
               if (
                 !this.allowedByFocus({ title, artist }) ||
-                is8dOrMashupSong({ title, artist, url: songTitle }) ||
+                this.autoBlocked({ title, artist, url: songTitle }) ||
                 this.isDontPlayAgain({ title, artist, url: songTitle }) ||
                 this.playedRecently({ title, artist, url: songTitle }) ||
                 this.isSongInQueueOrPlayed({ title, artist, url: songTitle }) ||
@@ -2612,11 +2631,29 @@ export class AudioEngine {
    * someone chose and the next few (loading, about to play) stay; the dropped new picks aren't
    * suggested again for 2 hours.
    */
+  /**
+   * Versions never picked automatically: 8D audio, and mashups unless the listener liked that
+   * exact mashup (same video, or the same title). Songs someone asks for are always allowed.
+   */
+  private autoBlocked(song: { title?: string; artist?: string; url?: string }): boolean {
+    if (is8dSong(song)) return true;
+    return isMashupSong(song) && !this.isLikedExactly(song);
+  }
+
+  /** In the liked songs as this very upload (same video id) or under exactly the same title. */
+  private isLikedExactly(song: { title?: string; url?: string }): boolean {
+    const videoKey = (url?: string) => (url ? songKeys({ title: '', url }).find((k) => k.startsWith('yt:')) : undefined);
+    const id = videoKey(song.url);
+    const title = (song.title || '').trim().toLowerCase();
+    return this.favorites.some(
+      (f) => (!!id && id === videoKey(f.url)) || (!!title && title === (f.title || '').trim().toLowerCase())
+    );
+  }
+
   /** Whether a song is by one of the focus artists (title or artist names them). */
   public matchesFocus(song: { title?: string; artist?: string }): boolean {
     if (!this.artistFocus) return true;
-    const text = artistKey(`${song.title ?? ''} ${song.artist ?? ''}`);
-    return this.artistFocus.artists.some((a) => artistKey(a).length >= 3 && text.includes(artistKey(a)));
+    return this.artistFocus.artists.some((a) => namesArtist(`${song.title ?? ''} | ${song.artist ?? ''}`, a));
   }
 
   /** Automatic picks under "play only <artist>" must be by them; "more <artist>" allows anything. */
@@ -2631,6 +2668,7 @@ export class AudioEngine {
    */
   public setArtistFocus(artists: string[], only: boolean) {
     this.artistFocus = { artists, only };
+    this.saveAiInstructions();
     const names = artists.join(' & ');
     if (only) {
       this.queue = this.queue.filter((q) => isChosen(q) || this.matchesFocus(q));
@@ -2657,8 +2695,33 @@ export class AudioEngine {
       return;
     }
     this.artistFocus = null;
+    this.saveAiInstructions();
     this.noticeMix('Back to normal: Up Next picks from all your music.');
     void this.refreshQueue();
+  }
+
+  /** Whether the AI chat was told something that is still being followed (shown with a Clear button). */
+  public get hasAiInstructions(): boolean {
+    return this.artistFocus !== null;
+  }
+
+  /** Short text of what the AI chat is still following, e.g. 'Only Chainsmokers'. */
+  public describeAiInstructions(): string[] {
+    return this.artistFocus ? [`${this.artistFocus.only ? 'Only' : 'More'} ${this.artistFocus.artists.join(' & ')}`] : [];
+  }
+
+  /** The top bar's "Clear AI instructions": forget everything the AI chat was told to keep doing. */
+  public clearAiInstructions() {
+    this.clearArtistFocus();
+  }
+
+  private saveAiInstructions() {
+    try {
+      if (this.artistFocus) window.localStorage.setItem(AI_INSTRUCTIONS_KEY, JSON.stringify({ artistFocus: this.artistFocus }));
+      else window.localStorage.removeItem(AI_INSTRUCTIONS_KEY);
+    } catch {
+      // storage unavailable: the instruction lasts until the page is closed
+    }
   }
 
   public async refreshQueue(): Promise<void> {
@@ -3358,7 +3421,7 @@ export class AudioEngine {
     }
 
     // RULE: Never include 8D or mashup songs in next queue on your own
-    if (source !== 'request' && is8dOrMashupSong({ title: queryOrUrl, url: queryOrUrl })) {
+    if (source !== 'request' && this.autoBlocked({ title: queryOrUrl, url: queryOrUrl })) {
       this.acquisitionStatus = `Skipped "${queryOrUrl}": 8D/mashup songs are not allowed in auto queue.`;
       this.notify();
       return null;
@@ -3436,14 +3499,14 @@ export class AudioEngine {
       };
       if (!this.allowRecentlyPlayed(queuedItem)) return null;
       // RULE: Never include 8D or mashup songs in next queue on your own
-      if (source !== 'request' && is8dOrMashupSong(cached.metadata)) {
+      if (source !== 'request' && this.autoBlocked(cached.metadata)) {
         this.acquisitionStatus = `Skipped "${cached.metadata.title}": 8D/mashup songs are not allowed in auto queue.`;
         this.notify();
         return null;
       }
-      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      // RULE: Never add any song longer than 6 minutes on your own in up next queue
       if (source !== 'request' && cached.metadata.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
-        this.acquisitionStatus = `Skipped "${cached.metadata.title}": exceeds 5 minutes limit.`;
+        this.acquisitionStatus = `Skipped "${cached.metadata.title}": exceeds 6 minutes limit.`;
         this.notify();
         return null;
       }
@@ -3489,11 +3552,11 @@ export class AudioEngine {
       }
 
       const match = (source !== 'request')
-        ? (searchData.results.find((r: { title: string; author?: string; url?: string }) => !is8dOrMashupSong({ title: r.title, artist: r.author, url: r.url })) || searchData.results[0])
+        ? (searchData.results.find((r: { title: string; author?: string; url?: string }) => !this.autoBlocked({ title: r.title, artist: r.author, url: r.url })) || searchData.results[0])
         : searchData.results[0];
 
       // RULE: Never include 8D or mashup songs in next queue on your own
-      if (source !== 'request' && is8dOrMashupSong({ title: match.title, artist: match.author, url: match.url })) {
+      if (source !== 'request' && this.autoBlocked({ title: match.title, artist: match.author, url: match.url })) {
         this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
         this.saveQueueToStorage();
         this.acquisitionStatus = `Skipped "${match.title}": 8D/mashup audio is not allowed in auto queue.`;
@@ -3576,11 +3639,11 @@ export class AudioEngine {
       queuedItem.thumbnail = match.thumbnail;
       if (!this.allowRecentlyPlayed(queuedItem)) return null;
 
-      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      // RULE: Never add any song longer than 6 minutes on your own in up next queue
       if (source !== 'request' && match.duration && match.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
         this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
         this.saveQueueToStorage();
-        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(match.duration)}s): exceeds 5 minutes limit.`;
+        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(match.duration)}s): exceeds 6 minutes limit.`;
         this.notify();
         return null;
       }
@@ -3608,11 +3671,11 @@ export class AudioEngine {
       queuedItem.audioBuffer = audioBuffer;
       queuedItem.duration = audioBuffer.duration;
 
-      // RULE: Never add any song longer than 5 minutes on your own in up next queue
+      // RULE: Never add any song longer than 6 minutes on your own in up next queue
       if (source !== 'request' && audioBuffer.duration > MAX_AUTO_QUEUE_SONG_DURATION) {
         this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
         this.saveQueueToStorage();
-        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(audioBuffer.duration)}s): exceeds 5 minutes limit.`;
+        this.acquisitionStatus = `Skipped "${match.title}" (${Math.round(audioBuffer.duration)}s): exceeds 6 minutes limit.`;
         this.notify();
         return null;
       }
@@ -3735,6 +3798,7 @@ export class AudioEngine {
 
   public setMasterVolume(vol: number) {
     const clamped = Math.max(0, Math.min(1, vol));
+    this.masterVolume = clamped;
     this.masterGain.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.02);
     this.notify();
   }
@@ -4274,7 +4338,7 @@ export class AudioEngine {
     return peaks;
   }
 
-  private notify() {
+  public notify() {
     if (this.onEngineUpdate) {
       this.onEngineUpdate();
     }

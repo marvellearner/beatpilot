@@ -57,7 +57,7 @@ The first song plays from the beginning. While it loads you'll see **Searching �
 Once a song is playing, the app looks after the party:
 
 - **Keeps the queue full:** it proactively maintains up to 50 songs lined up in the Up Next queue, auto-seeded from your favourites, most played bangers, past history, and AI recommendations.
-- **5-Minute Song Cap:** The engine will never automatically add any song longer than 5 minutes to the queue. (Explicit searches and plays by you can be any length).
+- **6-Minute Song Cap:** The engine will never automatically add any song longer than 6 minutes to the queue. (Explicit searches and plays by you can be any length).
 - **AI Mood Reading:** Whenever you search and play a song, the AI reads your current vibe/genre and pushes the top 5 matching songs to the front of the queue so they play next.
 - **7-Skip Auto-Removal:** If the song at the top (#1) of Up Next is avoided 7 times while other songs are played, the app automatically drops it from the queue with an on-screen warning badge (`⚠️ Skipped X/7`).
 - **Thumbs Down ("Don't Play Again Ever"):** Every queue item has a Thumbs Down (👎) button. Clicking it permanently bans the song, instantly drops it, and prevents it from ever being auto-queued again.
@@ -78,7 +78,7 @@ Once a song is playing, the app looks after the party:
 | ⏭ **Next** | Mix into the next ready song at the **best moment in the next 30 seconds**, e.g. where the current song drops into a breakdown, timed so the new song's drop lands as the blend ends. A banner shows the countdown. Press Next again (or **Mix now**) to skip the wait, or **Cancel**. |
 | ⟲ / ⟳ | Jump back or forward 10 seconds. |
 | ■ **STOP** | Stop all music and drums. |
-| 🔥 **PLAY BEST PART** | Jump straight to the song's most popular part. |
+| 🔥 **Best part** | Jump straight to the song's most popular part. |
 | **Slider** | Drag to move to any point in the song. |
 
 **Tempo** (under the buttons, also on the iPhone). It changes the speed of the song that's playing:
@@ -91,7 +91,7 @@ Once a song is playing, the app looks after the party:
 | **🔒 Key Lock: ON** (default) | Speed changes but the **pitch stays the same**. Voices don't go chipmunk or deep. The change takes about a second to prepare, then switches in smoothly at the same spot in the song. |
 | **Key Lock: OFF (vinyl)** | Instant, like a record player: faster also sounds higher. |
 | **Whole set at this BPM** | Every following song is also tuned to this tempo, so every mix is at exactly the same BPM. |
-| **Original: ON / OFF** | **ON:** songs play at their **original BPM**, ignoring the party/set tempo and any speed change. It stays on for the next songs too. **OFF:** the set tempo (if any) applies again. Pressing a speed button or **Set** turns it off. |
+| **Always original BPM: ON / OFF** | **ON:** songs play at their **original BPM**, ignoring the party/set tempo and any speed change. It stays on for the next songs too. **OFF:** the set tempo (if any) applies again. Pressing a speed button or **Set** turns it off. |
 
 The display shows **Original** BPM and **Current** BPM side by side, plus the speed (e.g. `1.10x (+10%)`). The setting applies to the song that's playing; with **Whole set** on, it carries on to the next songs.
 
@@ -120,7 +120,7 @@ All you might want to touch:
 - **ON / OFF** for the whole layer.
 - **Volume** slider and the speaker button (mute).
 
-**Choose myself** is there if you ever want one fixed style for every song:
+**Pick drum style** is there if you ever want one fixed style for every song:
 
 | Style | Best for |
 | :--- | :--- |

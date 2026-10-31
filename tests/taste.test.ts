@@ -102,3 +102,22 @@ describe('popularity', () => {
     expect(scoreHit(hits[1], 1, taste, 'karan aujla', 20, now)).toBeGreaterThan(scoreHit(hits[0], 0, taste, 'karan aujla', 20, now));
   });
 });
+
+describe('namesArtist', () => {
+  it('matches short names as whole words only', async () => {
+    const { namesArtist } = await import('../shared/taste');
+    expect(namesArtist('Tadap Tadap | KK | Hum Dil De Chuke Sanam | T-Series', 'KK')).toBe(true);
+    expect(namesArtist('SOFTLY (Official Music Video) KARAN AUJLA | IKKY', 'KK')).toBe(false);
+    expect(namesArtist('The Chainsmokers - Paris | ChainsmokersVEVO', 'chainsmokers')).toBe(true);
+    expect(namesArtist('BROWN MUNDE | APDHILLON', 'AP Dhillon')).toBe(true);
+    expect(namesArtist('Diljit Dosanjh: Lover', 'Karan Aujla')).toBe(false);
+  });
+});
+
+describe('namesArtist with dotted initials', () => {
+  it('reads "K.K." as KK', async () => {
+    const { namesArtist } = await import('../shared/taste');
+    expect(namesArtist('Lyrical: Labon Ko | Bhool Bhulaiyaa | Pritam | K.K.| Akshay Kumar', 'KK')).toBe(true);
+    expect(namesArtist('Dil Ibaadat | K.K. - Topic', 'kk')).toBe(true);
+  });
+});

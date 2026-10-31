@@ -10,15 +10,16 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { ollamaGenerate } from './llm';
 import { isOnline, localRecommendations } from './localLibrary';
 import { SearchResult, canonicalYouTubeUrl, extractYouTubeVideoId, formatDuration } from './youtube';
-import { fansAlsoLike, mapLimit, related, search, type VideoHit } from './discover';
+import { artistHits, fansAlsoLike, mapLimit, related, search, type VideoHit } from './discover';
 import { BANNED_SONGS_FILE, FAVORITES_FILE, PLAY_HISTORY_FILE, type HistoryEntry } from './library';
 import { readJsonArray } from './jsonFile';
 import { logError } from './logger';
-import { artistKey, buildTaste, rankHits, scoreHit, songArtists, tasteForPrompt, type TasteProfile, type TasteSong } from '../shared/taste';
+import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, namesArtist, rankHits, scoreHit, songArtists, tasteForPrompt, type TasteProfile, type TasteSong } from '../shared/taste';
 
 const SEARCH_CONCURRENCY = 3;
 const RESEARCH_SEEDS = 10; // songs whose "also played" lists are fetched per request
 const DISCOVERY_ARTISTS = 4; // new artists (fans of yours also like) searched per request
+const FOCUS_EXTRA_SEEDS = 5; // with "play only <artist>": their top hits whose "also played" lists are fetched too
 const MAX_RECOMMENDATIONS = 40;
 // A busy CPU model times out; while it does, use the quick searches instead of waiting 45 s each time
 const OLLAMA_REST_MS = 5 * 60_000;
@@ -226,7 +227,7 @@ type Focus = { artists: string[]; only: boolean };
 function parseFocus(url: URL): Focus | null {
   try {
     const raw = JSON.parse(url.searchParams.get('focus') || 'null') as { artists?: unknown; only?: unknown } | null;
-    const artists = Array.isArray(raw?.artists) ? raw!.artists.map(String).filter((a) => artistKey(a).length >= 3).slice(0, 5) : [];
+    const artists = Array.isArray(raw?.artists) ? raw!.artists.map(String).filter((a) => artistKey(a).length >= 2).slice(0, 5) : [];
     return artists.length ? { artists, only: raw?.only !== false } : null;
   } catch {
     return null;
@@ -234,10 +235,8 @@ function parseFocus(url: URL): Focus | null {
 }
 
 /** Whether a song is by one of the focus artists (its title or channel names them). */
-const byFocus = (focus: Focus, song: { title?: string; author?: string; artist?: string }) => {
-  const text = artistKey(`${song.title ?? ''} ${song.author ?? song.artist ?? ''}`);
-  return focus.artists.some((a) => text.includes(artistKey(a)));
-};
+const byFocus = (focus: Focus, song: { title?: string; author?: string; artist?: string }) =>
+  focus.artists.some((a) => namesArtist(`${song.title ?? ''} | ${song.author ?? song.artist ?? ''}`, a));
 
 /** The songs the request is about (?seeds=[[title, artist, url], …], or ?title=&artist=), the song on air first. */
 function parseSeeds(url: URL): Seed[] {
@@ -418,7 +417,7 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     const ownIds = new Set(seeds.map((sd) => (sd.url ? extractYouTubeVideoId(sd.url) : null)).filter(Boolean));
     const isWanted = (h: VideoHit) =>
       h.lengthSeconds >= 90 &&
-      h.lengthSeconds <= 300 &&
+      h.lengthSeconds <= MAX_AUTO_SONG_SECONDS &&
       !ownIds.has(h.videoId) &&
       !/\b(8|16|24)[-_ ]*d\b/i.test(`${h.title} ${h.author || ''}`) &&
       !/\bmash[-_ ]*up\b/i.test(`${h.title} ${h.author || ''}`);
@@ -452,7 +451,7 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     const queries = [
       // The focus artists' hits, from a few angles so there are enough of them
       ...(focus?.artists ?? []).flatMap((a) =>
-        [a, `${a} hits`, `${a} best songs`].map((q) => ({ q, keep: 8, depth: 20, points: 1, why: `by ${a}, as you asked` }))
+        (artistKey(a).length <= 3 ? [`${a} songs`, `${a} hits`, `${a} singer best songs`] : [a, `${a} hits`, `${a} best songs`]).map((q) => ({ q, keep: 8, depth: 20, points: 1, why: `by ${a}, as you asked` }))
       ),
       ...ideas.map((q) => ({ q, keep: 1, depth: 8, points: 1.5, why: 'AI DJ suggestion' })),
       ...newArtists.map((q) => ({ q, keep: 2, depth: 20, points: 1, why: `fans of your artists like ${q}` })),
@@ -460,6 +459,25 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     ];
     const found = await mapLimit(queries, SEARCH_CONCURRENCY, async (item) => rankHits((await search(item.q)).filter(isWanted), taste, item.q, item.keep, item.depth), [] as VideoHit[]);
     found.forEach((hits, i) => hits.forEach((h) => consider(h, queries[i].points, queries[i].why)));
+
+    // An artist focus: their channel's most viewed uploads are their hits, biggest first
+    if (focus) {
+      const channels = await mapLimit(focus.artists, 3, artistHits, [] as VideoHit[]);
+      channels.forEach((hits) => hits.slice(0, 60).forEach((h, i) => consider(h, 2 - i / 40, `one of ${h.author}'s biggest songs`)));
+    }
+
+    // With an artist focus the listener's own songs by them are few: research from their top hits
+    // too ("also played" lists of those, which for "only" keep just that artist's songs)
+    if (focus) {
+      const researched = new Set(relatedLists.map((l) => l.sd.videoId));
+      const topHits = [...cands.values()]
+        .filter((c) => byFocus(focus, c.hit) && !researched.has(c.hit.videoId))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, FOCUS_EXTRA_SEEDS)
+        .map((c) => c.hit.videoId);
+      const more = await mapLimit(topHits, 4, related, [] as VideoHit[]);
+      more.forEach((hits) => hits.slice(0, 20).forEach((h, i) => consider(h, 1 - i / 25, `played together with ${focus.artists[0]} songs`)));
+    }
 
     // Little came back (instances busy): the hand-made list for the mood
     if (cands.size < 10 && !focus?.only) {

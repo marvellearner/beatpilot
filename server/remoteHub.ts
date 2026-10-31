@@ -9,6 +9,7 @@ import type { Server as HttpServer } from 'http';
 import { ServerResponse } from 'http';
 import os from 'os';
 import { WebSocketServer, WebSocket } from 'ws';
+import { getLaptopVolume, setLaptopVolume, toggleLaptopMute, setLaptopMute } from './laptopAudio';
 
 export function attachRemoteHub(httpServer: HttpServer) {
   const wss = new WebSocketServer({ noServer: true });
@@ -17,6 +18,15 @@ export function attachRemoteHub(httpServer: HttpServer) {
   const remotes = new Set<WebSocket>();
   let lastHostState: Record<string, unknown> | null = null; // sent to a phone as soon as it connects
   const alive = new WeakMap<WebSocket, boolean>();
+  // The laptop's Windows volume, owned here (not by the laptop tab). Added to every full state a
+  // phone receives: the tab's own full states don't carry it, and would blank the phone's slider.
+  let laptop: { laptopVolume?: number; laptopMuted?: boolean } = {};
+  const laptopUpdate = (res: { volume: number; muted: boolean }) => {
+    laptop = { laptopVolume: res.volume, laptopMuted: res.muted };
+    const update = { type: 'SYNC_LIVE', ...laptop };
+    if (lastHostState) Object.assign(lastHostState, laptop);
+    sendToRemotes(update);
+  };
 
   const send = (ws: WebSocket, msg: string | object) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
@@ -70,12 +80,16 @@ export function attachRemoteHub(httpServer: HttpServer) {
           }
         } else {
           remotes.add(ws);
-          send(ws, lastHostState ?? { type: 'HOST_GONE' });
+          void getLaptopVolume().then((volState) => {
+            laptop = { laptopVolume: volState.volume, laptopMuted: volState.muted };
+            if (lastHostState) Object.assign(lastHostState, laptop);
+            send(ws, lastHostState ?? { type: 'HOST_GONE', ...laptop });
+          });
         }
       } else if (data.type === 'SYNC_STATE') {
         if (ws === host) {
-          lastHostState = data as Record<string, unknown>;
-          sendToRemotes(text);
+          lastHostState = { ...(data as Record<string, unknown>), ...laptop };
+          sendToRemotes(lastHostState);
         }
       } else if (data.type === 'SYNC_LIVE') {
         // The small, frequent part: merge it so a phone that connects now gets a complete, current state
@@ -84,6 +98,17 @@ export function attachRemoteHub(httpServer: HttpServer) {
           sendToRemotes(text);
         }
       } else if (data.type?.startsWith('CMD_')) {
+        if (data.type === 'CMD_SET_LAPTOP_VOLUME') {
+          const vol = (data as { volume?: number }).volume;
+          if (typeof vol === 'number') {
+            void setLaptopVolume(vol).then(laptopUpdate);
+          }
+        } else if (data.type === 'CMD_TOGGLE_LAPTOP_MUTE') {
+          void toggleLaptopMute().then(laptopUpdate);
+        } else if (data.type === 'CMD_MUTE_LAPTOP') {
+          const muted = (data as { muted?: boolean }).muted ?? true;
+          void setLaptopMute(muted).then(laptopUpdate);
+        }
         if (host && ws !== host) send(host, text);
       }
     });
@@ -97,7 +122,10 @@ export function attachRemoteHub(httpServer: HttpServer) {
   });
 
   // A sleeping laptop or a phone that left the Wi-Fi never sends a close; ping to notice
-  const heartbeat = setInterval(() => {
+  let lastCheckedVol = -1;
+  let lastCheckedMute = false;
+
+  const heartbeat = setInterval(async () => {
     for (const ws of wss.clients) {
       if (!alive.get(ws)) {
         ws.terminate();
@@ -106,7 +134,20 @@ export function attachRemoteHub(httpServer: HttpServer) {
       alive.set(ws, false);
       ws.ping();
     }
-  }, 15_000);
+
+    if (remotes.size > 0) {
+      try {
+        const cur = await getLaptopVolume();
+        if (Math.abs(cur.volume - lastCheckedVol) > 0.015 || cur.muted !== lastCheckedMute) {
+          lastCheckedVol = cur.volume;
+          lastCheckedMute = cur.muted;
+          laptopUpdate(cur);
+        }
+      } catch {
+        // ignore background poll errors
+      }
+    }
+  }, 4_000);
   httpServer.on('close', () => clearInterval(heartbeat));
 }
 

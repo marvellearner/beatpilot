@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { AudioEngine } from '../../audio/AudioEngine';
 import { RhythmPanel } from './RhythmPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { MoodEqPanel } from './MoodEqPanel';
 import { TempoControl } from './TempoControl';
 import { PreviouslyPlayedPanel } from './PreviouslyPlayedPanel';
+import { PLAY_LOG_MAX } from '../../audio/engine/SongLibrary';
 import { getCamelotDetails, shiftKey } from '../../audio/KeyDetector';
 import { isStrictStartSong } from '../../audio/songMatch';
 import { VuMeter } from './VuMeter';
@@ -22,7 +24,6 @@ import {
   Disc3,
   Search,
   Plus,
-  Sliders,
   Star,
   Heart,
   ThumbsDown,
@@ -41,10 +42,10 @@ import {
 
 interface PartyConsoleViewProps {
   engine: AudioEngine;
-  onSwitchToProMode: () => void;
+  headerSlot?: HTMLElement | null; // where the app's top bar takes this console's my_songs.txt buttons
 }
 
-export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSwitchToProMode }) => {
+export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, headerSlot }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -303,10 +304,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         }
                       }}
                       className="px-2.5 py-1 rounded-xl text-[10px] font-extrabold font-mono bg-gradient-to-r from-purple-500/25 via-indigo-500/25 to-pink-500/25 hover:from-purple-500/40 hover:to-indigo-500/40 text-purple-200 border border-purple-500/40 hover:border-purple-300 transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-                      title="Harmonic Flow: Reorder queue using the Camelot wheel for an unbroken, clash-free musical journey"
+                      title="Sort by key: reorder Up Next with the Camelot wheel so each song's key fits the next (no clashes)"
                     >
                       <Sparkles className="w-3 h-3 text-purple-300 animate-pulse" />
-                      <span>Harmonic Flow</span>
+                      <span>Sort by key</span>
                     </button>
                   )}
                   <button
@@ -391,10 +392,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     onClick={(e) => handleSearchSubmit(e, true)}
                     disabled={!searchQuery.trim()}
                     className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold px-2.5 py-1.5 rounded-xl text-xs transition-colors flex items-center gap-1 disabled:opacity-40 shrink-0 shadow-md shadow-orange-500/20"
-                    title="Search & Play: AI reads mood and pushes top 5 matching songs to top of queue"
+                    title="Play: mixes this song in now, and the AI reads its mood and moves 5 matching songs to the top of Up Next"
                   >
                     <Play className="w-3 h-3 fill-current" />
-                    <span>Play & Sync Mood</span>
+                    <span>Play</span>
                   </button>
                 </form>
 
@@ -478,10 +479,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                               type="button"
                               onClick={() => handleSelectSong(song, true)}
                               className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shadow-sm"
-                              title="Play/Mix now: AI will read mood and push top 5 songs to top of queue"
+                              title="Play: mixes this song in now, and the AI reads its mood and moves 5 matching songs to the top of Up Next"
                             >
                               <Play className="w-2.5 h-2.5 fill-current" />
-                              <span>Play & Sync Mood</span>
+                              <span>Play</span>
                             </button>
                           </div>
                         </div>
@@ -528,11 +529,11 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
 
             {/* Previously played songs (newest first); the last 3 hours' are kept out of Up Next */}
             <PreviouslyPlayedPanel
-              entries={engine.playLog.slice(0, 30)}
+              entries={engine.playLog.slice(0, PLAY_LOG_MAX)}
               onMix={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, true)}
             />
 
-            {/* Favourites & Most Played Bangers (Quick Starters) */}
+            {/* Favourites & Most Played */}
             <div id="party-console-most-played" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#131926]/95 to-[#0b0e17]/95 shadow-xl flex flex-col gap-2">
               <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
                 {/* Tab Selector */}
@@ -563,7 +564,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     }`}
                   >
                     <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                    <span>Top Bangers</span>
+                    <span>Most Played</span>
                     <span className="text-[9px] font-mono font-bold bg-white/10 px-1 rounded">
                       {engine.mostPlayedSongs.length}
                     </span>
@@ -662,7 +663,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                             title="Start playing now"
                           >
                             <Play className="w-2.5 h-2.5 fill-current" />
-                            <span>Start</span>
+                            <span>Play</span>
                           </button>
                         </div>
                       </div>
@@ -729,7 +730,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                           className="py-1 px-2.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500 hover:to-orange-500 text-amber-300 hover:text-black border border-amber-500/30 hover:border-transparent rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 shadow-sm"
                         >
                           <Play className="w-2.5 h-2.5 fill-current" />
-                          <span>Start</span>
+                          <span>Play</span>
                         </button>
                       </div>
                     ))
@@ -807,55 +808,33 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
         </div>
       )}
 
-      {/* Top Bar: Mode switcher, Status & Custom File Actions */}
-      <div id="party-console-top-bar" className="flex flex-wrap items-center justify-between gap-2.5 bg-white/5 border border-white/10 px-3.5 py-2 rounded-2xl">
-        <div className="flex items-center gap-2.5">
-          <div className="p-1.5 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 text-black shadow-md shadow-amber-500/20">
-            <Sparkles className="w-3.5 h-3.5 fill-current" />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-extrabold text-white tracking-wide">PARTY MASTER CONSOLE</span>
-            <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[9px] px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              AI Auto-Pilot Active
+      {/* my_songs.txt actions live in the app's top bar (no row of their own, so the console starts higher) */}
+      {headerSlot &&
+        createPortal(
+          <div id="party-console-my-songs" className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+            <span className="flex items-center gap-1 pl-1.5 pr-1 text-[11px] text-slate-400" title="Your song list (my_songs.txt)">
+              <FileText className="w-3 h-3 text-cyan-400" />
+              <span className="hidden min-[1800px]:inline">my_songs.txt</span>
             </span>
-            <span className="hidden md:inline text-[11px] text-slate-400 font-medium">
-              • Clean player with beat-sync and auto-queue
-            </span>
-          </div>
-        </div>
-
-        {/* Action Buttons: Load & Edit my_songs.txt + Switch to Pro Decks */}
-        <div id="party-console-top-bar-actions" className="flex items-center gap-2">
-          <button
-            onClick={handleLoadMySongs}
-            disabled={isLoadingSongs}
-            className="flex items-center gap-1.5 bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-200 border border-cyan-500/40 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all shadow-sm"
-            title="Load songs from my_songs.txt"
-          >
-            <FileText className="w-3 h-3 text-cyan-400" />
-            <span>{isLoadingSongs ? 'Loading...' : 'Load my_songs.txt'}</span>
-          </button>
-
-          <button
-            onClick={handleOpenEditor}
-            className="flex items-center gap-1.5 bg-white/10 hover:bg-white/15 text-slate-300 hover:text-white border border-white/10 px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-all"
-            title="View or add songs to my_songs.txt"
-          >
-            <Edit3 className="w-3 h-3 text-amber-400" />
-            <span>Edit my_songs.txt</span>
-          </button>
-
-          <button
-            onClick={onSwitchToProMode}
-            className="flex items-center gap-1.5 bg-white/10 hover:bg-white/15 text-slate-300 hover:text-white px-2.5 py-1 rounded-xl text-[11px] font-semibold border border-white/10 transition-colors"
-            title="Switch to detailed dual-deck console with EQ faders and mixer"
-          >
-            <Sliders className="w-3 h-3 text-slate-400" />
-            <span>Pro Decks</span>
-          </button>
-        </div>
-      </div>
+            <button
+              onClick={handleLoadMySongs}
+              disabled={isLoadingSongs}
+              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-200 border border-cyan-500/40 transition-all disabled:opacity-60"
+              title="Load songs from my_songs.txt"
+            >
+              {isLoadingSongs ? 'Loading…' : 'Load'}
+            </button>
+            <button
+              onClick={handleOpenEditor}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/10 hover:bg-white/15 text-slate-300 hover:text-white border border-white/10 transition-all"
+              title="View or add songs to my_songs.txt"
+            >
+              <Edit3 className="w-3 h-3 text-amber-400" />
+              Edit
+            </button>
+          </div>,
+          headerSlot
+        )}
 
       {/* 3-Column Dashboard Grid: player (38-40%) | sound controls (25%) | queue & history (35-37%) */}
       <div id="party-console-grid" className="grid grid-cols-1 lg:grid-cols-[minmax(0,40fr)_minmax(0,25fr)_minmax(0,35fr)] xl:grid-cols-[minmax(0,38fr)_minmax(0,25fr)_minmax(0,37fr)] gap-3 items-start">
@@ -1330,7 +1309,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 id="party-console-loop-controls"
                 className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-black/40 border border-white/10 shadow-inner"
               >
-                {/* Manual Loop Controls: IN / START, OUT / END, EXIT / RELOOP */}
+                {/* Manual loop controls: Loop in, Loop out, Reloop */}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <div className="flex items-center gap-1 text-[10px] font-black tracking-wider text-slate-400 px-1 font-mono">
                     <RotateCw className="w-3 h-3 text-cyan-400" />
@@ -1352,7 +1331,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     }`}
                     title="Press to set Loop IN (Start point) at current playback position"
                   >
-                    <span>IN / START</span>
+                    <span>Loop in</span>
                     {playbackState.loopInTime !== null && !playbackState.loop && <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />}
                   </button>
 
@@ -1375,7 +1354,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         : 'Press to set Loop OUT (End point) and start looping'
                     }
                   >
-                    <span>OUT / END</span>
+                    <span>Loop out</span>
                     {playbackState.loop && <span className="font-mono text-[10px]">⟲</span>}
                   </button>
 
@@ -1415,7 +1394,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                         }`}
                         title={isBarsActive ? 'Leave loop' : `Instant ${bars}-bar beat loop`}
                       >
-                        {bars}B
+                        {bars} bar
                       </button>
                     );
                   })}
@@ -1474,7 +1453,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     id="party-console-next-button"
                     onClick={() => engine.nextTrack()}
                     className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
-                    title={pendingMix ? 'Mix now (skip the 45s wait)' : 'Mix into the next song at the best point in the next 45 s (following MIXING_RULES.md)'}
+                    title={pendingMix ? 'Mix now (skip the 45s wait)' : 'Mix into the next song at the best point in the next 45 s'}
                     aria-label="Next / mix"
                   >
                     <SkipForward className="w-5 h-5 fill-current" />
@@ -1491,7 +1470,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                     title="Jump to the world's most replayed part of this song"
                   >
                     <Flame className="w-3.5 h-3.5" />
-                    Play best part
+                    Best part
                   </button>
                   <label
                     className="inline-flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer select-none"
@@ -1522,7 +1501,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, onSw
                 <div id="party-console-pending-mix" className="flex items-center justify-between gap-2 bg-cyan-500/10 border border-cyan-500/25 rounded-xl px-3 py-2 text-[11px]">
                   <div className="min-w-0">
                     <div className="font-semibold text-cyan-100 truncate">
-                      Mixing into "{pendingMix.title}" in {Math.ceil(pendingMix.startsInSeconds)}s (following MIXING_RULES.md)
+                      Mixing into "{pendingMix.title}" in {Math.ceil(pendingMix.startsInSeconds)}s
                     </div>
                     <div className="text-cyan-300/70 truncate" title={pendingMix.reason}>
                       {pendingMix.reason} · enters at {formatTime(pendingMix.entryTime)}

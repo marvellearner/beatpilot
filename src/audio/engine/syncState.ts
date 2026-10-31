@@ -6,6 +6,7 @@
  * progress, rhythm status…), several times a second. See App.tsx broadcastSyncState.
  */
 import type { AudioEngine } from '../AudioEngine';
+import { PLAY_LOG_MAX } from './SongLibrary';
 import type { HostSyncState, LiveSyncState } from '../../types';
 
 export function buildSyncState(engine: AudioEngine): HostSyncState {
@@ -28,7 +29,7 @@ export function buildSyncState(engine: AudioEngine): HostSyncState {
     mostPlayedSongs: engine.mostPlayedSongs,
     favorites: engine.favorites,
     bannedSongs: engine.bannedSongs,
-    recentlyPlayed: engine.dedupeConsecutivePlayLog(engine.playLog).slice(0, 30),
+    recentlyPlayed: engine.dedupeConsecutivePlayLog(engine.playLog).slice(0, PLAY_LOG_MAX), // all of Previously Played (100)
     introAnalysis: curState.track ? engine.getIntroAnalysis(curState.track.id) : null,
   };
 }
@@ -56,6 +57,11 @@ export function buildLiveSyncState(engine: AudioEngine): LiveSyncState {
     aiStatus: engine.aiStatus,
     lastAiDecision: engine.lastAiDecision,
     tempo: engine.getTempoInfo(),
+    masterVolume: engine.masterVolume,
+    aiProvider: engine.aiProvider,
+    aiModelName: engine.aiModelName,
+    isAiThinking: engine.isAiThinking,
+    aiResult: engine.lastAiResult,
   };
 }
 

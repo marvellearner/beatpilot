@@ -263,7 +263,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
             }`}
             title="Set Loop IN (Start) point (snaps to beat)"
           >
-            IN
+            In
           </button>
           <button
             id={`deck-${deckId.toLowerCase()}-loop-out-btn`}
@@ -278,7 +278,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
             }`}
             title={state.loop ? 'Exit loop (Click to release song)' : 'Set Loop OUT (End) point and start looping'}
           >
-            OUT
+            Out
           </button>
           <button
             id={`deck-${deckId.toLowerCase()}-reloop-btn`}
@@ -361,7 +361,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
           className="col-span-2 flex flex-col items-center justify-center py-2 px-1 rounded-xl text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <span className="text-xs">🔥</span>
-          <span className="leading-tight">HOOK</span>
+          <span className="leading-tight">Best part</span>
         </button>
 
         {/* Pitch Slider (Tempo) */}

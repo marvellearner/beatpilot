@@ -31,3 +31,11 @@ describe('parseSongCommand', () => {
     }
   });
 });
+
+describe('parseSongCommand: typos, Hindi and short names', () => {
+  it('reads past a misspelt "songs" and Hindi song-words', () => {
+    expect(parseSongCommand('Play only kk osngs')!.queue).toEqual({ focus_artists: ['kk'], only: true });
+    expect(parseSongCommand('only arijit singh sogns')!.queue).toEqual({ focus_artists: ['arijit singh'], only: true });
+    expect(parseSongCommand('sirf kk ke gaane chalao')!.queue).toEqual({ focus_artists: ['kk'], only: true });
+  });
+});

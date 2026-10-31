@@ -121,6 +121,11 @@ describe('same artist, different songs', () => {
     expect(same(lover, { title: 'Charmer | Raj Ranjodh | Avvy Sra', artist: 'Diljit Dosanjh' })).toBe(false);
     expect(same({ title: 'Guru Randhawa: Lahore (Official Video) | T-Series', artist: 'T-Series' }, { title: 'Guru Randhawa: High Rated Gabru', artist: 'T-Series' })).toBe(false);
     expect(same({ title: 'Diljit Dosanjh - Lover' }, { title: 'Diljit Dosanjh - Born To Shine' })).toBe(false);
+    // The channel says 'ChainsmokersVEVO', the titles 'The Chainsmokers'
+    const closer = { title: 'The Chainsmokers - Closer (Lyric) ft. Halsey', artist: 'ChainsmokersVEVO' };
+    expect(same(closer, { title: 'The Chainsmokers - Paris (Official Lyric Video)', artist: 'The Chainsmokers' })).toBe(false);
+    expect(same(closer, { title: 'The Chainsmokers & Coldplay - Something Just Like This (Official Video)', artist: 'The Chainsmokers' })).toBe(false);
+    expect(same(closer, { title: 'The Chainsmokers - Closer (Official Video) ft. Halsey', artist: 'The Chainsmokers' })).toBe(true);
   });
 
   it('still matches the same song written differently', () => {

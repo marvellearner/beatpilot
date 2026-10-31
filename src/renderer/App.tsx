@@ -17,7 +17,6 @@ import {
   HelpCircle,
   Terminal,
   Sparkles,
-  Laptop,
   ShieldCheck,
   Cpu,
   CheckCircle,
@@ -64,6 +63,8 @@ export const App: React.FC = () => {
   // 'remote' previews the phone remote on this laptop (the real phone uses RemoteClient)
   const [viewMode, setViewMode] = useState<'console' | 'remote'>('console');
   const [consoleMode, setConsoleMode] = useState<'party' | 'pro'>('party');
+  // The top bar's slot for the Party console's my_songs.txt buttons (set once it's on screen)
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   // Initialize AudioEngine & DJAgent
   if (!engineRef.current) {
@@ -145,6 +146,18 @@ export const App: React.FC = () => {
           break;
         case 'CMD_SET_BPM':
           engine.setBpm(action.bpm);
+          break;
+        case 'CMD_SET_MASTER_VOLUME':
+          engine.setMasterVolume(action.volume);
+          break;
+        case 'CMD_SET_LAPTOP_VOLUME':
+        case 'CMD_TOGGLE_LAPTOP_MUTE':
+        case 'CMD_MUTE_LAPTOP':
+          // The laptop's Windows volume is set by the server's remote hub (remoteHub.ts), which also
+          // tells the phones; doing it here as well would set it twice and send phones a second value
+          break;
+        case 'CMD_AI_INSTRUCT':
+          void executeCommand(action.command);
           break;
         case 'CMD_TOGGLE_KEY_LOCK':
           engine.toggleKeyLock();
@@ -316,14 +329,23 @@ export const App: React.FC = () => {
     if (!commandText.trim() || isAiThinking) return;
 
     setIsAiThinking(true);
+    engine.isAiThinking = true;
+    engine.notify();
     try {
       const result = await agent.interpretCommand(commandText, engine);
       setAiResult(result);
+      engine.lastAiResult = {
+        explanation: result.plan.explanation,
+        source: result.source,
+        latencyMs: result.latencyMs,
+      };
       agent.executePlanOnEngine(result.plan, engine);
     } catch (err) {
       console.error('Failed to execute AI command:', err);
     } finally {
       setIsAiThinking(false);
+      engine.isAiThinking = false;
+      engine.notify();
       setNlCommand('');
     }
   };
@@ -355,12 +377,8 @@ export const App: React.FC = () => {
     );
   }
 
-  const samplePrompts = [
-    'Mix into Deck B with energetic Punjabi Dhol',
-    'Switch to Bhangra Dholak beat',
-    'Kill low bass on Deck A to clean up the mix',
-    'Start smooth 16-second crossfade into Deck A',
-  ];
+  // Examples under the AI chat box: things a party host actually asks for
+  const samplePrompts = ['Play only Diljit Dosanjh', 'Play more AP Dhillon', 'Start the dhol', 'Play anything'];
 
   // The server's Wi-Fi address; this window's own origin is only a fallback (it may be "localhost")
   const remoteUrl = remoteUrls[0] ?? `${window.location.origin}/?remote=true`;
@@ -368,7 +386,7 @@ export const App: React.FC = () => {
   return (
     <div id="app-root" className="min-h-screen bg-[#07090e] text-slate-100 p-3 lg:p-4 flex flex-col gap-3">
       {/* Top Navbar */}
-      <header id="app-top-navbar" className="flex flex-wrap items-center justify-between gap-3 dj-panel rounded-2xl px-4 py-2.5 border border-white/10">
+      <header id="app-top-navbar" className="flex flex-wrap items-center justify-between gap-2 min-[1800px]:gap-3 dj-panel rounded-2xl px-3 min-[1800px]:px-4 py-2 min-[1800px]:py-2.5 border border-white/10">
         <div className="flex items-center gap-2.5">
           <div className="p-2 rounded-xl bg-gradient-to-tr from-cyan-500 via-rose-500 to-amber-500 text-black shadow-md shadow-rose-500/20">
             <Disc className="w-5 h-5 animate-spin text-black" />
@@ -376,18 +394,41 @@ export const App: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-black tracking-tight text-white">AI DJ</h1>
-              <span className="text-[9px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded">
+              <span className="hidden min-[1800px]:inline text-[9px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded">
                 AUTONOMOUS QUEUE ACTIVE
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">
+            <p className="hidden min-[1800px]:block text-[11px] text-slate-400">
               Zero Clashing • Internet Auto-Queue • iPhone Wi-Fi Remote
             </p>
           </div>
         </div>
 
         {/* Telemetry and Controls */}
-        <div id="app-header-controls" className="flex flex-wrap items-center gap-3">
+        <div id="app-header-controls" className="flex flex-wrap items-center gap-2 min-[1800px]:gap-3">
+          {/* What the AI chat was told to keep doing (remembered across reloads), and a way to drop it */}
+          {engine.hasAiInstructions && (
+            <div
+              id="app-ai-instructions"
+              className="flex items-center gap-2 bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-xl pl-3 pr-1 py-1 text-xs"
+            >
+              <span className="text-fuchsia-100 truncate max-w-[140px] min-[1800px]:max-w-[220px]" title="Remembered from the AI chat, also after a reload">
+                🤖 {engine.describeAiInstructions().join(' · ')}
+              </span>
+              <button
+                id="app-clear-ai-instructions"
+                type="button"
+                onClick={() => engine.clearAiInstructions()}
+                className="px-2 py-0.5 rounded-lg font-bold text-fuchsia-100 bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-400/40 transition-colors"
+                title="Forget what you told the AI chat and play all your music again"
+              >
+                Clear<span className="hidden min-[1800px]:inline"> AI instructions</span>
+              </button>
+            </div>
+          )}
+          {/* The Party console's my_songs.txt buttons are drawn here (see PartyConsoleView) */}
+          {consoleMode === 'party' && <div id="app-header-party-slot" ref={setHeaderSlot} className="contents" />}
+
           {/* View Switcher: Party Console vs Pro DJ Decks */}
           <div id="app-view-switcher" className="flex items-center bg-black/40 p-1 rounded-xl border border-white/10">
             <button
@@ -398,7 +439,7 @@ export const App: React.FC = () => {
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              ✨ Party Console
+              ✨ Party<span className="hidden min-[1800px]:inline"> Console</span>
             </button>
             <button
               onClick={() => setConsoleMode('pro')}
@@ -408,7 +449,7 @@ export const App: React.FC = () => {
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              🎛️ Pro Decks
+              🎛️ Pro<span className="hidden min-[1800px]:inline"> Decks</span>
             </button>
           </div>
 
@@ -418,7 +459,7 @@ export const App: React.FC = () => {
             className="flex items-center gap-1.5 bg-gradient-to-r from-rose-600 to-purple-600 hover:from-rose-500 hover:to-purple-500 text-white font-bold px-3.5 py-1.5 rounded-xl text-xs shadow-lg shadow-rose-600/30 transition-all"
           >
             <Smartphone className="w-4 h-4" />
-            <span>Connect iPhone Remote</span>
+            <span><span className="hidden min-[1800px]:inline">Connect </span>iPhone Remote</span>
           </button>
 
           {/* Test Remote Simulator in Browser */}
@@ -427,7 +468,7 @@ export const App: React.FC = () => {
             className="flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-slate-200 font-semibold px-3 py-1.5 rounded-xl text-xs border border-white/10 transition-colors"
             title="Preview iPhone Remote View"
           >
-            <span>Simulate Mobile View</span>
+            <span>Phone preview</span>
           </button>
 
           {/* AI DJ (Ollama) status: real health check, refreshed every minute */}
@@ -444,7 +485,7 @@ export const App: React.FC = () => {
             }
           >
             <Cpu className={`w-3.5 h-3.5 ${engine.aiStatus === 'online' ? 'text-purple-400' : 'text-slate-500'}`} />
-            <span>
+            <span className="hidden min-[1800px]:inline">
               {engine.aiStatus === 'online'
                 ? '🤖 AI DJ online'
                 : engine.aiStatus === 'checking'
@@ -495,12 +536,6 @@ export const App: React.FC = () => {
                 </span>
               ));
             })()}
-          </div>
-
-          {/* Wide screens only: on a laptop-width screen it pushes the help button onto a line of its own */}
-          <div className="hidden 2xl:flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-xl border border-white/5 text-xs font-mono text-slate-400">
-            <Laptop className="w-3.5 h-3.5 text-slate-300" />
-            <span>i7-9750H</span>
           </div>
 
           <RamUsageMeter />
@@ -614,7 +649,7 @@ export const App: React.FC = () => {
       {consoleMode === 'party' ? (
         <PartyConsoleView
           engine={engine}
-          onSwitchToProMode={() => setConsoleMode('pro')}
+          headerSlot={headerSlot}
         />
       ) : (
         <>
@@ -694,7 +729,7 @@ export const App: React.FC = () => {
                     title="Sort queue using Camelot wheel harmonic rules"
                   >
                     <Sparkles className="w-3 h-3 text-purple-300 animate-pulse" />
-                    <span>Harmonic Flow</span>
+                    <span>Sort by key</span>
                   </button>
                 )}
 
@@ -706,7 +741,7 @@ export const App: React.FC = () => {
                       : 'bg-white/5 border-white/10 text-slate-400'
                   }`}
                 >
-                  Auto-Curate: {engine.autoCurationEnabled ? 'ON' : 'OFF'}
+                  Auto-fill Up Next: {engine.autoCurationEnabled ? 'ON' : 'OFF'}
                 </button>
 
                 <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
@@ -921,7 +956,7 @@ export const App: React.FC = () => {
               placeholder={
                 isAiThinking
                   ? 'AI DJ is generating mixing plan...'
-                  : "Ask AI DJ (e.g. 'Mix into Deck B with Punjabi Dhol and kill Deck A bass')..."
+                  : "Ask the AI DJ (e.g. 'play only Diljit Dosanjh', 'start the dhol', 'mix now')..."
               }
               className="flex-1 bg-black/50 border border-white/15 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 font-mono disabled:opacity-50"
             />
@@ -932,7 +967,7 @@ export const App: React.FC = () => {
               className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs bg-purple-600 hover:bg-purple-500 text-white transition-colors shadow-md shadow-purple-600/30 disabled:opacity-50 shrink-0"
             >
               <Send className="w-3 h-3" />
-              <span>{isAiThinking ? 'Thinking...' : 'Instruct AI'}</span>
+              <span>{isAiThinking ? 'Thinking...' : 'Send'}</span>
             </button>
           </form>
 

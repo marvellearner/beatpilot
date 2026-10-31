@@ -23,7 +23,7 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
 }
 
 /** Songs that played recently, newest first. Songs from the last 3 hours won't be auto-queued again. */
-export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, compact }) => {
+const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, compact }) => {
   const now = Date.now();
 
   // RULE: In previously played no 2 consecutive songs can be same
@@ -112,3 +112,6 @@ export const PreviouslyPlayedPanel: React.FC<PreviouslyPlayedPanelProps> = ({ en
     </div>
   );
 };
+
+/** Redraws only when its songs or handler change (the phone gets live updates several times a second). */
+export const PreviouslyPlayedPanel = React.memo(PreviouslyPlayedPanelView);

@@ -50,7 +50,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
             }`}
           >
             <span>🔥</span>
-            <span>Best Parts: {engine.bestPartsMode ? 'ON' : 'OFF'}</span>
+            <span>Best parts only: {engine.bestPartsMode ? 'ON' : 'OFF'}</span>
           </button>
 
           <div className="flex items-center gap-2">
