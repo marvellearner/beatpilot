@@ -40,6 +40,11 @@ export class SongRhythmPlans {
 
   constructor(private deps: SongRhythmPlansDeps) {}
 
+  /** The song's audio measures, worked out elsewhere (the analysis worker). */
+  public setFeatures(track: TrackMetadata, features: SongRhythmFeatures) {
+    this.features.set(songStorageKey(track), features);
+  }
+
   /**
    * The song's plan for the current mood, made on first use (cheap afterwards: the rhythm layer
    * calls this every tick). Songs the built-in guess isn't sure about are queued for the AI

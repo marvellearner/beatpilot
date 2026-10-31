@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+/* Class names live in the app's code only. Without these, the Tailwind plugin also watched the
+   files the server writes while the app runs (a dislike writes data/banned_songs.json) and sent
+   every open page a full reload each time. */
+@source not "../../../data";
+@source not "../../../music";
+@source not "../../../cache";
+@source not "../../../logs";
+@source not "../../../server";
+@source not "../../../my_songs.txt";
+
 :root {
   --color-bg-base: #080a0f;
   --color-bg-card: rgba(18, 22, 34, 0.75);

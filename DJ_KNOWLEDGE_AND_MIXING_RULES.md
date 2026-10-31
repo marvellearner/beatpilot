@@ -417,22 +417,25 @@ Do not implement every advanced feature at once. Keep the system modular, test e
 | Never two basslines | Bass swap: the outgoing low band ramps out over the first half, the incoming low band ramps in over the second half | ✅ |
 | Unreliable beats → no blend | Beatmatching and on-beat starts need BPM confidence ≥ 0.6 for both songs | ✅ |
 | Dhol locked to the beat | Deck P schedules every hit on the on-air song's beat grid (no loop, no drift), and follows its energy: rest / light / full / fills (MIXING_RULES.md) | ✅ |
-| No repeats & no consecutive duplicates | Auto-curation excludes songs in Previously Played; no 2 consecutive songs in previously played can ever be the same (`areSongsConsecutivelySame`) | ✅ |
+| No repeats & no consecutive duplicates | Auto-curation excludes songs played in the last 3 hours; no 2 consecutive songs in Previously Played can ever be the same (`areSongsConsecutivelySame`) | ✅ |
 | Up Next queue capacity | Proactively maintains up to 50 songs seeded from favorites, most played, `my_songs.txt`, and AI recommendations | ✅ |
-| Auto-added duration cap | Auto-added songs capped at 5 minutes (300 s) to preserve fast party rotation | ✅ |
+| Auto-added duration cap | Auto-added songs capped at 6 minutes (360 s) | ✅ |
 | 7-skip top queue avoidance | Auto-purges song #1 if avoided 7 times while playing other tracks | ✅ |
 | Thumbs down ("Don't Play Again Ever") | Permanently bans track across sessions, immediately drops from queue | ✅ |
-| Speed presets | 0.5x, 0.9x, 1.0x, 1.1x, 1.2x, 1.5x presets with pitch-preserving WSOLA Key Lock | ✅ |
+| Speed presets | 0.95x–1.2x presets with pitch-preserving WSOLA Key Lock (applied when the re-timed audio is ready, so the pitch never jumps) | ✅ |
 | No dead air | Mixes only into a **ready** song; otherwise the current song keeps playing | ✅ |
-| Headroom | Master limiter at −1.5 dB threshold; per-track loudness matching not yet done | ⚠️ Partial |
+| Headroom & loudness | Master limiter at −1.5 dB threshold; every song trimmed to the library's median loudness (`Loudness.ts`) | ✅ |
 | Mix at the right moment, not immediately | Mix / Next plans the blend: the best **bar** in the next 30 s (phrase starts, a drop into a calmer section, avoiding the hook and vocals) and the best entry in the new song (calm intro, drop landing as the blend ends) (`MixPointPlanner.ts`) | ✅ |
 | Phrase (bar/16-bar) alignment | Bar downbeat estimated from the strongest low-end hits; phrase starts are counted from it. Reliable on songs with a clear accent on "1"; four-on-the-floor songs fall back to the first beat. | ⚠️ Heuristic |
-| Harmonic mixing | Key detection not implemented | ❌ Planned |
+| Harmonic mixing | Key detection (`KeyDetector.ts`, Camelot), key-aware next-song choice, 4-bar overlaps for keys that don't fit, Sort by key | ✅ |
 | Key lock (tempo without pitch) | Own WSOLA time-stretch (no third-party licence) in a Web Worker, used by the Party mood to lock the set to one tempo; ±25% max | ✅ Party mood |
 | Danceable party tempo | Party mood locks the set to 120–130 BPM (natural movement ~120 BPM; dance music peaks 125–130 BPM, Moelants 2002/2008) | ✅ |
-| AI DJ judgement | Local Qwen 2.5 3B chooses among rule-abiding mix points, blend vs cut and length, and picks the next song for energy flow; validated, never blocks playback | ✅ |
-| Vocal-aware overlaps | Vocal detection not implemented | ❌ Planned |
-| Echo-out transition | Not implemented; cuts are used instead | ❌ Planned |
+| AI DJ judgement | Local Ollama model (Gemini as backup) chooses among rule-abiding mix points, blend vs cut and length, and picks the next song for energy flow; validated, never blocks playback | ✅ |
+| Set flow without the AI | Next song from the next 3 ready: no artist twice in a row, keys that fit, small tempo steps, runs of one language, no energy drop on a dance floor; guest requests never skipped (`engine/setFlow.ts`) | ✅ |
+| Vocal-aware overlaps | Vocal-band activity per exit/entry; the pair is chosen so two vocals don't overlap (`MixPointPlanner.ts`) | ✅ |
+| Echo-out transition | Cuts echo out (dotted-eighth echo through a high-pass sweep) | ✅ |
+| Skip non-music | Talking intros (incl. after a short sting) and closing scenes / fades / silence are skipped (`IntroSkitDetector.ts`, `OutroDetector.ts`) | ✅ |
+| Hooks | Every chorus and a drop found; Best part moves through them; Best Parts mode plays build-up + first chorus (`HookDetector.ts`) | ✅ |
 
 ## Sources
 

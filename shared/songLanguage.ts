@@ -6,9 +6,9 @@ export const SONG_LANGUAGES = ['punjabi', 'hindi', 'english', 'spanish', 'other'
 export type SongLanguage = (typeof SONG_LANGUAGES)[number];
 
 const PUNJABI_HINT =
-  /[਀-੿]|\b(punjabi|bhangra|jatt|jatti|gabru|munda|kudi|diljit|sidhu|moose ?wala|aujla|ap dhillon|shubh|guru randhawa|mankirt|gurdas|babbu maan|ammy virk|jass manak|harrdy sandhu|b praak|garry sandhu|panjabi mc|jazzy b|parmish|karan aujla|amrit maan|gippy|sukh-e|mannat noor|nimrat)\b/i;
+  /[਀-੿]|\b(punjabi|bhangra|jatt|jatti|gabru|munda|kudi|diljit|sidhu|moose ?wala|aujla|ap dhillon|shubh|guru randhawa|mankirt|gurdas|babbu maan|ammy virk|jass manak|harrdy sandhu|b praak|garry sandhu|panjabi mc|jazzy b|parmish|karan aujla|amrit maan|gippy|sukh-e|mannat noor|nimrat|speed records|white hill|desi melodies|geet mp3|rehaan records|jass records|brown boys|humble music)\b/i;
 const HINDI_HINT =
-  /[ऀ-ॿ]|\b(bollywood|hindi|arijit|neha kakkar|badshah|honey singh|atif aslam|shreya ghoshal|sonu nigam|kk|shaan|vishal|pritam|t-series|sangeet|haryanvi)\b/i;
+  /[ऀ-ॿ]|\b(bollywood|hindi|arijit|neha kakkar|badshah|honey singh|atif aslam|shreya ghoshal|sonu nigam|kk|shaan|vishal|pritam|t-series|sangeet|haryanvi|zee music|sony music india|tips official|yrf|saregama|eros now)\b/i;
 const SPANISH_HINT = /\b(reggaeton|despacito|bad bunny|j balvin|daddy yankee|shakira|maluma|luis fonsi|ozuna|karol g|rosal[ií]a)\b/i;
 
 /**

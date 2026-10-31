@@ -39,3 +39,19 @@ describe('parseSongCommand: typos, Hindi and short names', () => {
     expect(parseSongCommand('sirf kk ke gaane chalao')!.queue).toEqual({ focus_artists: ['kk'], only: true });
   });
 });
+
+describe('parseSongCommand: kinds of songs', () => {
+  const q = (t: string) => parseSongCommand(t)?.queue;
+  it('vibe, language and era are a filter, not an artist', () => {
+    expect(q('I want to play only dance songs')).toEqual({ focus_artists: undefined, only: true, vibe: 'dance' });
+    expect(q('only punjabi songs')).toEqual({ focus_artists: undefined, only: true, language: 'punjabi' });
+    expect(q('play more old romantic bollywood songs')).toEqual({ focus_artists: undefined, only: false, vibe: 'romantic', language: 'hindi', era: 'old' });
+    expect(q('play party songs')).toEqual({ focus_artists: undefined, only: false, vibe: 'dance' });
+  });
+  it('combines with artists', () => {
+    expect(q('only Diljit Dosanjh dance songs')).toEqual({ focus_artists: ['Diljit Dosanjh'], only: true, vibe: 'dance' });
+  });
+  it('leaves song titles with those words alone', () => {
+    expect(q('play Love Dose')).toEqual({ play_song: 'Love Dose' });
+  });
+});

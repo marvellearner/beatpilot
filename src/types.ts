@@ -28,6 +28,7 @@ export interface TrackMetadata {
   musicStartTime?: number;         // Timestamp (seconds) where music/beat begins, skipping initial conversation/skits
   introSkipReason?: string;        // Explanation of initial conversation skip (Ollama AI / Audio MIR)
   musicEndTime?: number;           // Where the music ends, before a closing scene / dialogue / fade / silence (OutroDetector)
+  hooks?: SongHook[];              // Every hook: each chorus and a drop (HookDetector), in time order
   outroReason?: string;            // Why (shown in the mix status)
   energyProfile?: EnergyProfile;   // Loudness / vocal-band envelopes used to plan mix points
   // Key-locked tempo: the song as downloaded, and the tempo multiple its current audio is stretched to
@@ -45,6 +46,13 @@ export interface OriginalTiming {
   cueInTime?: number;
   musicStartTime?: number;
   musicEndTime?: number;
+  hooks?: SongHook[];
+}
+
+/** A hook found in the audio: where a chorus (or a drop, or the loudest stretch) starts. */
+export interface SongHook {
+  time: number;
+  kind: 'chorus' | 'drop' | 'peak';
 }
 
 /** On-air tempo for the Tempo control. */
@@ -80,6 +88,7 @@ export interface TransitionConfig {
   style: 'smooth_crossfade' | 'bass_swap' | 'drop_cut' | 'tempo_ramp';
   sourceExitTime?: number; // planned outgoing position to start the blend at (otherwise the next beat)
   targetEntryTime?: number; // planned incoming start position (otherwise hook cue / first beat)
+  filterSweep?: boolean; // keys clash: the outgoing song leaves through a rising high-pass
 }
 
 /** A mix that has been planned for a good moment but hasn't started yet. */
@@ -125,6 +134,7 @@ export interface QueuedTrack {
   introSkipReason?: string;
   musicEndTime?: number;
   outroReason?: string;
+  hooks?: SongHook[];
   energyProfile?: EnergyProfile;
   // Key-locked tempo lock (Party mood): the song as downloaded, and the tempo it was stretched to
   originalBuffer?: AudioBuffer;

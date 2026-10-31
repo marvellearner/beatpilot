@@ -79,11 +79,11 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
               {track?.highlightTime !== undefined && (
                 <button
                   onClick={() => deck.jumpToHighlight()}
-                  title={`World's Most Liked Hook at ${formatTime(track.highlightTime)}. Click to jump!`}
+                  title={`Hooks (each chorus / a drop): ${(track.hooks?.length ? track.hooks.map((h) => h.time) : [track.highlightTime]).map(formatTime).join(', ')}. Click to jump to the next.`}
                   className="flex items-center gap-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full text-[10px] font-bold cursor-pointer transition-all"
                 >
                   <span>🔥</span>
-                  <span>{formatTime(track.highlightTime)}</span>
+                  <span>{(track.hooks?.length ? track.hooks.map((h) => h.time) : [track.highlightTime]).map(formatTime).join(' · ')}</span>
                 </button>
               )}
               {track?.musicStartTime && track.musicStartTime > 0 && (
@@ -150,6 +150,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
         peaks={track?.waveformPeaks}
         color={primaryColor}
         highlightTime={track?.highlightTime}
+        hookTimes={track?.hooks?.map((h) => h.time)}
         cueInTime={track?.cueInTime}
         loop={state.loop}
         loopInTime={state.loopInTime}
@@ -357,7 +358,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
         <button id={`deck-${deckId.toLowerCase()}-hook-button`}
           onClick={() => deck.jumpToHighlight()}
           disabled={!track}
-          title={track?.highlightTime ? `Jump to world's favorite part (${formatTime(track.highlightTime)})` : 'Jump to hook'}
+          title="Jump to the next hook (each chorus / the drop in turn)"
           className="col-span-2 flex flex-col items-center justify-center py-2 px-1 rounded-xl text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <span className="text-xs">🔥</span>

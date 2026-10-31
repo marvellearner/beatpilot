@@ -8,6 +8,7 @@ interface WaveformCanvasProps {
   peaks?: number[];
   color: string;
   highlightTime?: number;
+  hookTimes?: number[]; // every hook (each chorus, a drop); drawn instead of highlightTime when given
   cueInTime?: number;
   loop?: { start: number; end: number } | null;
   loopInTime?: number | null;
@@ -24,6 +25,7 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
   peaks = [],
   color,
   highlightTime,
+  hookTimes,
   cueInTime,
   loop,
   loopInTime,
@@ -82,9 +84,10 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
         ctx.globalAlpha = 1.0;
       }
 
-      // Draw Viral Hook Marker (World's Most Liked Part)
-      if (duration > 0 && highlightTime && highlightTime > 0 && highlightTime < duration) {
-        const hookX = (highlightTime / duration) * width;
+      // Hook markers: each chorus and the drop (or the single hook)
+      for (const hookTime of hookTimes?.length ? hookTimes : highlightTime ? [highlightTime] : []) {
+        if (!(duration > 0 && hookTime > 0 && hookTime < duration)) continue;
+        const hookX = (hookTime / duration) * width;
 
         // Glowing dashed vertical line
         ctx.strokeStyle = '#f59e0b';
@@ -179,7 +182,7 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
     return () => {
       cancelAnimationFrame(animId);
     };
-  }, [analyser, isPlaying, currentTime, duration, peaks, color, highlightTime, cueInTime]);
+  }, [analyser, isPlaying, currentTime, duration, peaks, color, highlightTime, hookTimes, cueInTime]);
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;

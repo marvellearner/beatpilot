@@ -101,6 +101,7 @@ The display shows **Original** BPM and **Current** BPM side by side, plus the sp
 | :--- | :--- |
 | `play only Diljit Dosanjh songs` (also `only …`, `just …`, `… only`, several artists with `and`) | Up Next keeps only that artist's songs and refills with their hits. If the song on air is by someone else, the app mixes into one of theirs within 45 s. A chip on Up Next shows **Only: Diljit Dosanjh**, with ✕ to clear it. |
 | `play more AP Dhillon` | New picks favour that artist; other songs still play. |
+| `play only dance songs` (also party / romantic / chill / bhangra, Punjabi / Hindi / English, old / 90s / new, and mixes like `only Punjabi dance songs` or `only Diljit dance songs`) | Up Next keeps only songs of that kind. A vibe also switches the mood (dance → Party). The AI checks which songs fit, so slow songs leave a dance set. The top bar shows e.g. **Only dance songs**. |
 | `play anything` / `back to normal` | Clears the artist filter. |
 | `play Lover by Diljit Dosanjh` | Finds the song and mixes it in next. |
 | `kill the bass on deck A`, `start the dhol`, `smooth crossfade` | Handled by the AI DJ (it can take up to 30 s on a laptop CPU). |
@@ -154,7 +155,7 @@ The **Mood & Equalizer** card is below the drums card on the laptop, and also on
 | Mood | Sound | Mixing | Songs the AI adds |
 | :--- | :--- | :--- | :--- |
 | 🎵 Normal | Flat | 8-bar blends | Popular mix |
-| 🎉 Party | Punchy bass, crisp highs | **Every song tuned to one dance tempo (120–130 BPM)** without changing its pitch, so every mix is at the exact same BPM. 8-bar blends. | Upbeat bangers |
+| 🎉 Party | Punchy bass, crisp highs | **Every song tuned to one dance tempo (120–130 BPM)** without changing its pitch, so every mix is at the exact same BPM. A slower song that can't get there cleanly (e.g. 97 BPM) is lifted 8% instead (97 → 105). 8-bar blends. | Upbeat bangers |
 | 🥁 Bhangra | Heavy bass + **dhol switched on** (Dhol Dhamaal) | Short 4-bar mixes | Punjabi / bhangra |
 | 🌙 Chill | Warm, soft highs | Long 16-bar blends, songs from the start | Mellow songs |
 | 💕 Romantic | Warm vocals | Long 16-bar blends, songs from the start | Love songs |

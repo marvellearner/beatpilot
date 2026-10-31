@@ -30,6 +30,11 @@ import { FRAME_RATE, WINDOW_SECONDS, measureBeatPresence, quantile, speechAt as 
 
 const SUSTAIN_SECONDS = 8; // the beat must hold this long to count as "music started"
 const MAX_SCAN_SECONDS = 150;
+// Talk after a short musical sting (see detectMusicStart): looked for this far past the first beat,
+// over windows of this many seconds, with at most this much bass (vs the song's normal)
+const TALK_LOOKAHEAD_SECONDS = 20;
+const TALK_WINDOW = 10;
+const TALK_MAX_BASS = 0.4;
 
 const NO_INTRO = (reason: string, confidence = 0.9, profile?: IntroAnalysisResult['profile']): IntroAnalysisResult => ({
   hasConversationPreamble: false,
@@ -84,16 +89,52 @@ export class IntroSkitDetector {
 
     // --- Music start: first second where the beat is there and holds for SUSTAIN_SECONDS ---
     const scanEnd = Math.min(seconds - SUSTAIN_SECONDS, Math.floor(scanSeconds));
-    let beatStart = -1;
-    for (let s = 0; s <= scanEnd; s++) {
-      let held = 0;
-      for (let k = 0; k < SUSTAIN_SECONDS; k++) if (hasBeat(s + k)) held++;
-      if (held >= SUSTAIN_SECONDS - 1) {
-        beatStart = s;
-        break;
+    const sustainedBeatFrom = (from: number) => {
+      for (let s = from; s <= scanEnd; s++) {
+        let held = 0;
+        for (let k = 0; k < SUSTAIN_SECONDS; k++) if (hasBeat(s + k)) held++;
+        if (held >= SUSTAIN_SECONDS - 1) return s;
       }
-    }
+      return -1;
+    };
+    let beatStart = sustainedBeatFrom(0);
     if (beatStart < 0) return NO_INTRO('No clear beat found early in the song; playing from the start', 0.6, profile);
+
+    // A short musical sting or teaser can come before the conversation ("5-7" plays 7 s of beat,
+    // then 30 s of talking): when a long talk follows the first beat, the music starts after it.
+    // Talk here = speech-like or silent and nearly no bass, so a rap or sung verse (bass under it)
+    // never counts.
+    const talkAt = (s: number) => s < seconds && speechAt(s) !== 0 && lowLevel[s] < TALK_MAX_BASS * refLow;
+    const talkRunFrom = (from: number, to: number) => {
+      for (let s = from; s <= Math.min(to, seconds - TALK_WINDOW); s++) {
+        let talk = 0;
+        let speech = 0;
+        for (let k = 0; k < TALK_WINDOW; k++) {
+          if (talkAt(s + k)) talk++;
+          if (speechAt(s + k) === 1) speech++;
+        }
+        if (talk >= TALK_WINDOW - 2 && speech >= TALK_WINDOW / 2) return s;
+      }
+      return -1;
+    };
+    let afterSting = false;
+    for (let round = 0; round < 3; round++) {
+      const talk = talkRunFrom(beatStart + 1, beatStart + SUSTAIN_SECONDS + TALK_LOOKAHEAD_SECONDS);
+      if (talk < 0) break;
+      // The end of the talk: when the talking stops (no more than 1 speech-like second in the
+      // next 4), even if the music's bass is already fading in under the last words
+      let end = talk;
+      while (end < scanEnd) {
+        let ahead = 0;
+        for (let k = 0; k < 4; k++) if (end + k < seconds && speechAt(end + k) !== 0) ahead++;
+        if (ahead <= 1) break;
+        end++;
+      }
+      const next = sustainedBeatFrom(end);
+      if (next < 0) break;
+      beatStart = next;
+      afterSting = true;
+    }
 
     // Refine inside the first beat window: the first strong low-end attack
     const refineFrom = beatStart * FRAME_RATE;
@@ -129,6 +170,7 @@ export class IntroSkitDetector {
     const at = `${Math.floor(musicStart / 60)}:${String(Math.round(musicStart % 60)).padStart(2, '0')}`;
 
     const hasSpokenPreamble =
+      afterSting ||
       speechFraction >= 0.20 ||
       mostlySilent ||
       (rawStart >= 5 && speechFraction >= 0.10) ||

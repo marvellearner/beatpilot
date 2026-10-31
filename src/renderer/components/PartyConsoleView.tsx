@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { AudioEngine } from '../../audio/AudioEngine';
 import { RhythmPanel } from './RhythmPanel';
@@ -135,8 +135,18 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   const peaks = currentTrack?.waveformPeaks?.length ? currentTrack.waveformPeaks : null;
   const originalBpm = currentTrack ? currentTrack.original?.bpm ?? currentTrack.bpm : undefined;
   const markerRatio = (time?: number) => (duration > 0 && time !== undefined && time > 0 && time < duration ? time / duration : null);
-  const hookRatio = markerRatio(currentTrack?.highlightTime);
+  // Every hook (each chorus, a drop): a marker each on the waveform
+  const hookTimes = currentTrack?.hooks?.length ? currentTrack.hooks.map((h) => h.time) : currentTrack?.highlightTime !== undefined ? [currentTrack.highlightTime] : [];
+  const hookRatios = hookTimes.map(markerRatio).filter((r): r is number => r !== null);
   const cueRatio = markerRatio(currentTrack?.cueInTime);
+  // The waveform's ~200 bars only change with the song; the playhead just moves a clip over them
+  const waveBars = useMemo(() => {
+    const bars = (color: string) =>
+      (peaks ?? Array.from({ length: 120 }, () => 0.15)).map((peak, i) => (
+        <div key={i} className={`flex-1 rounded-full ${color}`} style={{ height: `${Math.max(6, Math.min(100, peak * 100))}%` }} />
+      ));
+    return { upcoming: bars('bg-slate-600/60'), played: bars('bg-cyan-400') };
+  }, [peaks]);
   const mixLoadingItem = engine.mixLoadingId ? engine.queue.find((q) => q.id === engine.mixLoadingId) : null;
   const deckStatus = engine.isTransitioning
     ? { label: 'MIXING', className: 'text-cyan-200 bg-cyan-500/10 border-cyan-500/30', dotClassName: 'bg-cyan-400 animate-pulse' }
@@ -242,25 +252,24 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   };
 
   // The queue / history / favourites column is the biggest part of the page and changes far less
-  // often than the player above it, which re-renders several times a second. It is rebuilt only
-  // when its own data changes (getSyncSignature covers the queue, history, favourites and bans).
+  // often than the player above it, which re-renders several times a second. Each of its three
+  // panels is rebuilt only when its own data changes, so e.g. a song finishing loading in Up Next
+  // doesn't rebuild the Favourites list.
   const rightColumnKey = engine.getSyncSignature();
-  const rightColumn = useMemo(
+  // The on-air song's key as heard (its tempo glides after a mix; this only changes at a semitone)
+  const curKey = currentTrack?.key
+    ? (engine.keyLock ? currentTrack.key : shiftKey(currentTrack.key, playbackState.playbackRate))
+    : undefined;
+  const queuePanel = useMemo(
     () => {
       const readyCount = engine.queue.filter((q) => q.status === 'ready').length;
       const totalQueueDurationSec = engine.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
       const totalQueueHours = Math.floor(totalQueueDurationSec / 3600);
       const totalQueueMins = Math.round((totalQueueDurationSec % 3600) / 60);
       const queueDurationStr = totalQueueHours > 0 ? `${totalQueueHours}h ${totalQueueMins}m` : `${totalQueueMins}m`;
-      const curKey = currentTrack?.key
-        ? (engine.keyLock ? currentTrack.key : shiftKey(currentTrack.key, playbackState.playbackRate))
-        : undefined;
 
       return (
-        <>
-          {/* Right Column (27.5% width): Up Next Party Queue + Previously Played + Most Played Bangers */}
-          <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
-            {/* Up Next Party Queue & Instant Song Search */}
+            /* Up Next Party Queue & Instant Song Search */
             <div id="party-console-queue" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl flex flex-col gap-2.5">
               <div className="flex items-center justify-between pb-2 border-b border-white/10">
                 <div className="flex items-center gap-2">
@@ -331,7 +340,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                   className="flex items-center justify-between gap-2 text-[11px] bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-lg px-2.5 py-1.5"
                 >
                   <span className="text-fuchsia-100 truncate">
-                    {engine.artistFocus.only ? 'Only' : 'More'}: <span className="font-bold">{engine.artistFocus.artists.join(' & ')}</span>
+                    <span className="font-bold">{engine.describeAiInstructions().join(' · ')}</span>
                   </span>
                   <button
                     type="button"
@@ -526,14 +535,28 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                 </div>
               )}
             </div>
+      );
+    },
+    [rightColumnKey, searchQuery, searchResults, isSearching, isDropdownOpen, pendingMix?.id, engine.isTransitioning,
+      engine.diskCacheCount, engine.diskCacheMb, engine.refreshingQueue, engine.artistFocus, curKey]
+  );
 
-            {/* Previously played songs (newest first); the last 3 hours' are kept out of Up Next */}
-            <PreviouslyPlayedPanel
-              entries={engine.playLog.slice(0, PLAY_LOG_MAX)}
-              onMix={(entry) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, true)}
-            />
+  // Previously played songs (newest first); the last 3 hours' are kept out of Up Next
+  const playLogTop = engine.playLog[0]?.playedAt;
+  const historyEntries = useMemo(() => engine.playLog.slice(0, PLAY_LOG_MAX), [engine, engine.playLog.length, playLogTop]);
+  const mixFromHistory = useCallback(
+    (entry: { url?: string; artist: string; title: string }) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, true),
+    [engine]
+  );
 
-            {/* Favourites & Most Played */}
+  // Favourites / Most Played / Don't Play: changes only when one of those lists does
+  const bangersKey = [
+    engine.favorites.length, engine.favorites[0]?.id, engine.mostPlayedSongs.length, engine.rawMostPlayedSongsList.length,
+    engine.getTopBangersKey(), engine.bannedSongs.length, engine.bannedSongs[0]?.id, engine.topSongAvoidCount,
+  ].join('|');
+  const bangersPanel = useMemo(
+    () => (
+            /* Favourites & Most Played */
             <div id="party-console-most-played" className="dj-panel rounded-2xl p-3.5 border border-white/10 bg-gradient-to-b from-[#131926]/95 to-[#0b0e17]/95 shadow-xl flex flex-col gap-2">
               <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
                 {/* Tab Selector */}
@@ -790,12 +813,16 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                 </div>
               )}
             </div>
-          </div>
-        </>
-      );
-    },
-    [rightColumnKey, searchQuery, searchResults, isSearching, isDropdownOpen, bangersTab, pendingMix?.id,
-      engine.isTransitioning, engine.topSongAvoidCount, engine.diskCacheCount, engine.diskCacheMb, currentTrack?.key, engine.keyLock, playbackState.playbackRate]
+    ),
+    [bangersKey, bangersTab]
+  );
+
+  const rightColumn = (
+    <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
+      {queuePanel}
+      <PreviouslyPlayedPanel entries={historyEntries} onMix={mixFromHistory} />
+      {bangersPanel}
+    </div>
   );
 
   return (
@@ -805,6 +832,115 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
         <div id="party-console-toast" className="fixed top-5 right-5 z-50 bg-black/90 border border-cyan-500/40 text-cyan-200 px-4 py-2 rounded-2xl shadow-2xl text-xs font-bold flex items-center gap-2 animate-in fade-in slide-in-from-top-3">
           <Sparkles className="w-4 h-4 text-cyan-400" />
           <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Lined up to mix: a notification in the corner (not inside the deck, which would shift down),
+          shown until the mix starts or is cancelled, with the countdown and Mix now / Cancel */}
+      {(pendingMix || mixLoadingItem) && (
+        <div
+          id="party-console-lined-up-mix"
+          role="status"
+          className="fixed bottom-4 right-4 z-50 w-[min(460px,calc(100vw-2rem))] p-3 rounded-xl bg-gradient-to-r from-cyan-950/95 via-blue-950/95 to-purple-950/95 backdrop-blur border border-cyan-500/40 shadow-2xl shadow-cyan-500/20 flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-200"
+        >
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            {/* Thumbnail / Animated Disc */}
+            <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-slate-900 border border-cyan-500/30 flex items-center justify-center shadow-md">
+              {(pendingMix?.thumbnail || mixLoadingItem?.thumbnail) ? (
+                <img
+                  src={pendingMix?.thumbnail || mixLoadingItem?.thumbnail}
+                  alt=""
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <Disc3 className="w-6 h-6 text-cyan-400 animate-spin [animation-duration:8s]" />
+              )}
+              <span className="absolute bottom-0 right-0 px-1 py-0.2 bg-cyan-500 text-[8px] font-black text-black rounded-tl shadow-sm">
+                NEXT
+              </span>
+            </div>
+
+            {/* Details */}
+            <div className="flex flex-col min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black tracking-wider px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 uppercase flex items-center gap-1.5 shadow-sm">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                  LINED UP TO MIX
+                </span>
+                {pendingMix && (
+                  <span className="text-[11px] font-mono font-extrabold text-cyan-200 bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-400/40 shadow-sm animate-pulse">
+                    ⏱ in {Math.ceil(pendingMix.startsInSeconds)}s
+                  </span>
+                )}
+                {pendingMix?.harmonicShift && (
+                  <span
+                    className="text-[9px] font-mono font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 rounded-full"
+                    title="Energy & harmonic flow compatibility"
+                  >
+                    ⚡ {pendingMix.harmonicShift}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-baseline gap-2 truncate mt-1">
+                <span
+                  className="text-xs sm:text-sm font-extrabold text-white truncate leading-snug"
+                  title={pendingMix?.title || mixLoadingItem?.title}
+                >
+                  {pendingMix?.title || mixLoadingItem?.title}
+                </span>
+                {(pendingMix?.artist || mixLoadingItem?.artist) && (
+                  <span className="text-[10px] text-slate-400 truncate hidden sm:inline">
+                    by {pendingMix?.artist || mixLoadingItem?.artist}
+                  </span>
+                )}
+              </div>
+
+              <div className="text-[10px] font-mono text-slate-300 flex items-center gap-1.5 truncate mt-0.5">
+                {pendingMix ? (
+                  <>
+                    <span className="text-cyan-300 font-semibold truncate" title={pendingMix.reason}>
+                      {pendingMix.reason}
+                    </span>
+                    {pendingMix.entryTime > 0 && (
+                      <>
+                        <span className="text-slate-500">•</span>
+                        <span className="text-slate-400">enters at {formatTime(pendingMix.entryTime)}</span>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-amber-300 font-semibold flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                    Loading track audio… will mix in automatically once ready
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-2 shrink-0">
+            {pendingMix && (
+              <button
+                type="button"
+                onClick={() => engine.nextTrack()}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-400 via-cyan-500 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-slate-950 font-black text-xs shadow-lg shadow-cyan-500/25 transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
+                title="Mix now immediately (skip phrase wait)"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Mix now</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => engine.cancelPendingMix()}
+              className="px-2.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-semibold text-xs border border-white/10 transition-colors active:scale-95 cursor-pointer"
+              title="Cancel lined up mix"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 
@@ -877,113 +1013,6 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                 {deckStatus.label}
               </span>
             </div>
-
-            {/* Lined Up Mix: prominently displays the song lined up to mix with live countdown and one-click Mix Now / Cancel */}
-            {(pendingMix || mixLoadingItem) && (
-              <div
-                id="party-console-lined-up-mix"
-                className="mx-4 mt-3 p-3 rounded-xl bg-gradient-to-r from-cyan-950/80 via-blue-950/60 to-purple-950/70 border border-cyan-500/40 shadow-xl shadow-cyan-500/10 flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1 duration-150"
-              >
-                <div className="flex items-center gap-3 min-w-0 flex-1">
-                  {/* Thumbnail / Animated Disc */}
-                  <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-slate-900 border border-cyan-500/30 flex items-center justify-center shadow-md">
-                    {(pendingMix?.thumbnail || mixLoadingItem?.thumbnail) ? (
-                      <img
-                        src={pendingMix?.thumbnail || mixLoadingItem?.thumbnail}
-                        alt=""
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <Disc3 className="w-6 h-6 text-cyan-400 animate-spin [animation-duration:8s]" />
-                    )}
-                    <span className="absolute bottom-0 right-0 px-1 py-0.2 bg-cyan-500 text-[8px] font-black text-black rounded-tl shadow-sm">
-                      NEXT
-                    </span>
-                  </div>
-
-                  {/* Details */}
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[10px] font-black tracking-wider px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 uppercase flex items-center gap-1.5 shadow-sm">
-                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-                        LINED UP TO MIX
-                      </span>
-                      {pendingMix && (
-                        <span className="text-[11px] font-mono font-extrabold text-cyan-200 bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-400/40 shadow-sm animate-pulse">
-                          ⏱ in {Math.ceil(pendingMix.startsInSeconds)}s
-                        </span>
-                      )}
-                      {pendingMix?.harmonicShift && (
-                        <span
-                          className="text-[9px] font-mono font-bold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 rounded-full"
-                          title="Energy & harmonic flow compatibility"
-                        >
-                          ⚡ {pendingMix.harmonicShift}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex items-baseline gap-2 truncate mt-1">
-                      <span
-                        className="text-xs sm:text-sm font-extrabold text-white truncate leading-snug"
-                        title={pendingMix?.title || mixLoadingItem?.title}
-                      >
-                        {pendingMix?.title || mixLoadingItem?.title}
-                      </span>
-                      {(pendingMix?.artist || mixLoadingItem?.artist) && (
-                        <span className="text-[10px] text-slate-400 truncate hidden sm:inline">
-                          by {pendingMix?.artist || mixLoadingItem?.artist}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="text-[10px] font-mono text-slate-300 flex items-center gap-1.5 truncate mt-0.5">
-                      {pendingMix ? (
-                        <>
-                          <span className="text-cyan-300 font-semibold truncate" title={pendingMix.reason}>
-                            {pendingMix.reason}
-                          </span>
-                          {pendingMix.entryTime > 0 && (
-                            <>
-                              <span className="text-slate-500">•</span>
-                              <span className="text-slate-400">enters at {formatTime(pendingMix.entryTime)}</span>
-                            </>
-                          )}
-                        </>
-                      ) : (
-                        <span className="text-amber-300 font-semibold flex items-center gap-1">
-                          <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
-                          Loading track audio… will mix in automatically once ready
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-2 shrink-0">
-                  {pendingMix && (
-                    <button
-                      type="button"
-                      onClick={() => engine.nextTrack()}
-                      className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-400 via-cyan-500 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-slate-950 font-black text-xs shadow-lg shadow-cyan-500/25 transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
-                      title="Mix now immediately (skip phrase wait)"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>Mix now</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => engine.cancelPendingMix()}
-                    className="px-2.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-semibold text-xs border border-white/10 transition-colors active:scale-95 cursor-pointer"
-                    title="Cancel lined up mix"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
 
             <div className="flex flex-col gap-4 p-4">
               {/* Hero: artwork, title/artist/chips, VU meter */}
@@ -1138,14 +1167,14 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                         </button>
                       );
                     })()}
-                    {currentTrack?.highlightTime !== undefined && (
+                    {hookTimes.length > 0 && (
                       <span
                         id="party-console-hook-badge"
                         className="inline-flex items-center gap-1 text-[10px] font-semibold text-orange-300 bg-orange-500/10 border border-orange-500/25 px-2 py-0.5 rounded-full"
-                        title="The world's most replayed part of this song"
+                        title="Hooks found in the audio: each chorus and a drop. Best part jumps to the next one."
                       >
                         <Flame className="w-2.5 h-2.5" />
-                        Hook {formatTime(currentTrack.highlightTime)}
+                        {hookTimes.length > 1 ? 'Hooks' : 'Hook'} {hookTimes.map(formatTime).join(' · ')}
                       </span>
                     )}
                     {currentTrack?.musicStartTime && currentTrack.musicStartTime > 0 && (
@@ -1226,13 +1255,15 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
               <div id="party-console-time-scrubber" className="flex flex-col gap-1">
                 <div id="party-console-waveform" className="relative h-14 rounded-lg bg-black/30 border border-white/[0.06] overflow-hidden">
                   <div className="absolute inset-0 flex items-center gap-px px-1" aria-hidden="true">
-                    {(peaks ?? Array.from({ length: 120 }, () => 0.15)).map((peak, i, all) => (
-                      <div
-                        key={i}
-                        className={`flex-1 rounded-full ${i / all.length <= progress ? 'bg-cyan-400' : 'bg-slate-600/60'}`}
-                        style={{ height: `${Math.max(6, Math.min(100, peak * 100))}%` }}
-                      />
-                    ))}
+                    {waveBars.upcoming}
+                  </div>
+                  {/* The played part: the same bars in cyan, uncovered up to the playhead */}
+                  <div
+                    className="absolute inset-0 flex items-center gap-px px-1"
+                    style={{ clipPath: `inset(0 ${(1 - progress) * 100}% 0 0)` }}
+                    aria-hidden="true"
+                  >
+                    {waveBars.played}
                   </div>
                   {cueRatio !== null && (
                     <div
@@ -1242,12 +1273,12 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                       aria-hidden="true"
                     />
                   )}
-                  {hookRatio !== null && (
-                    <div className="absolute inset-y-0 flex flex-col items-center" style={{ left: `${hookRatio * 100}%` }} aria-hidden="true">
+                  {hookRatios.map((ratio) => (
+                    <div key={ratio} className="absolute inset-y-0 flex flex-col items-center" style={{ left: `${ratio * 100}%` }} aria-hidden="true">
                       <div className="w-px h-full bg-orange-400" />
                       <Flame className="absolute top-0.5 -translate-x-1/2 left-0 w-3 h-3 text-orange-400" />
                     </div>
-                  )}
+                  ))}
                   {/* Loop Region on Waveform (Virtual DJ style) */}
                   {playbackState.loop && (() => {
                     const lStartRatio = markerRatio(playbackState.loop.start);
@@ -1467,7 +1498,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                     onClick={() => engine.jumpToHook()}
                     disabled={!currentTrack}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold text-orange-200 bg-orange-500/10 border border-orange-500/30 hover:bg-orange-500/20 transition-colors disabled:opacity-40"
-                    title="Jump to the world's most replayed part of this song"
+                    title="Jump to the next hook (each chorus / the drop in turn)"
                   >
                     <Flame className="w-3.5 h-3.5" />
                     Best part
@@ -1496,34 +1527,6 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                 </div>
               </div>
 
-              {/* Planned mix: waits for the best blend point instead of mixing immediately */}
-              {pendingMix && (
-                <div id="party-console-pending-mix" className="flex items-center justify-between gap-2 bg-cyan-500/10 border border-cyan-500/25 rounded-xl px-3 py-2 text-[11px]">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-cyan-100 truncate">
-                      Mixing into "{pendingMix.title}" in {Math.ceil(pendingMix.startsInSeconds)}s
-                    </div>
-                    <div className="text-cyan-300/70 truncate" title={pendingMix.reason}>
-                      {pendingMix.reason} · enters at {formatTime(pendingMix.entryTime)}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      onClick={() => engine.nextTrack()}
-                      className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold transition-colors"
-                      title="Mix now immediately (skip phrase wait)"
-                    >
-                      Mix now
-                    </button>
-                    <button
-                      onClick={() => engine.cancelPendingMix()}
-                      className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* Tempo: speed presets, exact BPM, key lock */}

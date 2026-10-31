@@ -704,8 +704,8 @@ syncState.queue.length === 0 ? (
         {currentTrack?.highlightTime !== undefined && (
           <div id="remote-highlight-badge-wrapper" className="flex items-center justify-center gap-1.5 -mt-1">
             <span className="text-[10px] font-bold text-amber-400 bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-full flex items-center gap-1">
-              <span>🔥 World's Favorite Part:</span>
-              <span>{formatTime(currentTrack.highlightTime)}</span>
+              <span>🔥 {currentTrack.hooks && currentTrack.hooks.length > 1 ? 'Hooks' : 'Hook'}:</span>
+              <span>{(currentTrack.hooks?.length ? currentTrack.hooks.map((h) => h.time) : [currentTrack.highlightTime]).map(formatTime).join(' · ')}</span>
             </span>
           </div>
         )}

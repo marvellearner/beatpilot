@@ -17,17 +17,14 @@ import {
   TempoInfo,
   PlayLogEntry,
 } from '../types';
-import { detectBpmFromBuffer } from './BpmDetector';
 import {
-  detectKey,
   keyCompatibility,
   shiftKey,
   getHarmonicCompatibility,
 } from './KeyDetector';
-import { measureLoudnessDb, loudnessGainDb } from './Loudness';
+import { loudnessGainDb } from './Loudness';
 import { DeckCues } from './engine/DeckCues';
-import { HighlightDetector } from './HighlightDetector';
-import { computeEnergyProfile, planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
+import { planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
 import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dSong, isMashupSong, type SongRef } from './songMatch';
@@ -45,9 +42,14 @@ import {
   type SongLike,
 } from './engine/queueRules';
 import { DJAgent } from '../ai/DJAgent';
-import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, namesArtist, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
-import { IntroSkitDetector, type IntroAnalysisResult } from './IntroSkitDetector';
-import { OutroDetector } from './OutroDetector';
+import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
+import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter } from '../../shared/songFilter';
+import type { IntroAnalysisResult } from './IntroSkitDetector';
+import { chooseNext } from './engine/setFlow';
+import { guessLanguage } from '../../shared/songLanguage';
+import { runAnalysis, analysisComplete, ANALYSIS_FIELDS, AnalysisFields } from './analysis/trackAnalysis';
+import { analyzeInWorker } from './analysis/analyzeInWorker';
+import { analysisKey, getSavedAnalysis, saveAnalysis } from './analysis/analysisCache';
 
 const SOUND_SETTINGS_KEY = 'ai_dj_sound_settings';
 const DOUBLE_CLICK_MS = 1500; // a second Mix click on the same song within this is the same click
@@ -104,6 +106,9 @@ const OFFLINE_ONLY_KEY = 'ai_dj_offline_only';
 const BEST_PARTS_KEY = 'ai_dj_best_parts';
 // What the AI chat was told to keep doing ("play only <artist>"), remembered across reloads
 const AI_INSTRUCTIONS_KEY = 'ai_dj_ai_instructions';
+// The AI's answers to "does this song fit the vibe?", remembered so each song is asked about once
+const VIBE_VERDICTS_KEY = 'ai_dj_vibe_verdicts';
+const VIBE_BATCH = 30; // songs per question to the AI
 const BEST_PART_HOOK_BARS = 16; // play at least this much from the hook (a full chorus) before leaving
 const BEST_PART_EXIT_BARS = 16; // ...then mix out at the best phrase within the next 16 bars
 const BEST_PART_BUILD_BARS = 16; // incoming songs enter up to 16 bars before their hook
@@ -124,6 +129,11 @@ export const BPM_LIMITS = {
 
 // Tempo control range for the on-air song
 const MIN_TEMPO = 0.5;
+// Party mood: a song too slow to reach the set tempo within the ±16% limit (e.g. 97 BPM vs 124),
+// or whose BPM reading is unsure, is lifted this much instead of left as it is (key-locked)
+const PARTY_LIFT_PCT = 0.08;
+// ...if its reading is plausible for a song played as is (below this it's likely half of a fast song)
+const PARTY_LIFT_MIN_BPM = 80;
 const MAX_TEMPO = 1.5;
 const MIN_QUEUE_TARGET = 45; // Maintain ~50 songs in queue at all times
 // RULE: Never add any song longer than 6 minutes (360 s) on your own in up next queue.
@@ -191,11 +201,22 @@ export class AudioEngine {
   private droppedPicks: Array<{ song: SongLike; at: number }> = [];
   public refreshingQueue = false; // Refresh is rebuilding Up Next
   // "Play only / more <artist>" from the AI chat: Up Next follows it until cleared. Remembered.
-  public artistFocus: { artists: string[]; only: boolean } | null = (() => {
+  // "dance|lover by diljit dosanjh" -> fits the vibe or not (the AI's answer; see classifyForVibe)
+  private vibeVerdicts: Map<string, boolean> = (() => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem(AI_INSTRUCTIONS_KEY) || 'null');
-      const artists = Array.isArray(saved?.artistFocus?.artists) ? saved.artistFocus.artists.filter((a: unknown) => typeof a === 'string' && a.trim()) : [];
-      return artists.length ? { artists, only: saved.artistFocus.only !== false } : null;
+      return new Map<string, boolean>(JSON.parse(window.localStorage.getItem(VIBE_VERDICTS_KEY) || '[]'));
+    } catch {
+      return new Map<string, boolean>();
+    }
+  })();
+  private classifyingVibe = false;
+  public artistFocus: SongFilter | null = (() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(AI_INSTRUCTIONS_KEY) || 'null')?.artistFocus;
+      if (!saved) return null;
+      const artists = Array.isArray(saved.artists) ? saved.artists.filter((a: unknown) => typeof a === 'string' && a.trim()) : [];
+      if (!artists.length && !saved.vibe && !saved.language && !saved.era) return null;
+      return { artists, only: saved.only !== false, vibe: saved.vibe, language: saved.language, era: saved.era };
     } catch {
       return null;
     }
@@ -765,15 +786,32 @@ export class AudioEngine {
    * (±25%), so e.g. a 95 BPM song under a 132 BPM party goes as far as 119 BPM.
    */
   private onAirSetTempoRatio(track: TrackMetadata): number | null {
-    if (!this.sessionBpm || (track.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE) return null;
+    if (!this.sessionBpm) return null;
     const natural = track.original?.bpm ?? track.bpm;
-    const ratio = this.closestTempoRatio(natural, this.sessionBpm);
-    // In Party mood: NEVER decrease BPM of original song!
-    if (this.mood === 'party' && ratio < 1.0) {
-      return 1.0;
+    if ((track.bpmConfidence ?? 0) >= MIN_BEATMATCH_CONFIDENCE) {
+      const ratio = this.closestTempoRatio(natural, this.sessionBpm);
+      // In Party mood: NEVER decrease BPM of original song!
+      if (this.mood === 'party' && ratio < 1.0) {
+        return 1.0;
+      }
+      if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return ratio;
+      // A set tempo the user locked: as close as the ±16% limit allows
+      if (this.mood !== 'party') return Math.max(BPM_LIMITS.MIN_RATIO, Math.min(BPM_LIMITS.MAX_RATIO, ratio));
     }
-    // Hard limit: never adjust beyond ±16% from the original BPM per MIXING_RULES.md
-    return Math.max(BPM_LIMITS.MIN_RATIO, Math.min(BPM_LIMITS.MAX_RATIO, ratio));
+    const lifted = this.partyLiftBpm(natural);
+    return lifted === null ? null : lifted / natural;
+  }
+
+  /**
+   * Party mood, for a song that can't be brought to the set tempo (too slow for the ±16% limit,
+   * or its BPM reading is unsure): its BPM lifted PARTY_LIFT_PCT (never past the set tempo) for
+   * more energy without sounding rushed. Null outside Party mood, for songs already at or above
+   * the set tempo (never slowed down), or for a reading too low to trust.
+   */
+  private partyLiftBpm(naturalBpm: number): number | null {
+    if (this.mood !== 'party' || !this.sessionBpm) return null;
+    if (naturalBpm < PARTY_LIFT_MIN_BPM || naturalBpm >= this.sessionBpm) return null;
+    return Math.min(this.sessionBpm, Math.round(naturalBpm * (1 + PARTY_LIFT_PCT) * 10) / 10);
   }
 
   /** Keeps the song on air at the set tempo (Party mood / "Whole set at this BPM"), or at its original tempo. */
@@ -826,6 +864,7 @@ export class AudioEngine {
       cueInTime: track.cueInTime,
       musicStartTime: track.musicStartTime,
       musicEndTime: track.musicEndTime,
+      hooks: track.hooks,
     };
     track.tempoRatio = 1;
   }
@@ -844,6 +883,7 @@ export class AudioEngine {
     track.cueInTime = original.cueInTime !== undefined ? original.cueInTime / bufferRatio : undefined;
     track.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / bufferRatio : undefined;
     track.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / bufferRatio : undefined;
+    track.hooks = original.hooks?.map((h) => ({ ...h, time: h.time / bufferRatio }));
     track.energyProfile = undefined; // recomputed from the new audio when a mix is planned
     deck.replaceAudio(track, naturalPosition / bufferRatio);
   }
@@ -852,15 +892,19 @@ export class AudioEngine {
 
   /** Tempo the song should be tuned to (null = play at its natural tempo). */
   private tempoLockTarget(item: QueuedTrack): number | null {
-    if (this.playOriginal || !this.sessionBpm || (item.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE) return null;
+    if (this.playOriginal || !this.sessionBpm) return null;
     const naturalBpm = item.original?.bpm ?? item.bpm ?? 128;
-    const ratio = this.closestTempoRatio(naturalBpm, this.sessionBpm);
-    // In Party mood: NEVER decrease BPM of original song!
-    if (this.mood === 'party' && naturalBpm >= this.sessionBpm) {
-      return naturalBpm;
+    if ((item.bpmConfidence ?? 0) >= MIN_BEATMATCH_CONFIDENCE) {
+      const ratio = this.closestTempoRatio(naturalBpm, this.sessionBpm);
+      // In Party mood: NEVER decrease BPM of original song!
+      if (this.mood === 'party' && naturalBpm >= this.sessionBpm) {
+        return naturalBpm;
+      }
+      // Hard limit: never adjust beyond ±16% from original BPM per MIXING_RULES.md
+      if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return this.sessionBpm;
     }
-    // Hard limit: never adjust beyond ±16% from original BPM per MIXING_RULES.md
-    return Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT ? this.sessionBpm : null;
+    // Too slow to reach the party tempo, or an unsure reading: Party lifts it partway
+    return this.partyLiftBpm(naturalBpm);
   }
 
   private needsTempoWork(item: QueuedTrack): boolean {
@@ -896,6 +940,7 @@ export class AudioEngine {
         cueInTime: item.cueInTime,
         musicStartTime: item.musicStartTime,
         musicEndTime: item.musicEndTime,
+        hooks: item.hooks,
       };
     }
     const original = item.original;
@@ -909,7 +954,7 @@ export class AudioEngine {
       } else {
         // Back to the natural tempo
         item.audioBuffer = item.originalBuffer;
-        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime, musicEndTime: original.musicEndTime });
+        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime, musicEndTime: original.musicEndTime, hooks: original.hooks });
         item.energyProfile = undefined;
         item.tempoLockedTo = undefined;
       }
@@ -933,6 +978,7 @@ export class AudioEngine {
       item.cueInTime = original.cueInTime !== undefined ? original.cueInTime / ratio : undefined;
       item.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / ratio : undefined;
       item.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / ratio : undefined;
+      item.hooks = original.hooks?.map((h) => ({ ...h, time: h.time / ratio }));
       item.energyProfile = undefined; // recomputed from the tuned audio when needed
       item.tempoLockedTo = target;
     } catch (err) {
@@ -1031,6 +1077,8 @@ export class AudioEngine {
     if (this.loopTicks % 15 === 0) this.dropRecentlyPlayedFromQueue();
     // New picks nobody played for 30 minutes make way for fresh ones
     if (this.loopTicks % 30 === 0) this.expireStaleSongs();
+    // A vibe filter: new songs in Up Next get checked by the AI too
+    if (this.loopTicks % 20 === 0 && this.artistFocus?.vibe) void this.classifyForVibe();
 
     // 2. Autonomous Queue Refill from Internet (failed songs don't count;
     // maintain at least MIN_QUEUE_TARGET (~50) songs in queue at all times;
@@ -1420,14 +1468,38 @@ export class AudioEngine {
    * the next two (not a guest request jumping ahead of it) fits. Guest requests are never skipped.
    */
   private keyFriendlyChoice(current: TrackMetadata, ready: QueuedTrack[]): QueuedTrack {
-    const first = ready[0];
-    if (!first.isAiRecommended) return first;
+    // Set flow (see engine/setFlow.ts): artist, key, tempo step, language run and energy
     const rate = this.onAirDeck().getPlaybackState().playbackRate;
-    if (this.keyFit(current, rate, this.queuedItemToTrack(first)) !== 'clash') return first;
-    const better = ready.slice(1, 3).find((q) => q.isAiRecommended && this.keyFit(current, rate, this.queuedItemToTrack(q)) === 'good');
-    if (!better) return first;
-    this.lastAiDecision = `Next: "${better.title}" — its key fits, "${first.title}" clashes`;
-    return better;
+    const language = (song: { title: string; artist?: string }) => {
+      const guess = guessLanguage(song.title, song.artist ?? '');
+      return guess.sure ? guess.language : undefined;
+    };
+    const currentLanguage = language(current);
+    // Previously Played, newest first; its first entry is the song on air
+    const log = this.playLog;
+    let languageRun = 0;
+    for (const e of log) {
+      if (!currentLanguage || language(e) !== currentLanguage) break;
+      languageRun++;
+    }
+    const candidates = ready.map((q) => ({
+      item: q,
+      title: q.title,
+      artist: q.artist,
+      bpm: q.bpm,
+      loudnessDb: q.loudnessDb,
+      language: language(q),
+      requested: isChosen(q),
+      keyFit: this.keyFit(current, rate, this.queuedItemToTrack(q)),
+    }));
+    const { pick, reason } = chooseNext(candidates, {
+      current: { title: current.title, artist: current.artist, bpm: current.bpm, loudnessDb: current.loudnessDb, language: currentLanguage },
+      recentArtists: log.slice(1, 3).map((e) => e.artist),
+      languageRun: Math.max(1, languageRun),
+      danceFloor: this.mood === 'party' || this.mood === 'bhangra',
+    });
+    if (reason) this.lastAiDecision = `Next: "${pick.title}" — ${reason}`;
+    return pick.item;
   }
 
   /** Switches a planned mix to the AI DJ's exit/entry points and style, if there's still time. */
@@ -1530,6 +1602,7 @@ export class AudioEngine {
       style: 'bass_swap',
       sourceExitTime: exitNow ? undefined : pending.plan.exitTime,
       targetEntryTime: isStrict ? 0 : pending.plan.entryTime,
+      filterSweep: pending.keyFit === 'clash',
     });
   }
 
@@ -1810,8 +1883,18 @@ export class AudioEngine {
 
       // Analyse BPM, downbeat and hook ahead of time so the mix can be planned
       const track = this.queuedItemToTrack(item);
-      this.analyzeTrack(track);
+      await this.analyzeTrackInBackground(track);
       this.copyAnalysisToQueueItem(track, item);
+
+      // Now that its tempo is known it may not fit the AI chat's filter (e.g. too slow for "only dance songs")
+      if (!isChosen(item) && !this.allowedByFocus(item)) {
+        console.log(`[AudioEngine] Dropping "${item.title}" (${Math.round(item.bpm ?? 0)} BPM): doesn't fit "${describeFilter(this.artistFocus!)}".`);
+        this.queue = this.queue.filter((q) => q !== item);
+        this.lastRefillAttemptAt = 0;
+        this.saveQueueToStorage();
+        this.notify();
+        return;
+      }
 
       item.status = 'ready';
       this.saveQueueToStorage();
@@ -2326,6 +2409,7 @@ export class AudioEngine {
           cueInTime: track.cueInTime,
           musicStartTime: track.musicStartTime,
           musicEndTime: track.musicEndTime,
+          hooks: track.hooks,
           introSkipReason: track.introSkipReason,
           bpm: track.bpm,
           bpmConfidence: track.bpmConfidence,
@@ -2371,6 +2455,7 @@ export class AudioEngine {
         cueInTime: t.cueInTime,
         musicStartTime: t.musicStartTime,
         musicEndTime: t.musicEndTime,
+        hooks: t.hooks,
         introSkipReason: t.introSkipReason,
         bpm: t.bpm || 128,
         bpmConfidence: t.bpmConfidence ?? 0.8,
@@ -2407,7 +2492,7 @@ export class AudioEngine {
       const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
       track.audioBuffer = audioBuffer;
       track.duration = audioBuffer.duration;
-      this.analyzeTrack(track);
+      await this.analyzeTrackInBackground(track);
       // If active deck holds this track and has not started playing yet, cue to musicStartTime
       const deck = this.activeDeck === 'A' ? this.deckA : this.deckB;
       if (deck.getTrack()?.id === track.id && !deck.getPlaybackState().isPlaying) {
@@ -2444,6 +2529,7 @@ export class AudioEngine {
         musicStartTime: q.musicStartTime,
         introSkipReason: q.introSkipReason,
         musicEndTime: q.musicEndTime,
+        hooks: q.hooks,
         outroReason: q.outroReason,
         status: (q.status === 'ready' || q.status === 'queued') ? 'queued' : q.status,
         isAiRecommended: q.isAiRecommended,
@@ -2531,6 +2617,8 @@ export class AudioEngine {
         const url = song.url || song.title;
         if (
           !this.allowedByFocus({ title, artist }) ||
+          // "only dance songs": a song from the listener's history goes in only once the AI says it fits
+          (this.artistFocus?.only && this.artistFocus.vibe && this.vibeVerdict({ title, artist }) !== true) ||
           this.autoBlocked({ title, artist, url }) ||
           this.isDontPlayAgain({ title, artist, url }) ||
           this.isSongInQueueOrPlayed({ title, artist, url }) ||
@@ -2650,41 +2738,100 @@ export class AudioEngine {
     );
   }
 
-  /** Whether a song is by one of the focus artists (title or artist names them). */
-  public matchesFocus(song: { title?: string; artist?: string }): boolean {
+  /** Whether a song fits what the AI chat was told: artists, vibe, language (see shared/songFilter.ts). */
+  public matchesFocus(song: { title?: string; artist?: string; bpm?: number; bpmConfidence?: number }): boolean {
     if (!this.artistFocus) return true;
-    return this.artistFocus.artists.some((a) => namesArtist(`${song.title ?? ''} | ${song.artist ?? ''}`, a));
+    return fitsFilter(this.artistFocus, song) && this.vibeVerdict(song) !== false;
   }
 
-  /** Automatic picks under "play only <artist>" must be by them; "more <artist>" allows anything. */
-  private allowedByFocus(song: { title?: string; artist?: string }): boolean {
-    return !this.artistFocus?.only || this.matchesFocus(song);
+  /** The AI's answer to "does this song fit the vibe?" (undefined: not asked yet, or no vibe). */
+  private vibeVerdict(song: { title?: string; artist?: string }): boolean | undefined {
+    const vibe = this.artistFocus?.vibe;
+    return vibe && song.title ? this.vibeVerdicts.get(`${vibe}|${song.title.toLowerCase()}|${(song.artist ?? '').toLowerCase()}`) : undefined;
   }
 
   /**
-   * "Play only Diljit Dosanjh" (only = true): Up Next keeps just their songs (and songs someone
-   * added), is refilled with their hits, and the next one is mixed in now. "More Diljit Dosanjh"
-   * (only = false): new picks lean toward them. Lasts until cleared.
+   * Under a vibe filter ("only dance songs"), asks the AI which songs fit: Up Next and the
+   * listener's own songs (Most Played, Favourites, Previously Played), in batches. Neither titles
+   * nor the measured tempo can tell a dance song from a ballad, but the model knows the songs.
+   * Songs it rules out leave Up Next; familiar songs it approves can then be queued.
    */
+  private async classifyForVibe() {
+    const vibe = this.artistFocus?.vibe;
+    if (!vibe || this.classifyingVibe) return;
+    this.classifyingVibe = true;
+    try {
+      const key = (song: { title: string; artist?: string }) => `${vibe}|${song.title.toLowerCase()}|${(song.artist ?? '').toLowerCase()}`;
+      const seen = new Set<string>();
+      const pending = [...this.queue, ...this.favorites, ...this.library.history, ...this.playLog]
+        .filter((q) => q.title && !/^https?:/.test(q.title))
+        .map((q) => ({ title: q.title!, artist: q.artist ?? '' }))
+        .filter((q) => {
+          const k = key(q);
+          if (seen.has(k) || this.vibeVerdicts.has(k)) return false;
+          seen.add(k);
+          return true;
+        })
+        .slice(0, 150);
+      for (let i = 0; i < pending.length && this.artistFocus?.vibe === vibe; i += VIBE_BATCH) {
+        const batch = pending.slice(i, i + VIBE_BATCH);
+        const answers = await this.djAgent.classifySongs(batch, vibe);
+        if (!answers) break; // no AI right now: familiar songs wait, picks come from vibe searches
+        batch.forEach((song, k) => this.vibeVerdicts.set(key(song), answers[k]));
+        // Songs that don't fit leave Up Next (not one someone added, not one already loading for a mix)
+        const before = this.queue.length;
+        this.queue = this.queue.filter((q, idx) => isChosen(q) || idx === 0 && q.status !== 'queued' || this.vibeVerdict(q) !== false);
+        if (this.queue.length !== before) this.saveQueueToStorage();
+        this.lastRefillAttemptAt = 0; // approved familiar songs can be queued now
+        this.notify();
+      }
+      try {
+        window.localStorage.setItem(VIBE_VERDICTS_KEY, JSON.stringify([...this.vibeVerdicts].slice(-3000)));
+      } catch {
+        // storage full or unavailable: asked again next time
+      }
+    } finally {
+      this.classifyingVibe = false;
+    }
+  }
+
+  /** Automatic picks under "play only …" must fit it; "more …" allows anything. */
+  private allowedByFocus(song: { title?: string; artist?: string; bpm?: number; bpmConfidence?: number }): boolean {
+    return !this.artistFocus?.only || this.matchesFocus(song);
+  }
+
+  /** "Play only / more <artist>": an artist filter (kept for callers that name artists only). */
   public setArtistFocus(artists: string[], only: boolean) {
-    this.artistFocus = { artists, only };
+    this.setSongFilter({ artists, only });
+  }
+
+  /**
+   * What the AI chat was told to play: "only Diljit Dosanjh", "only dance songs", "more Punjabi
+   * songs"… With "only", Up Next keeps just the songs that fit (and songs someone added), is
+   * refilled with fitting songs, and if the song on air doesn't fit, the next one is mixed in now.
+   * A vibe also switches the mood (dance → Party). Lasts until cleared, remembered across reloads.
+   */
+  public setSongFilter(filter: SongFilter) {
+    this.artistFocus = filter;
     this.saveAiInstructions();
-    const names = artists.join(' & ');
-    if (only) {
+    if (filter.vibe && this.mood !== VIBE_MOOD[filter.vibe]) this.setMood(VIBE_MOOD[filter.vibe]);
+    if (filter.vibe) void this.classifyForVibe();
+    const what = describeFilter(filter);
+    if (filter.only) {
       this.queue = this.queue.filter((q) => isChosen(q) || this.matchesFocus(q));
       if (this.pendingMix && !isChosen(this.pendingMix.item) && !this.matchesFocus(this.pendingMix.item)) this.cancelPendingMix();
       this.queue = this.queue.filter((q) => isChosen(q) || this.matchesFocus(q)); // the cancelled mix's song went back on top
       this.saveQueueToStorage();
     }
-    this.noticeMix(only ? `Playing only ${names}: finding their songs…` : `More ${names} coming up…`);
+    this.noticeMix(filter.only ? `${what.replace(/^Only /, 'Playing only ')}: finding songs…` : `${what} coming up…`);
     this.notify();
     void this.refreshQueue().then(() => {
       const onAir = this.onAirDeck().getTrack();
-      if (!only || !this.isAnyDeckPlaying() || this.pendingMix || (onAir && this.matchesFocus(onAir))) return;
-      // The song on air isn't theirs: move to one of theirs now (at the best bar in the next 45 s)
+      if (!filter.only || !this.isAnyDeckPlaying() || this.pendingMix || (onAir && this.matchesFocus(onAir))) return;
+      // The song on air doesn't fit: move to one that does now (at the best bar in the next 45 s)
       const next = this.queue.find((q) => q.status !== 'failed' && this.matchesFocus(q));
       if (next) this.mixQueuedTrack(next.id);
-      else this.noticeMix(`Couldn't find songs by ${names} right now.`);
+      else this.noticeMix(`Couldn't find ${what.replace(/^Only /, '')} right now.`);
     });
   }
 
@@ -2707,7 +2854,7 @@ export class AudioEngine {
 
   /** Short text of what the AI chat is still following, e.g. 'Only Chainsmokers'. */
   public describeAiInstructions(): string[] {
-    return this.artistFocus ? [`${this.artistFocus.only ? 'Only' : 'More'} ${this.artistFocus.artists.join(' & ')}`] : [];
+    return this.artistFocus ? [describeFilter(this.artistFocus)] : [];
   }
 
   /** The top bar's "Clear AI instructions": forget everything the AI chat was told to keep doing. */
@@ -2777,69 +2924,75 @@ export class AudioEngine {
    */
   private analyzeTrack(track: TrackMetadata) {
     if (!track.audioBuffer) return;
-    if (!track.energyProfile) track.energyProfile = computeEnergyProfile(track.audioBuffer);
-
-    let bpm = track.bpm;
-    let firstDownbeatTime = track.firstDownbeatTime ?? 0;
-
-    if (track.bpmConfidence === undefined || !track.bpm) {
-      const bpmResult = detectBpmFromBuffer(track.audioBuffer);
-      track.bpm = bpmResult.bpm;
-      track.bpmConfidence = bpmResult.confidence;
-      track.firstDownbeatTime = bpmResult.firstDownbeatTime;
-      bpm = bpmResult.bpm;
-      firstDownbeatTime = bpmResult.firstDownbeatTime;
-    }
-
-    // Detect the world's most liked part (highlight) & optimal pre-roll cue-in
-    if (track.highlightTime === undefined || track.cueInTime === undefined) {
-      const highlight = HighlightDetector.detectHighlight(
-        track.audioBuffer,
-        bpm,
-        track.highlightTime ? { peakSeconds: track.highlightTime, intensity: track.highlightIntensity || 0.95 } : undefined,
-        firstDownbeatTime
-      );
-      track.highlightTime = highlight.highlightTime;
-      track.cueInTime = highlight.cueInTime;
-      track.highlightSource = highlight.source;
-      track.highlightIntensity = highlight.intensity;
-    }
-
-    // Skip a spoken intro (dialogue, movie scene, skit) and start where the music begins.
-    // Decided from the audio: a talking opening (speech-like, no beat) is skipped, a musical one is kept.
-    // Exception: Ping Pong Tremor (and related festival anthems) strictly plays from 0:00 starting timestamp.
-    if (isStrictStartSong(track)) {
-      track.musicStartTime = 0;
-      track.cueInTime = 0;
-      track.introSkipReason = undefined;
-    } else if (track.musicStartTime === undefined) {
-      const intro = IntroSkitDetector.detectMusicStart(track.audioBuffer, bpm, firstDownbeatTime);
-      // Keep the last few analyses so the on-air song's can be inspected (see getSyncState)
-      this.introAnalyses.set(track.id, intro);
-      if (this.introAnalyses.size > 20) this.introAnalyses.delete(this.introAnalyses.keys().next().value!);
-      track.musicStartTime = intro.suggestedMusicStart;
-      track.introSkipReason = intro.reason;
-    }
-
-    // Where the music ends: a closing scene, dialogue, fade or silence after it is never waited for
-    if (track.musicEndTime === undefined) {
-      const outro = OutroDetector.detectMusicEnd(track.audioBuffer, bpm, firstDownbeatTime);
-      track.musicEndTime = outro.musicEnd;
-      track.outroReason = outro.cut ? outro.reason : undefined;
-    }
-
-    // Key (for harmonic mixing) and loudness (for level matching), ~50 ms
-    if (track.keyConfidence === undefined) {
-      const key = detectKey(track.audioBuffer);
-      track.key = key.camelot;
-      track.keyConfidence = key.confidence;
-    }
-    if (track.loudnessDb === undefined) track.loudnessDb = measureLoudnessDb(track.energyProfile);
+    const naturalAudio = !track.originalBuffer || track.audioBuffer === track.originalBuffer;
+    const key = naturalAudio ? analysisKey(track, track.audioBuffer.duration) : null;
+    const known = analysisComplete(track);
+    if (!known && key) this.applySavedAnalysis(track, key);
+    const { intro } = runAnalysis(track.audioBuffer, track, isStrictStartSong(track));
+    if (intro) this.rememberIntroAnalysis(track.id, intro);
+    if (!known && key) saveAnalysis(key, track);
     for (const deck of [this.deckA, this.deckB]) {
-      if (deck.getTrack() === track) deck.setTrimDb(loudnessGainDb(track.loudnessDb));
+      if (deck.getTrack() === track) deck.setTrimDb(loudnessGainDb(track.loudnessDb!));
     }
 
     this.rhythmPlans.planFor(track);
+  }
+
+  /**
+   * The same analysis in a Web Worker, for songs being made ready in the background, so loading
+   * one never freezes the UI. A result needed sooner (the song goes on air first) is worked out
+   * on the spot by analyzeTrack; whatever changed meanwhile is never overwritten.
+   */
+  private async analyzeTrackInBackground(track: TrackMetadata) {
+    const buffer = track.audioBuffer;
+    if (!buffer) return;
+    const naturalAudio = !track.originalBuffer || buffer === track.originalBuffer;
+    const key = naturalAudio ? analysisKey(track, buffer.duration) : null;
+    const isNew = !!key && !getSavedAnalysis(key);
+    if (key) this.applySavedAnalysis(track, key);
+    if (!analysisComplete(track)) {
+      const before: AnalysisFields = {};
+      for (const name of ANALYSIS_FIELDS) (before as Record<string, unknown>)[name] = track[name];
+      try {
+        const { fields, intro, rhythmFeatures } = await analyzeInWorker(buffer, { ...before }, isStrictStartSong(track));
+        if (track.audioBuffer !== buffer) return;
+        for (const name of ANALYSIS_FIELDS) {
+          if (track[name] === before[name]) (track as unknown as Record<string, unknown>)[name] = fields[name];
+        }
+        if (intro) this.rememberIntroAnalysis(track.id, intro);
+        if (rhythmFeatures) this.rhythmPlans.setFeatures(track, rhythmFeatures);
+      } catch (err) {
+        console.warn('[AudioEngine] Background analysis failed, analysing here instead:', err);
+      }
+    }
+    this.analyzeTrack(track);
+    if (isNew && track.audioBuffer === buffer) saveAnalysis(key!, track);
+  }
+
+  /** A previous analysis of this song: fills in what the track doesn't know yet. */
+  private applySavedAnalysis(track: TrackMetadata, key: string) {
+    const saved = getSavedAnalysis(key);
+    if (!saved) return;
+    // Hooks decide the highlight and cue, over a hint that came with the search result
+    const hooksDecide = track.hooks === undefined && saved.hooks !== undefined && !isStrictStartSong(track);
+    // A placeholder BPM (e.g. 128 before analysis) gives way to the measured one
+    const unmeasured = track.bpmConfidence === undefined || !track.bpm;
+    for (const [name, value] of Object.entries(saved)) {
+      const field = name as keyof typeof saved;
+      const highlight = field === 'highlightTime' || field === 'cueInTime' || field === 'highlightSource' || field === 'highlightIntensity';
+      if (track[field] === undefined || (hooksDecide && highlight)) (track as unknown as Record<string, unknown>)[field] = value;
+    }
+    if (unmeasured && saved.bpm && saved.bpmConfidence !== undefined) {
+      track.bpm = saved.bpm;
+      track.bpmConfidence = saved.bpmConfidence;
+      track.firstDownbeatTime = saved.firstDownbeatTime;
+    }
+  }
+
+  /** Keep the last few intro analyses so the on-air song's can be inspected (see getSyncState). */
+  private rememberIntroAnalysis(id: string, intro: IntroAnalysisResult) {
+    this.introAnalyses.set(id, intro);
+    if (this.introAnalyses.size > 20) this.introAnalyses.delete(this.introAnalyses.keys().next().value!);
   }
 
   /**
@@ -2865,6 +3018,7 @@ export class AudioEngine {
     item.introSkipReason = isStrict ? undefined : track.introSkipReason;
     item.musicEndTime = track.musicEndTime;
     item.outroReason = track.outroReason;
+    item.hooks = track.hooks;
     item.energyProfile = track.energyProfile;
     item.key = track.key;
     item.keyConfidence = track.keyConfidence;
@@ -3256,6 +3410,18 @@ export class AudioEngine {
     deck.upgradeToBuffer(track);
     if (track.url) this.rememberDecoded([this.normalizeCacheKey(track.url), this.normalizeCacheKey(track.title)], { buffer, metadata: track });
     this.acquisitionStatus = `"${track.title}" fully loaded — beat sync, tempo and drums are on.`;
+
+    // A stream starts at 0:00 before the intro can be analysed: if it's still in a talking intro
+    // now, jump to where the music starts (a musical intro, or a song that must start at 0:00, stays)
+    this.analyzeTrack(track);
+    const musicStart = isStrictStartSong(track) ? 0 : (track.musicStartTime ?? 0);
+    const position = deck.getCurrentTime();
+    if (musicStart > 3 && position < musicStart - 1) {
+      deck.seek(musicStart);
+      if (deck === this.onAirDeck()) this.afterSeek();
+      const at = `${Math.floor(musicStart / 60)}:${String(Math.round(musicStart % 60)).padStart(2, '0')}`;
+      this.acquisitionStatus = `Skipped the talking intro of "${track.title}": the music starts at ${at}.`;
+    }
     this.notify();
   }
 
@@ -3341,6 +3507,7 @@ export class AudioEngine {
       cueInTime: isStrict ? 0 : item.cueInTime,
       musicStartTime: isStrict ? 0 : item.musicStartTime,
       musicEndTime: item.musicEndTime,
+      hooks: item.hooks,
       outroReason: item.outroReason,
       introSkipReason: isStrict ? undefined : item.introSkipReason,
       energyProfile: item.energyProfile,
@@ -3700,7 +3867,7 @@ export class AudioEngine {
       };
 
       // Analyse BPM, downbeat and hook up front, so the song is ready to mix and to drum on.
-      this.analyzeTrack(trackMetadata);
+      await this.analyzeTrackInBackground(trackMetadata);
       this.copyAnalysisToQueueItem(trackMetadata, queuedItem);
 
       // Keep it decoded in memory for instant replays (older songs come back from the disk cache)
@@ -3896,6 +4063,9 @@ export class AudioEngine {
     if (isCut) {
       sourceDeck.scheduleEchoOut(startTime + durationSeconds / 2, 60 / Math.max(60, sourceBpm));
       this.acquisitionStatus += ' Echo-out on the old song.';
+    } else if (config.filterSweep && isSourcePlaying) {
+      sourceDeck.scheduleFilterSweepOut(startTime, startTime + durationSeconds);
+      this.acquisitionStatus += ' Keys clash: filter sweep out on the old song.';
     }
 
     // Bass swap: outgoing bass fades out over the first half, incoming bass comes in over the second
@@ -3919,6 +4089,7 @@ export class AudioEngine {
       this.applyCrossfader(targetCrossfader);
       sourceDeck.pause();
       sourceDeck.setEQ(0, 0, 0);
+      sourceDeck.resetFilterSweep();
       targetDeck.setEQ(0, 0, 0);
 
       // The new song is on air (the rhythm layer follows it by itself via rhythmClock)
@@ -3941,6 +4112,8 @@ export class AudioEngine {
       this.applyCrossfader(this.crossfaderPosition);
       this.deckA.setEQ(0, 0, 0);
       this.deckB.setEQ(0, 0, 0);
+      this.deckA.resetFilterSweep();
+      this.deckB.resetFilterSweep();
     }
     this.transitionProgress = 0;
     this.notify();
@@ -4278,11 +4451,16 @@ export class AudioEngine {
     }
   }
 
+  /** Best part: the next hook after the current spot (each chorus / the drop in turn). */
   public jumpToHook(deckId?: DeckId) {
     const targetId = deckId || this.activeDeck;
     const deck = targetId === 'A' ? this.deckA : this.deckB;
-    deck.jumpToHighlight();
+    const hook = deck.jumpToHighlight();
     this.afterSeek();
+    if (hook && hook.count > 1) {
+      const at = `${Math.floor(hook.time / 60)}:${String(Math.round(hook.time % 60)).padStart(2, '0')}`;
+      this.acquisitionStatus = `Hook ${hook.index + 1} of ${hook.count} (${at}). Press Best part again for the next.`;
+    }
     this.notify();
   }
 

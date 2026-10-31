@@ -45,6 +45,9 @@ export const AICommandSchema = z.object({
   queue: z
     .object({
       focus_artists: z.array(z.string().min(1)).max(5).optional(),
+      vibe: z.enum(['dance', 'romantic', 'chill', 'bhangra']).optional(),
+      language: z.enum(['punjabi', 'hindi', 'english', 'spanish']).optional(),
+      era: z.enum(['old', '90s', '2000s', 'new']).optional(),
       only: z.boolean().optional(), // true: nothing else plays; false: just more of them
       clear_focus: z.boolean().optional(),
       play_song: z.string().min(1).optional(),

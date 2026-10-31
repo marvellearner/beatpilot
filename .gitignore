@@ -25,3 +25,4 @@ cache/
 # Offline music library: your songs and the saved most-played MP3s (server/localLibrary.ts)
 music/
 data/local_library.json
+data/banned_songs.json

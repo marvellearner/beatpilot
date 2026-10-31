@@ -1,3 +1,12 @@
+import { VIBE_MOOD, describeFilter, type Era, type FilterLanguage, type Vibe } from '../../shared/songFilter';
+
+/** What each vibe means, for the AI's song checks. */
+const VIBE_DESCRIPTION: Record<Vibe, string> = {
+  dance: 'people dancing at a party: upbeat songs with a strong beat that get people moving (no slow, sad or romantic ballads)',
+  romantic: 'a romantic, slow-dance mood: love songs and soft melodies (no party bangers)',
+  chill: 'a chill, laid-back evening: mellow, smooth songs (no loud party songs)',
+  bhangra: 'a Punjabi bhangra dance floor: dhol-heavy, high-energy Punjabi songs',
+};
 import { z } from 'zod';
 import { AICommandSchema, type AICommandPlan } from './schema';
 import type { AudioEngine } from '../audio/AudioEngine';
@@ -137,6 +146,22 @@ export class DJAgent {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Which of these songs fit a vibe ("dance": people dancing at a party), from the model's own
+   * knowledge of the songs. One answer per song, in order; null if the AI can't answer.
+   * Titles and tempo can't tell a dance song from a ballad (see AudioEngine.classifyForVibe).
+   */
+  public async classifySongs(songs: Array<{ title: string; artist: string }>, vibe: Vibe): Promise<boolean[] | null> {
+    if (!songs.length) return [];
+    const prompt = `You are a DJ preparing a set for ${VIBE_DESCRIPTION[vibe]}.
+For each song below, answer true if it fits that set, false if it doesn't.
+${songs.map((s, i) => `${i + 1}) "${s.title.slice(0, 80)}" by ${s.artist.slice(0, 40)}`).join('\n')}
+Reply ONLY with JSON: {"fits": [true or false for each song, in the same order, exactly ${songs.length} values]}`;
+    const res = await this.askJson(prompt, 12 * songs.length + 20, 40_000);
+    const fits = (res?.data as { fits?: unknown } | undefined)?.fits;
+    return Array.isArray(fits) && fits.length === songs.length ? fits.map((v) => v === true) : null;
   }
 
   /** Detailed status of Gemini and Ollama backends. */
@@ -455,13 +480,16 @@ Interpret the user's natural language instruction and output a STRICT JSON objec
   },
   "queue": {
     "focus_artists": ["Artist name", ...],
+    "vibe": "dance" | "romantic" | "chill" | "bhangra",
+    "language": "punjabi" | "hindi" | "english" | "spanish",
+    "era": "old" | "90s" | "2000s" | "new",
     "only": true | false,
     "clear_focus": true | false,
     "play_song": "Artist - Song"
   },
   "explanation": "Brief DJ reason for the action"
 }
-Use "queue_control" for requests about WHICH songs or artists to play: "play only <artist>" sets focus_artists and only=true; "more <artist>" sets focus_artists and only=false; "play anything again" sets clear_focus=true; "play <song>" sets play_song.
+Use "queue_control" for requests about WHICH songs or artists to play: "play only <artist>" sets focus_artists and only=true; "more <artist>" sets focus_artists and only=false; "only dance songs" sets vibe="dance" and only=true; "more Punjabi songs" sets language="punjabi" and only=false (vibe, language and era can be combined with artists); "play anything again" sets clear_focus=true; "play <song>" sets play_song.
 If the instruction doesn't fit any action, use "unknown" and say so in the explanation.
 
 RHYTHM STYLES:
@@ -575,7 +603,9 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
     if (plan.action === 'queue_control' && plan.queue) {
       const q = plan.queue;
       if (q.clear_focus) engine.clearArtistFocus();
-      else if (q.focus_artists?.length) engine.setArtistFocus(q.focus_artists, q.only ?? true);
+      else if (q.focus_artists?.length || q.vibe || q.language || q.era) {
+        engine.setSongFilter({ artists: q.focus_artists ?? [], only: q.only ?? true, vibe: q.vibe, language: q.language, era: q.era });
+      }
       if (q.play_song) void engine.acquireTrack(q.play_song, true);
       return;
     }
@@ -635,7 +665,37 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
 }
 
 // Filler words around an artist's name in "play only Diljit Dosanjh songs please"
-const FILLER = /\b(please|pls|plz|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|gaane|gane|gaana|gana|ke|ki|ka|wale|waale|sirf|bas|chalao|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want)\b/gi;
+// Kinds of songs in plain words (removed before the rest is read as artists' names)
+const KIND_WORDS: Array<[RegExp, 'vibe' | 'language' | 'era', string]> = [
+  [/\b(dance|dancing|danceable|party|club|upbeat|bangers?|floor ?fillers?)\b/gi, 'vibe', 'dance'],
+  [/\b(romantic|love|slow)\b/gi, 'vibe', 'romantic'],
+  [/\b(chill|relax(ing)?|calm|soft)\b/gi, 'vibe', 'chill'],
+  [/\bbhangra\b/gi, 'vibe', 'bhangra'],
+  [/\bpunjabi\b/gi, 'language', 'punjabi'],
+  [/\b(hindi|bollywood)\b/gi, 'language', 'hindi'],
+  [/\benglish\b/gi, 'language', 'english'],
+  [/\b(spanish|latin)\b/gi, 'language', 'spanish'],
+  [/\b(90s|nineties)\b/gi, 'era', '90s'],
+  [/\b(2000s)\b/gi, 'era', '2000s'],
+  [/\b(old|retro|classic|evergreen)\b/gi, 'era', 'old'],
+  [/\b(new|latest)\b/gi, 'era', 'new'],
+];
+
+/** The vibe, language and era named in a request, and the text without those words. */
+function songKinds(text: string): { vibe?: Vibe; language?: FilterLanguage; era?: Era; rest: string } {
+  const found: { vibe?: Vibe; language?: FilterLanguage; era?: Era } = {};
+  let rest = text;
+  for (const [re, kind, value] of KIND_WORDS) {
+    if (re.test(rest)) {
+      (found as Record<string, string>)[kind] ??= value;
+      rest = rest.replace(re, ' ');
+    }
+    re.lastIndex = 0;
+  }
+  return { ...found, rest };
+}
+
+const FILLER = /\b(please|pls|plz|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|gaane|gane|gaana|gana|ke|ki|ka|wale|waale|sirf|bas|chalao|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want|want|wanna|to|i|me|us|we)\b/gi;
 
 /** A typo of "song(s)" ("osngs", "sogns", "sngs", "songz"): same letters, or one letter off. */
 const isSongTypo = (w: string) => {
@@ -674,30 +734,36 @@ export function parseSongCommand(input: string): AICommandPlan | null {
       .filter((a) => a.length >= 2)
       .slice(0, 5);
 
-  // "only X" / "just X" / "X only" / "nothing but X"
+  // Kinds of songs ("dance", "Punjabi", "90s") are a filter, not an artist's name
+  const { vibe, language, era, rest } = songKinds(text);
+  const kinds = { ...(vibe && { vibe }), ...(language && { language }), ...(era && { era }) };
+  const hasKind = Object.keys(kinds).length > 0;
+  const plan = (only: boolean): AICommandPlan | null => {
+    const list = artists(rest);
+    if (!list.length && !hasKind) return null;
+    const filter = { artists: list, only, ...kinds };
+    const what = describeFilter(filter);
+    return {
+      action: 'queue_control',
+      target_deck: 'none',
+      queue: { focus_artists: list.length ? list : undefined, only, ...kinds },
+      explanation: only
+        ? `${what.replace(/^Only /, 'Playing only ')} from now on${vibe ? ` (${VIBE_MOOD[vibe]} mood)` : ''}. Say "play anything" to go back to normal.`
+        : `${what} in Up Next, mixed with your other music.`,
+    };
+  };
+
+  // "only X" / "just X" / "X only" / "nothing but X" (X: artists and/or kinds of songs)
   if (/\b(only|just|nothing but|sirf)\b/.test(lower)) {
-    const list = artists(text);
-    if (list.length) {
-      return {
-        action: 'queue_control',
-        target_deck: 'none',
-        queue: { focus_artists: list, only: true },
-        explanation: `Playing only ${list.join(' & ')} from now on. Say "play anything" to go back to normal.`,
-      };
-    }
+    const p = plan(true);
+    if (p) return p;
   }
 
-  // "more X" / "play more X songs"
-  if (/\bmore\b/.test(lower)) {
-    const list = artists(text);
-    if (list.length) {
-      return {
-        action: 'queue_control',
-        target_deck: 'none',
-        queue: { focus_artists: list, only: false },
-        explanation: `More ${list.join(' & ')} in Up Next, mixed with your other music.`,
-      };
-    }
+  // "more X" / "play more X songs", and "play dance songs" (a kind of song, no artist: more of it)
+  // ("songs" must be said then: "play Love Dose" is a song, not "more romantic songs by Dose")
+  if (/\bmore\b/.test(lower) || (hasKind && !artists(rest).length && /\b(songs?|music|gaane|gaana|tracks?)\b/.test(lower))) {
+    const p = plan(false);
+    if (p) return p;
   }
 
   // "play Lover by Diljit Dosanjh" / "play Brown Munde"

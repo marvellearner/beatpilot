@@ -33,6 +33,7 @@ import {
 
 // Phone updates: at most this often (the engine can change many times per frame during a mix)
 const SYNC_THROTTLE_MS = 150;
+const RENDER_MIN_MS = 100; // the page redraws at most 10 times a second
 // The full state is resent at least this often, in case a change slipped past the signature
 const FULL_SYNC_EVERY_MS = 5000;
 
@@ -287,16 +288,30 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     // Engine changes come in bursts (many per frame during a mix): re-render at most once per
-    // animation frame, and update the phone at most every SYNC_THROTTLE_MS
+    // animation frame and at most every RENDER_MIN_MS, and update the phone at most every
+    // SYNC_THROTTLE_MS. While songs load the engine changes constantly, and the
+    // whole page redrawing 60 times a second kept the laptop busy. The first change after a quiet
+    // spell (a click) still shows on the next frame.
     let frame = 0;
+    let renderTimer: number | undefined;
+    let lastRenderAt = 0;
     let syncTimer: number | undefined;
     const render = () => {
-      if (!frame) {
+      if (frame || renderTimer !== undefined) return;
+      const draw = () => {
         frame = requestAnimationFrame(() => {
           frame = 0;
+          lastRenderAt = performance.now();
           setTick((t) => t + 1);
         });
-      }
+      };
+      const wait = RENDER_MIN_MS - (performance.now() - lastRenderAt);
+      if (wait <= 0) draw();
+      else
+        renderTimer = window.setTimeout(() => {
+          renderTimer = undefined;
+          draw();
+        }, wait);
     };
     const sync = () => {
       if (syncTimer === undefined) {
@@ -319,6 +334,7 @@ export const App: React.FC = () => {
     return () => {
       clearInterval(interval);
       cancelAnimationFrame(frame);
+      window.clearTimeout(renderTimer);
       window.clearTimeout(syncTimer);
       engine.onEngineUpdate = undefined;
     };

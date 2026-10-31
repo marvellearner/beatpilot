@@ -127,7 +127,7 @@ export class HighlightDetector {
    * Aligns the cue point 16 beats (4 bars) or 32 beats (8 bars) prior to the peak,
    * locked to the nearest beat boundary.
    */
-  private static calculatePhraseAlignedCueIn(peakTime: number, secondsPerBeat: number, beatOffset: number): number {
+  public static calculatePhraseAlignedCueIn(peakTime: number, secondsPerBeat: number, beatOffset: number): number {
     const sixteenBeatsDuration = 16 * secondsPerBeat;
     const rawPreRoll = peakTime - sixteenBeatsDuration;
 

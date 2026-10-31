@@ -10,6 +10,9 @@ export const MIN_PLAYBACK_RATE = 0.5;
 export const MAX_PLAYBACK_RATE = 1.5;
 const SWAP_FADE_SECONDS = 0.04;
 
+const SWEEP_OPEN_HZ = 10;
+const SWEEP_CLOSED_HZ = 1500;
+
 export class VirtualDeck {
   public readonly id: DeckId;
   private ctx: AudioContext;
@@ -36,6 +39,7 @@ export class VirtualDeck {
   private fxDelay: DelayNode;
   private fxFeedback: GainNode;
   private fxFilter: BiquadFilterNode;
+  private sweepFilter: BiquadFilterNode; // high-pass for a filter-sweep exit; open (10 Hz) otherwise
 
   // Playback State
   private track: TrackMetadata | null = null;
@@ -83,6 +87,12 @@ export class VirtualDeck {
     this.highFilter.frequency.value = 3500;
     this.highFilter.gain.value = 0;
 
+    // Filter-sweep exit: a high-pass that is fully open until a mix sweeps it up
+    this.sweepFilter = this.ctx.createBiquadFilter();
+    this.sweepFilter.type = 'highpass';
+    this.sweepFilter.frequency.value = SWEEP_OPEN_HZ;
+    this.sweepFilter.Q.value = 0.9;
+
     // Loudness trim, then the volume fader
     this.trimNode = this.ctx.createGain();
     this.gainNode = this.ctx.createGain();
@@ -95,7 +105,8 @@ export class VirtualDeck {
     // Chain: Filters -> Gain -> Analyser -> Output Bus
     this.lowFilter.connect(this.midFilter);
     this.midFilter.connect(this.highFilter);
-    this.highFilter.connect(this.trimNode);
+    this.highFilter.connect(this.sweepFilter);
+    this.sweepFilter.connect(this.trimNode);
     this.trimNode.connect(this.gainNode);
     this.gainNode.connect(this.analyserNode);
     this.analyserNode.connect(destinationNode);
@@ -183,6 +194,7 @@ export class VirtualDeck {
       this.pause();
     }
     this.releaseStream();
+    this.resetFilterSweep();
     this.track = metadata;
     const isStrict = isStrictStartSong(metadata);
     if (isStrict) {
@@ -461,10 +473,18 @@ export class VirtualDeck {
     }
   }
 
-  public jumpToHighlight() {
-    if (!this.track) return;
-    const target = this.track.highlightTime ?? this.track.cueInTime ?? 0;
-    this.seek(target);
+  /**
+   * Best part: jumps to the next hook after the current spot (each chorus / the drop in turn,
+   * back to the first after the last). Returns which one, for the status line.
+   */
+  public jumpToHighlight(): { index: number; count: number; time: number } | null {
+    if (!this.track) return null;
+    const hooks = this.track.hooks?.length ? this.track.hooks.map((h) => h.time) : [this.track.highlightTime ?? this.track.cueInTime ?? 0];
+    const now = this.getCurrentTime();
+    let index = hooks.findIndex((t) => t > now + 2);
+    if (index < 0) index = 0;
+    this.seek(hooks[index]);
+    return { index, count: hooks.length, time: hooks[index] };
   }
 
   public setVolume(vol: number) {
@@ -505,6 +525,26 @@ export class VirtualDeck {
     param.setValueAtTime(fromDb, startTime);
     param.linearRampToValueAtTime(toDb, endTime);
     this.lowGain = toDb;
+  }
+
+  /**
+   * Filter-sweep exit: the high-pass rises from open to ~1.5 kHz between startTime and endTime,
+   * so the outgoing song thins to a hiss and gets out of the way instead of its harmony
+   * rubbing against a new song in a key that doesn't fit.
+   */
+  public scheduleFilterSweepOut(startTime: number, endTime: number) {
+    const f = this.sweepFilter.frequency;
+    f.cancelScheduledValues(this.ctx.currentTime);
+    f.setValueAtTime(SWEEP_OPEN_HZ, this.ctx.currentTime);
+    f.setValueAtTime(SWEEP_OPEN_HZ, startTime);
+    f.exponentialRampToValueAtTime(SWEEP_CLOSED_HZ, endTime);
+  }
+
+  /** Opens the sweep filter again (after a mix, or when a mix is cancelled). */
+  public resetFilterSweep() {
+    const f = this.sweepFilter.frequency;
+    f.cancelScheduledValues(this.ctx.currentTime);
+    f.setTargetAtTime(SWEEP_OPEN_HZ, this.ctx.currentTime, 0.05);
   }
 
   public setEQ(low: number, mid: number, high: number) {

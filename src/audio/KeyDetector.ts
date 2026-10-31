@@ -32,7 +32,7 @@ const FFT_SIZE = 4096;
 const FRAMES = 120;
 
 /** In-place radix-2 FFT (re/im arrays of length FFT_SIZE). */
-function fft(re: Float64Array, im: Float64Array) {
+export function fft(re: Float64Array, im: Float64Array) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;

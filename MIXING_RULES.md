@@ -34,7 +34,7 @@
   - `Energy +1 ⚡` (Gold / Amber): +1 Camelot step clockwise (adds 1 sharp) to raise room energy smoothly.
   - `Deep -1 🌊` (Cyan): -1 Camelot step counter-clockwise (adds 1 flat) for a smooth chill/deep groove.
   - `Drop Jump 🚀` (Purple): +1 Semitone modulation for dramatic climax drop transitions.
-  - `Clash ⚠️` (Rose): Key clash (3+ steps); blend is kept to **4 bars** or executed as a drop cut/echo out to avoid tonal dissonance.
+  - `Clash ⚠️` (Rose): Key clash (3+ steps); blend is kept to **4 bars** and the outgoing song leaves through a **filter sweep**: a high-pass rises from fully open to ~1.5 kHz over the blend, so it thins to a hiss instead of its harmony rubbing against the new key (`VirtualDeck.scheduleFilterSweepOut`). A cut echoes out instead. See [MusicRadar: EQ and filter tricks](https://www.musicradar.com/news/eq-and-filter-tricks-for-djs).
 - **Energy-Shift Mixing**: Tag transitions in the header and status line with their exact harmonic relationship (e.g. `⚡ Energy +1 (8A → 9A)`).
 - **One-Click Harmonic Queue Reordering (`🪄 Harmonic Flow`)**: Automatically sorts the 50-song queue into a continuous, clash-free Camelot wheel wave starting from the currently playing track.
 - **Next song:** the AI DJ sees which ready songs' keys fit. Without the AI, if the next song clashes and one of the two after it fits, that one plays first (guest requests are never skipped).
@@ -276,6 +276,11 @@ These apply always, with or without Best Parts. Both are decided from the audio 
 ## 1. Start: talk before the music is skipped
 - `IntroSkitDetector` finds the first point where the beat is clearly there and holds for 8 s.
 - **Skipped:** what comes before it, if it's talking (dialogue, a movie scene, a skit) or silence. The song starts at the bar where the music begins (`musicStartTime`).
+- **A short sting before the talk:** some videos play a few seconds of music, then a conversation, then the song. For example, Karan Aujla's "5-7" has 7 s of beat, then 30 s of talking, and the music starts at 0:40.
+  - If about 10 s of talking with almost no bass follows within 20 s of the first beat, that beat was only a sting.
+  - The song then starts at the first steady beat after the talking ends, even if the bass fades in under the last words.
+  - A rap or sung verse has bass under it, so it never counts as talking.
+- **Songs that start streaming:** a song that starts streaming before it's fully downloaded begins at 0:00, because its intro can't be analysed yet. As soon as it has loaded, if it's still in a talking intro, it jumps to where the music starts. The status line then says *"Skipped the talking intro of …"*.
 - **Kept:** a musical intro without the beat (pads, piano, a sung opening), because the build-up matters (Rule 9).
 
 ## 2. End: what comes after the music isn't waited for
@@ -403,6 +408,14 @@ Adjust song tempo to create energetic, dance-friendly mixes while preserving mus
 7. Do not force two songs to the same BPM if doing so produces poor audio quality.
 8. If the required tempo adjustment exceeds the limit, use an alternative such as a quick transition, breakdown, echo-out, or beat switch.
 9. Evaluate the actual rendered transition, not just the calculated BPM values.
+10. **Party mood, songs that can't reach the set tempo:**
+    - **Which songs:** a song slower than the set tempo (about 124 BPM) that can't be brought to it within ±16%, or whose BPM reading is unsure. For example Nashe Si Chadh Gayi, 97 BPM.
+    - **What happens:** it's lifted **+8%** (key-locked, pitch unchanged), e.g. 97 → 104.8 BPM. That's more energy without the vocals sounding rushed. It never goes past the set tempo.
+    - **Not lifted:**
+      - readings below 80 BPM (likely half of a fast song, which a lift would make rush);
+      - songs at or above the set tempo (never slowed down).
+    - **Up Next:** such songs are kept and lifted instead of being swapped out (`partyLiftBpm` in `AudioEngine.ts`).
+    - **Outside Party:** with a "Whole set at this BPM" lock you set yourself, a song beyond the limit is still brought as close as ±16% allows.
 
 ## Calculation
 
@@ -499,6 +512,85 @@ The ±16% limit is a hard technical constraint for automated mixing, not a guara
 2. **Exemption for Explicit User Search & Play:**
    - **If the user explicitly searches for a song and queues or plays it (`source === 'request'`), it is permitted regardless of duration.**
    - The user has complete freedom to enjoy long mixes, extended club tracks, or live sets when explicitly requested.
+
+---
+
+# Set Flow (Which Song Plays Next)
+
+A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's off, slow, or only one song is ready), the next song is picked from the **next 3 ready songs** by these rules (`engine/setFlow.ts`, used in `planOutroMix`). When the AI DJ does choose, it is told to avoid the same artist back to back, prefer keys that fit, keep energy and language flowing, and play guest requests soon.
+
+1. **Guest requests are never skipped.** A request first in line always plays next, and requests further back keep their place.
+2. **No artist twice in a row:** a song by the artist on air, or the one before it, loses 3 points.
+3. **Keys that fit:**
+   - a fitting key gains 1 point;
+   - a clashing key loses 2.
+4. **Small tempo steps** (half and double time count as the same tempo):
+   - a step of 4% or less gains 0.5;
+   - a step over 8% loses 1;
+   - a step over 16% loses 2.
+5. **Language runs:** a few songs (3) in one language before switching. An earlier switch loses 0.7. This only counts when the language is known for sure (script, artist or label).
+6. **No energy drop on a dance floor:** in Party or Bhangra mood, a song more than 3 dB quieter than the one on air loses 1.
+7. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
+8. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
+
+**Why:** the craft sources agree that a set is shaped as waves of energy rather than a random order or a flat line. Big tempo jumps need planning, and abrupt changes of genre or energy lose the floor. See [DJ.Studio: anatomy of a great mix](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic), [ZipDJ: how to structure a set](https://zipdj.com/blog/how-to-structure-a-dj-set) and [DJ Will Gill: setlist flow](https://djwillgill.com/pro-tactics-for-flawless-song-selection-for-dj-setlist-flow/).
+
+---
+
+# Hooks (Every Chorus, Not Just One Point)
+
+A song usually has its chorus 2–3 times, and sometimes a separate drop. The app finds all of them (`HookDetector.ts`, run in `analyzeTrack` once the music's start and end are known):
+
+1. **How it finds them:**
+   - **Measurements:** per bar of the beat grid, the loudness and the harmony (which of the 12 notes sound).
+   - **A chorus:** every 8-bar stretch is compared with every later one. A chorus comes back with the same harmony (≥ 0.8 similarity, bar by bar) and is louder than the song's average. Loudness counts heavily, because verses and intro riffs repeat too.
+   - **Choruses vs halves:** each repeat of the best match is a chorus hook. Repeats less than 16 bars apart are one chorus's two halves, not two choruses.
+   - **A drop:** a one-off stretch as loud as the choruses, away from them.
+   - **Up to 4 hooks**, each starting on a bar. When nothing repeats, the loudest stretch is used, as before.
+2. **The song's main hook** (shown as "Hook", used by Best Parts mode and the pre-roll cue) is the **first chorus**. The build-up and the first time the hook lands are heard, and the loudest (often last) chorus is no longer waited for.
+3. **Best part button:** each press jumps to the next hook after where you are, back to the first after the last. The status line says e.g. *"Hook 2 of 3 (1:48)"*.
+4. **On screen:** a marker for every hook on the waveform (Party console and Pro decks). The badge lists them, e.g. **"Hooks 0:58 · 1:42 · 2:55"**, on the laptop and the phone.
+5. **Where it comes from:** it's decided from the audio alone. YouTube's "most replayed" data isn't used (to keep this laptop off YouTube), so the app no longer calls anything "the world's favourite part".
+6. **Limits:** a song whose intro riff is as loud as its chorus and has the same harmony (e.g. Blinding Lights) can get that riff marked as a hook too. On 12 test songs the choruses came out about a minute apart, as expected. Hooks are found in about 50–120 ms per song.
+
+---
+
+# AI Chat Song Filters ("only dance songs", "only Diljit Dosanjh"…)
+
+What you tell the AI chat about **which songs** to play becomes a filter on Up Next (`shared/songFilter.ts`). It has four parts, in any mix:
+- **Artists:** "only Karan Aujla", "more AP Dhillon".
+- **Vibe:** dance (also "party", "club", "upbeat", "bangers"), romantic ("love", "slow"), chill ("relax", "calm"), bhangra.
+- **Language:** Punjabi, Hindi ("Bollywood"), English, Spanish ("Latin").
+- **Era:** old ("retro", "classic"), 90s, 2000s, new ("latest").
+
+**Only vs more:**
+- **"Only …":** Up Next keeps only the songs that fit, plus songs someone added. If the song on air doesn't fit, a fitting one is mixed in within 45 s.
+- **"More …", or "play dance songs"** (a kind of song with no "only"): new picks lean toward it, and other songs still play.
+- A kind of song is read as a request only when "songs", "music" or "gaane" is said too, so "play Love Dose" still plays that song.
+
+**What changes:**
+1. **Mood:** a vibe switches the mood: dance → Party (punchy sound, 120–130 BPM set), romantic → Romantic, chill → Chill, bhangra → Bhangra.
+2. **What fits:**
+   - **Artists:** the title or channel names them, as whole words. "KK" matches "| KK |" and "K.K.", but not "Ikky".
+   - **Language:**
+     - Punjabi, Hindi and Spanish need a sure sign: the script, title words, well-known artists or labels (Speed Records, T-Series…).
+     - English only needs to not be surely another language.
+   - **Dance:** no slow or stripped-down versions (sad, unplugged, lofi, slowed, acoustic…). A song whose steady beat is measured below 88 BPM is dropped once it's analysed.
+   - **Romantic / chill:** no party versions (remix, club, DJ, bhangra…).
+   - **Bhangra:** Punjabi songs, or titles that say bhangra or dhol.
+3. **The AI checks the vibe:**
+   - **Why the AI:** titles and measured tempo can't reliably tell a dance song from a ballad (on 14 test songs, ballads read 137–163 BPM).
+   - **What it checks:** under a vibe filter, the AI DJ (Ollama, with Gemini as backup) is asked which songs fit. That covers Up Next and your own songs (Most Played, Favourites, Previously Played), 30 per question, with answers remembered in this browser.
+   - **What happens:** songs it rules out leave Up Next. A song from your history is queued under a vibe filter only once the AI has said it fits.
+   - **No AI available:** history songs wait, and picks come only from the vibe-specific searches.
+4. **New picks:**
+   - **Searches:** for the kind of song, e.g. "Punjabi party songs", "Punjabi party songs hits", "<your top artists> party songs". For dance it searches "party songs", not "dance songs", which finds children's songs.
+   - **"Also played" lists and the AI's ideas** are filtered the same way.
+   - **Children's content** (preschool, nursery rhymes, kids' songs) is never picked.
+5. **Shown and remembered:**
+   - The top bar and Up Next show e.g. **"Only Punjabi dance songs by Diljit Dosanjh"**.
+   - The filter survives reloads.
+   - **Clear AI instructions** or "play anything" removes it.
 
 ---
 

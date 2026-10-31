@@ -11,6 +11,7 @@ import { ollamaGenerate } from './llm';
 import { isOnline, localRecommendations } from './localLibrary';
 import { SearchResult, canonicalYouTubeUrl, extractYouTubeVideoId, formatDuration } from './youtube';
 import { artistHits, fansAlsoLike, mapLimit, related, search, type VideoHit } from './discover';
+import { describeFilter, filterForPrompt, filterQueries, fitsFilter, type Era, type FilterLanguage, type SongFilter, type Vibe } from '../shared/songFilter';
 import { BANNED_SONGS_FILE, FAVORITES_FILE, PLAY_HISTORY_FILE, type HistoryEntry } from './library';
 import { readJsonArray } from './jsonFile';
 import { logError } from './logger';
@@ -196,7 +197,7 @@ ${tasteLines ? `${tasteLines}\n` : ''}Suggest exactly 12 songs that fit this moo
         ? ' Pick them for THIS listener: about half by the artists they play most, the rest by similar artists in the same languages and styles that they would like.'
         : ''
     }
-${focus ? (focus.only ? `ONLY songs by ${focus.artists.join(' or ')}: no other artists at all.\n` : `About half of them by ${focus.artists.join(' or ')}.\n`) : ''}Return a STRICT JSON object with key "suggestions" containing an array of 12 "Artist - Song" strings.
+${focus ? `${filterForPrompt(focus)}\n` : ''}Return a STRICT JSON object with key "suggestions" containing an array of 12 "Artist - Song" strings.
 Example: { "suggestions": ["Diljit Dosanjh - Lover", "AP Dhillon - Brown Munde", "Karan Aujla - Softly", "Badshah - Jugnu"] }
 Output ONLY valid JSON.`;
 
@@ -221,22 +222,33 @@ Output ONLY valid JSON.`;
 }
 
 type Seed = { title: string; artist: string; url?: string };
-type Focus = { artists: string[]; only: boolean };
+type Focus = SongFilter;
+const VIBES = ['dance', 'romantic', 'chill', 'bhangra'];
+const LANGUAGES = ['punjabi', 'hindi', 'english', 'spanish'];
+const ERAS = ['old', '90s', '2000s', 'new'];
 
-/** "Play only / more <artist>" from the AI chat (?focus={"artists":[…],"only":true}). */
+/** What the AI chat was told to play (?focus={"artists":[…],"only":true,"vibe":"dance",…}). */
 function parseFocus(url: URL): Focus | null {
   try {
-    const raw = JSON.parse(url.searchParams.get('focus') || 'null') as { artists?: unknown; only?: unknown } | null;
-    const artists = Array.isArray(raw?.artists) ? raw!.artists.map(String).filter((a) => artistKey(a).length >= 2).slice(0, 5) : [];
-    return artists.length ? { artists, only: raw?.only !== false } : null;
+    const raw = JSON.parse(url.searchParams.get('focus') || 'null') as Record<string, unknown> | null;
+    if (!raw) return null;
+    const artists = Array.isArray(raw.artists) ? raw.artists.map(String).filter((a) => artistKey(a).length >= 2).slice(0, 5) : [];
+    const pick = <T extends string>(v: unknown, allowed: string[]) => (typeof v === 'string' && allowed.includes(v) ? (v as T) : undefined);
+    const filter: Focus = {
+      artists,
+      only: raw.only !== false,
+      vibe: pick<Vibe>(raw.vibe, VIBES),
+      language: pick<FilterLanguage>(raw.language, LANGUAGES),
+      era: pick<Era>(raw.era, ERAS),
+    };
+    return artists.length || filter.vibe || filter.language || filter.era ? filter : null;
   } catch {
     return null;
   }
 }
 
-/** Whether a song is by one of the focus artists (its title or channel names them). */
-const byFocus = (focus: Focus, song: { title?: string; author?: string; artist?: string }) =>
-  focus.artists.some((a) => namesArtist(`${song.title ?? ''} | ${song.author ?? song.artist ?? ''}`, a));
+/** Whether a song fits the filter (artists, vibe, language; see shared/songFilter.ts). */
+const byFocus = (focus: Focus, song: { title?: string; author?: string; artist?: string }) => fitsFilter(focus, song);
 
 /** The songs the request is about (?seeds=[[title, artist, url], …], or ?title=&artist=), the song on air first. */
 function parseSeeds(url: URL): Seed[] {
@@ -439,7 +451,7 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     // 1. "People who play your songs also play…" and 2. "fans of your artists also like…", together
     const [relatedLists, newArtists, ideas] = await Promise.all([
       Promise.all(researchSeeds(seeds, focus).map(async (sd) => ({ sd, hits: await related(sd.videoId).catch(() => [] as VideoHit[]) }))),
-      focus?.only ? Promise.resolve([] as string[]) : discoveryArtists(taste, seedArtist).catch(() => [] as string[]),
+      focus?.only && focus.artists.length ? Promise.resolve([] as string[]) : discoveryArtists(taste, seedArtist).catch(() => [] as string[]),
       useAi ? aiSongIdeas(seeds[0].title, seeds[0].artist, mood, taste, focus) : Promise.resolve([] as string[]),
     ]);
     for (const { sd, hits } of relatedLists) {
@@ -450,9 +462,16 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     const ownArtists = [...new Set([seedArtist, ...taste.artists.slice(0, 3)].filter(Boolean) as string[])];
     const queries = [
       // The focus artists' hits, from a few angles so there are enough of them
-      ...(focus?.artists ?? []).flatMap((a) =>
+      ...(focus && !focus.vibe && !focus.language && !focus.era ? focus.artists : []).flatMap((a) =>
         (artistKey(a).length <= 3 ? [`${a} songs`, `${a} hits`, `${a} singer best songs`] : [a, `${a} hits`, `${a} best songs`]).map((q) => ({ q, keep: 8, depth: 20, points: 1, why: `by ${a}, as you asked` }))
       ),
+      ...(focus && (focus.vibe || focus.language || focus.era) ? filterQueries(focus, taste.artists) : []).map((q) => ({
+        q,
+        keep: 6,
+        depth: 20,
+        points: 1,
+        why: describeFilter(focus!).replace(/^(Only|More) /, '') + ', as you asked',
+      })),
       ...ideas.map((q) => ({ q, keep: 1, depth: 8, points: 1.5, why: 'AI DJ suggestion' })),
       ...newArtists.map((q) => ({ q, keep: 2, depth: 20, points: 1, why: `fans of your artists like ${q}` })),
       ...ownArtists.map((q) => ({ q, keep: 2, depth: 20, points: 0.5, why: `a hit by ${q}` })),
@@ -461,7 +480,7 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
     found.forEach((hits, i) => hits.forEach((h) => consider(h, queries[i].points, queries[i].why)));
 
     // An artist focus: their channel's most viewed uploads are their hits, biggest first
-    if (focus) {
+    if (focus?.artists.length) {
       const channels = await mapLimit(focus.artists, 3, artistHits, [] as VideoHit[]);
       channels.forEach((hits) => hits.slice(0, 60).forEach((h, i) => consider(h, 2 - i / 40, `one of ${h.author}'s biggest songs`)));
     }
@@ -476,7 +495,7 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
         .slice(0, FOCUS_EXTRA_SEEDS)
         .map((c) => c.hit.videoId);
       const more = await mapLimit(topHits, 4, related, [] as VideoHit[]);
-      more.forEach((hits) => hits.slice(0, 20).forEach((h, i) => consider(h, 1 - i / 25, `played together with ${focus.artists[0]} songs`)));
+      more.forEach((hits) => hits.slice(0, 20).forEach((h, i) => consider(h, 1 - i / 25, `played together with ${describeFilter(focus).replace(/^(Only|More) /, '')}`)));
     }
 
     // Little came back (instances busy): the hand-made list for the mood
