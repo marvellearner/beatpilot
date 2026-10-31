@@ -1,8 +1,8 @@
 /**
  * Set flow: which of the next few ready songs plays next, when the AI DJ isn't choosing.
  * A DJ doesn't just take the queue in order: no artist twice in a row, keys that fit, small
- * tempo steps, a few songs in one language before switching, and no deflating energy drop on a
- * dance floor. Guest requests are never skipped. Rules: MIXING_RULES.md "Set Flow".
+ * tempo steps, a few songs in one language before switching, no deflating energy drop on a
+ * dance floor, and a breather after a long run of peak songs. Guest requests are never skipped. Rules: MIXING_RULES.md "Set Flow".
  */
 
 export interface FlowSong {
@@ -23,11 +23,15 @@ export interface FlowContext {
   recentArtists: string[]; // artists of the songs before the current one, newest first
   languageRun: number; // how many songs in a row (incl. the current) were in the current one's language
   danceFloor: boolean; // Party / Bhangra mood: keep the energy up
+  peakRun?: number; // songs on air in a row (incl. the current) with no step down in energy
 }
 
 const LOOK_AHEAD = 3; // only the next 3 ready songs are considered
 const LANGUAGE_RUN = 3; // songs in one language before a switch is welcome
 const QUIET_DROP_DB = 3; // this much quieter than the song on air deflates a dance floor
+const BREATHER_AFTER = 5; // peak songs in a row before a breather is welcome on a dance floor
+const BREATHER_MIN_DB = 1.5; // a breather: this much quieter than the song on air…
+const BREATHER_MAX_DB = 6; // …but not so much quieter that the floor empties
 
 const norm = (s: string) => s.toLowerCase().replace(/vevo$/, '').replace(/[^\p{L}\p{N}]/gu, '');
 const sameArtist = (a: string, b: string) => {
@@ -80,9 +84,16 @@ export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext
     bad.push('a language switch too soon');
   }
 
-  if (ctx.danceFloor && c.loudnessDb !== undefined && ctx.current.loudnessDb !== undefined && c.loudnessDb < ctx.current.loudnessDb - QUIET_DROP_DB) {
-    score -= 1;
-    bad.push('an energy drop');
+  if (ctx.danceFloor && c.loudnessDb !== undefined && ctx.current.loudnessDb !== undefined) {
+    const drop = ctx.current.loudnessDb - c.loudnessDb;
+    const breatherDue = (ctx.peakRun ?? 0) >= BREATHER_AFTER;
+    if (breatherDue && drop >= BREATHER_MIN_DB && drop <= BREATHER_MAX_DB) {
+      score += 0.8;
+      good.unshift(`a breather after ${ctx.peakRun} high-energy songs`);
+    } else if (drop > (breatherDue ? BREATHER_MAX_DB : QUIET_DROP_DB)) {
+      score -= 1;
+      bad.push('an energy drop');
+    }
   }
   return { score, good, bad };
 }

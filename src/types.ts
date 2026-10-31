@@ -29,6 +29,7 @@ export interface TrackMetadata {
   introSkipReason?: string;        // Explanation of initial conversation skip (Ollama AI / Audio MIR)
   musicEndTime?: number;           // Where the music ends, before a closing scene / dialogue / fade / silence (OutroDetector)
   hooks?: SongHook[];              // Every hook: each chorus and a drop (HookDetector), in time order
+  peakTime?: number;               // The most-loved moment (YouTube most-replayed, else the loudest stretch): Best Parts plays past it
   outroReason?: string;            // Why (shown in the mix status)
   energyProfile?: EnergyProfile;   // Loudness / vocal-band envelopes used to plan mix points
   // Key-locked tempo: the song as downloaded, and the tempo multiple its current audio is stretched to
@@ -47,6 +48,7 @@ export interface OriginalTiming {
   musicStartTime?: number;
   musicEndTime?: number;
   hooks?: SongHook[];
+  peakTime?: number;
 }
 
 /** A hook found in the audio: where a chorus (or a drop, or the loudest stretch) starts. */
@@ -89,7 +91,16 @@ export interface TransitionConfig {
   sourceExitTime?: number; // planned outgoing position to start the blend at (otherwise the next beat)
   targetEntryTime?: number; // planned incoming start position (otherwise hook cue / first beat)
   filterSweep?: boolean; // keys clash: the outgoing song leaves through a rising high-pass
+  gapCut?: boolean; // the old song stopped after a high point: cut in on the beat, no blend, no echo
+  exitFx?: ExitFx; // how the old song leaves on a cut (see AudioEngine.chooseExitFx)
 }
+
+/**
+ * How the old song leaves when the mix is a cut rather than a blend:
+ * roll = a loop roll build that the new song lands on, brake = a vinyl stop,
+ * reverb = a reverb wash, echo = a beat-timed echo-out.
+ */
+export type ExitFx = 'roll' | 'brake' | 'reverb' | 'echo';
 
 /** A mix that has been planned for a good moment but hasn't started yet. */
 export interface PendingMixInfo {
@@ -135,6 +146,7 @@ export interface QueuedTrack {
   musicEndTime?: number;
   outroReason?: string;
   hooks?: SongHook[];
+  peakTime?: number;
   energyProfile?: EnergyProfile;
   // Key-locked tempo lock (Party mood): the song as downloaded, and the tempo it was stretched to
   originalBuffer?: AudioBuffer;

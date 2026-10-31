@@ -9,8 +9,14 @@
  * with a calm, vocal-light intro, timed so the energy rise (drop / hook) lands right
  * when the blend finishes.
  *
+ * Gap: when the outgoing song stops dead after a high point (a fraction of a second to a few
+ * seconds of silence before it comes back), that silence is an exit of its own: the old song
+ * plays into its stop and the new song comes in on the beat where the old one would have come
+ * back, with no overlap at all. It works whatever the tempos and keys.
+ *
  * Pair: the exit and the entry are chosen together, so the stretches that overlap in the blend
- * don't both carry vocals (two singers at once is the clearest sign of a bad mix).
+ * don't both carry vocals (two singers at once is the clearest sign of a bad mix). When every
+ * pair still has both singing (`vocalClash`), the mixer doesn't force a blend: it cuts quickly.
  *
  * Best Parts mode (MIXING_RULES.md "Best Parts Mode") narrows both: the exit comes no earlier
  * than `earliestExit` (after the outgoing hook has played) and the entry lies in `entryRange`
@@ -33,6 +39,7 @@ export interface MixSongInfo {
   downbeat: number; // time of a bar downbeat ("1")
   duration: number;
   hookTime?: number;
+  hookTimes?: number[]; // every hook (each chorus, a drop): an exit never fades out over one
   musicStartTime?: number; // point where music starts, skipping conversation/skit
   title?: string;
   artist?: string;
@@ -44,12 +51,17 @@ export interface MixOption {
   why: string;
   score: number;
   vocals?: number; // 0 = instrumental, 1 = vocal-heavy, over the blend window (see vocalActivity)
+  gap?: boolean; // an exit into the silence after a high point: a cut, no blend
 }
 
 // Pairs where both songs sing during the blend lose this much (an 8-bar phrase start is worth 1).
 // On 24 real song pairs it halved the blends with two vocals at once (10 -> 5); higher removed
 // no more (the rest had vocals in every candidate window) and cost more phrase/energy score.
 const VOCAL_OVERLAP_PENALTY = 3;
+
+// Both sides at least ~0.7 vocal over the blend (0.7 × 0.7): two singers or two leads at once.
+// A blend would only muddy both, so the mixer cuts quickly instead (MIXING_RULES.md rule 8).
+const VOCAL_CLASH_LEVEL = 0.5;
 
 /**
  * Vocal activity over [from, to]: the 300 Hz–3 kHz band's share of the loudness there, relative
@@ -65,12 +77,48 @@ function vocalActivity(profile: EnergyProfile, from: number, to: number, songSha
 }
 
 export interface MixPlan {
-  exitTime: number; // outgoing song position where the blend starts (a bar start)
+  exitTime: number; // outgoing song position where the blend starts (a bar start), or where the new song cuts in after a gap
+  style: 'blend' | 'gap'; // 'gap': cut into the silence after a high point (see the top of this file)
   entryTime: number; // incoming song position it starts from (a bar start)
   reason: string; // short human explanation for the status line
   // The best rule-abiding alternatives (best first), for the AI DJ to choose between
   exitOptions: MixOption[];
   entryOptions: MixOption[];
+}
+
+// A gap: quieter than GAP_LEVEL × the song's average loudness for GAP_MIN–GAP_MAX seconds, right
+// after 2 bars at least as loud as its average (a high point), with the music coming back after
+const GAP_LEVEL = 0.15;
+const GAP_MIN_SECONDS = 0.3;
+const GAP_MAX_SECONDS = 4;
+// A gap exit is worth more than an 8-bar phrase start (1) plus a drop into a calmer section:
+// a stop after a high point is the cleanest place there is to change songs
+const GAP_SCORE = 2.5;
+
+/**
+ * Silences after a high point that start in [from, to] (song seconds): where each starts and
+ * where the music comes back.
+ */
+export function findGaps(song: MixSongInfo, from: number, to: number): Array<{ start: number; end: number }> {
+  const { full, rate } = song.profile;
+  const mean = songMean(full) || 1;
+  const bar = 240 / song.bpm;
+  const quiet = (i: number) => full[i] < GAP_LEVEL * mean;
+  const gaps: Array<{ start: number; end: number }> = [];
+  const last = Math.min(full.length - 1, Math.ceil(to * rate));
+  for (let i = Math.max(1, Math.floor(from * rate)); i <= last; i++) {
+    if (!quiet(i) || quiet(i - 1)) continue;
+    let j = i;
+    while (j < full.length && quiet(j)) j++;
+    const start = i / rate;
+    const end = j / rate;
+    const length = end - start;
+    const comesBack = j < full.length && average(full, rate, end, end + bar) >= 0.5 * mean;
+    const highPoint = average(full, rate, start - 2 * bar, start) >= mean;
+    if (length >= GAP_MIN_SECONDS && length <= GAP_MAX_SECONDS && comesBack && highPoint) gaps.push({ start, end });
+    i = j;
+  }
+  return gaps;
 }
 
 /** Top `count` options, dropping any scoring far below the best (those break the rules). */
@@ -168,8 +216,8 @@ export function planMix(params: {
   let exits = barStarts(out, Math.max(exitFrom, params.earliestExit ?? 0), exitLatest);
   // The window may have closed (e.g. no song was ready in time): then the next good bar from here
   if (exits.length === 0 && params.earliestExit !== undefined) exits = barStarts(out, exitFrom, exitLatest);
-  if (exits.length === 0) return null;
 
+  const outHooks = out.hookTimes ?? (out.hookTime !== undefined ? [out.hookTime] : []);
   const exitOptions: MixOption[] = [];
   for (const candidate of exits) {
     const t = candidate.time;
@@ -179,7 +227,7 @@ export function planMix(params: {
     const sectionChange = Math.abs(after - before) / (Math.max(before, after) || 1);
     const calm = Math.max(-1, Math.min(1, 1 - avg(t, t + outBlend) / outMean));
     const vocals = average(out.profile.mid, out.profile.rate, t, t + outBlend) / outMidMean;
-    const overHook = out.hookTime !== undefined && out.hookTime > t - 4 && out.hookTime < t + outBlend;
+    const overHook = outHooks.some((h) => h > t - 4 && h < t + outBlend);
 
     // Dropping into a calmer section (breakdown, outro) is the classic exit; jumping into a
     // louder one (a chorus) is weaker since the blend would throw that chorus away
@@ -204,6 +252,19 @@ export function planMix(params: {
             : 'bar boundary') + (vocals > 1.2 ? ', vocal-heavy' : vocals < 0.8 ? ', few vocals' : '');
     exitOptions.push({ time: t, why, score, vocals: vocalActivity(out.profile, t, t + outBlend, outShare) });
   }
+
+  // Gaps: the new song cuts in on the beat where the old one would come back
+  const beat = 60 / out.bpm;
+  for (const gap of findGaps(out, Math.max(exitFrom, params.earliestExit ?? 0) - 0.5, Math.min(outPosition + params.lookAheadSeconds, out.duration - 1))) {
+    const t = out.downbeat + Math.round((gap.end - out.downbeat) / beat) * beat;
+    if (t <= gap.start || t < exitFrom) continue;
+    // A stop right before a chorus is a build-up to it: the crowd is waiting for that chorus
+    if (outHooks.some((h) => h >= gap.start && h < t + 2 * outBar)) continue;
+    const score = GAP_SCORE - 0.01 * (t - outPosition);
+    const why = `current song stops after a high point (${(gap.end - gap.start).toFixed(1)} s of silence): the new song comes in where it would come back`;
+    exitOptions.push({ time: t, why, score, vocals: 0, gap: true });
+  }
+  if (exitOptions.length === 0) return null;
 
   // --- Entry point in the incoming song ---
   const incMean = songMean(inc.profile.full) || 1;
@@ -274,8 +335,18 @@ export function planMix(params: {
   return {
     exitTime: best.exit.time,
     entryTime: best.entry.time,
+    style: best.exit.gap ? 'gap' : 'blend',
     reason: `${best.exit.why}; new song enters ${best.entry.why}${vocalNote}`,
     exitOptions: bestExits,
     entryOptions: bestEntries,
   };
+}
+
+/** Whether the plan's chosen exit and entry both carry strong vocals or leads over the blend. */
+export function vocalClash(plan: Pick<MixPlan, 'exitTime' | 'entryTime' | 'exitOptions' | 'entryOptions'>): boolean {
+  const at = (options: MixOption[], t: number) => options.find((o) => Math.abs(o.time - t) < 0.01);
+  const exit = at(plan.exitOptions, plan.exitTime);
+  const entry = at(plan.entryOptions, plan.entryTime);
+  if (!exit || !entry || exit.gap) return false;
+  return (exit.vocals ?? 0) * (entry.vocals ?? 0) >= VOCAL_CLASH_LEVEL;
 }

@@ -29,6 +29,7 @@ export interface AnalysisFields {
   musicEndTime?: number;
   outroReason?: string;
   hooks?: SongHook[];
+  peakTime?: number;
   key?: string;
   keyConfidence?: number;
   loudnessDb?: number;
@@ -37,7 +38,7 @@ export interface AnalysisFields {
 
 export const ANALYSIS_FIELDS = [
   'bpm', 'bpmConfidence', 'firstDownbeatTime', 'highlightTime', 'cueInTime', 'highlightSource',
-  'highlightIntensity', 'musicStartTime', 'introSkipReason', 'musicEndTime', 'outroReason', 'hooks',
+  'highlightIntensity', 'musicStartTime', 'introSkipReason', 'musicEndTime', 'outroReason', 'hooks', 'peakTime',
   'key', 'keyConfidence', 'loudnessDb', 'energyProfile',
 ] as const satisfies readonly (keyof AnalysisFields)[];
 
@@ -79,6 +80,8 @@ export function runAnalysis(buffer: AudioBuffer, f: AnalysisFields, strict: bool
     f.highlightSource = highlight.source;
     f.highlightIntensity = highlight.intensity;
   }
+  // The most-loved moment, kept even when the first chorus becomes the hook below
+  if (f.peakTime === undefined) f.peakTime = f.highlightTime;
 
   // Skip a spoken intro (dialogue, movie scene, skit) and start where the music begins.
   // Decided from the audio: a talking opening (speech-like, no beat) is skipped, a musical one is kept.

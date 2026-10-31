@@ -10,8 +10,19 @@ export const MIN_PLAYBACK_RATE = 0.5;
 export const MAX_PLAYBACK_RATE = 1.5;
 const SWAP_FADE_SECONDS = 0.04;
 
+// Reverb wash: a ~3.5 s synthetic room tail, fed above 250 Hz so the wash doesn't muddy the new bass
+const REVERB_SECONDS = 3.5;
+const REVERB_LOW_CUT_HZ = 250;
+const REVERB_FEED_BEATS = 4; // the song is fed into the reverb over its last 4 beats...
+const REVERB_SEND = 3; // ...this hard (the normalised room spreads it thinly over 3.5 s)
+// Loop roll: the bar at the exit point repeats in ever shorter slices (beats per slice × count),
+// 8 beats in all, under a rising filter and a white-noise riser, then the new song hits
+const ROLL_PATTERN: Array<[number, number]> = [[1, 4], [0.5, 4], [0.25, 8]];
+const ROLL_NOISE_PEAK = 0.12;
+const ROLL_SWEEP_HZ = 400; // the roll's rising filter stops here: clears the bass for the new kick, keeps the punch
+
 const SWEEP_OPEN_HZ = 10;
-const SWEEP_CLOSED_HZ = 1500;
+const SWEEP_CLOSED_HZ = 1000;
 
 export class VirtualDeck {
   public readonly id: DeckId;
@@ -39,6 +50,10 @@ export class VirtualDeck {
   private fxDelay: DelayNode;
   private fxFeedback: GainNode;
   private fxFilter: BiquadFilterNode;
+  private fxOut: AudioNode; // where effect tails go: past the crossfader, so they ring on after the song is faded out
+  private reverbSend: GainNode;
+  private reverbReady = false;
+  private rollSource: AudioBufferSourceNode | null = null; // a loop roll playing in place of the song
   private sweepFilter: BiquadFilterNode; // high-pass for a filter-sweep exit; open (10 Hz) otherwise
 
   // Playback State
@@ -125,6 +140,10 @@ export class VirtualDeck {
     this.fxFeedback.connect(this.fxDelay);
     this.fxDelay.connect(this.fxFilter);
     this.fxFilter.connect(fxDestination ?? destinationNode);
+    this.fxOut = fxDestination ?? destinationNode;
+    this.reverbSend = this.ctx.createGain();
+    this.reverbSend.gain.value = 0;
+    this.gainNode.connect(this.reverbSend);
   }
 
   /**
@@ -155,6 +174,107 @@ export class VirtualDeck {
     // High-pass sweep: the echo thins out as it fades, leaving room for the new song's bass
     cutoff.setValueAtTime(300, feedStart);
     cutoff.exponentialRampToValueAtTime(3000, cutTime + tail);
+  }
+
+  /**
+   * Reverb wash for a cut at `cutTime`: over the last 4 beats the song is fed into a long reverb,
+   * whose tail washes on for ~3.5 s under the new song. Suits songs whose tempos can't be matched
+   * (a rhythmic echo would clash with the new beat) and calm moods.
+   */
+  public scheduleReverbWash(cutTime: number, beatSeconds: number) {
+    if (!this.reverbReady) {
+      const lowCut = this.ctx.createBiquadFilter();
+      lowCut.type = 'highpass';
+      lowCut.frequency.value = REVERB_LOW_CUT_HZ;
+      const reverb = this.ctx.createConvolver();
+      reverb.buffer = VirtualDeck.reverbImpulse(this.ctx, REVERB_SECONDS);
+      this.reverbSend.connect(lowCut);
+      lowCut.connect(reverb);
+      reverb.connect(this.fxOut);
+      this.reverbReady = true;
+    }
+    const now = this.ctx.currentTime;
+    const feedStart = Math.max(now, cutTime - REVERB_FEED_BEATS * Math.max(0.2, Math.min(1, beatSeconds)));
+    const send = this.reverbSend.gain;
+    send.cancelScheduledValues(now);
+    send.setValueAtTime(0, feedStart);
+    send.linearRampToValueAtTime(REVERB_SEND, cutTime);
+    send.linearRampToValueAtTime(0, cutTime + 0.15);
+  }
+
+  /** A stereo room impulse: decaying noise, a little different per ear. */
+  private static reverbImpulse(ctx: BaseAudioContext, seconds: number): AudioBuffer {
+    const length = Math.round(ctx.sampleRate * seconds);
+    const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const data = impulse.getChannelData(c);
+      for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 3) * 0.5;
+    }
+    return impulse;
+  }
+
+  /**
+   * Brake (vinyl stop) over [startTime, startTime + seconds]: the song slows to a halt, pitch
+   * falling with it, as if the turntable's power were cut. False when it can't (a stream).
+   */
+  public scheduleBrake(startTime: number, seconds: number): boolean {
+    if (!this.sourceNode || !this.sourceGain || this.isStreaming()) return false;
+    const rate = this.sourceNode.playbackRate;
+    rate.cancelScheduledValues(this.ctx.currentTime);
+    rate.setValueAtTime(this.playbackRate, startTime);
+    rate.linearRampToValueAtTime(0.05, startTime + seconds);
+    const gain = this.sourceGain.gain;
+    gain.setValueAtTime(1, startTime + seconds * 0.6);
+    gain.linearRampToValueAtTime(0, startTime + seconds);
+    return true;
+  }
+
+  /**
+   * Loop roll from `startTime`: the bar there repeats in slices of 1, ½ and ¼ beat (ROLL_PATTERN),
+   * 8 beats in all, through a rising high-pass and over a white-noise riser: a build that the
+   * new song lands on. Returns how long it lasts (seconds), or 0 when it can't (a stream).
+   */
+  public scheduleLoopRoll(startTime: number, beatSeconds: number): number {
+    const buffer = this.track?.audioBuffer;
+    if (!this.sourceNode || !buffer || this.isStreaming()) return 0;
+    const rate = this.playbackRate;
+    const songTime = this.getCurrentTime() + (startTime - this.ctx.currentTime) * rate;
+    const sr = buffer.sampleRate;
+    const beatSamples = Math.round(beatSeconds * rate * sr); // one beat of the song's own audio
+    const start = Math.round(songTime * sr);
+    if (start < 0 || start + beatSamples >= buffer.length) return 0;
+
+    const total = ROLL_PATTERN.reduce((sum, [beats, count]) => sum + Math.round(beats * beatSamples) * count, 0);
+    const roll = this.ctx.createBuffer(buffer.numberOfChannels, total, sr);
+    const fade = Math.round(0.003 * sr); // 3 ms edges: no clicks between slices
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      const src = buffer.getChannelData(c);
+      const out = roll.getChannelData(c);
+      let at = 0;
+      for (const [beats, count] of ROLL_PATTERN) {
+        const len = Math.round(beats * beatSamples);
+        for (let k = 0; k < count; k++, at += len) {
+          for (let i = 0; i < len; i++) {
+            const edge = Math.min(1, i / fade, (len - i) / fade);
+            out[at + i] = src[start + i] * edge;
+          }
+        }
+      }
+      // White-noise riser: silent at the start, loudest as the new song lands
+      for (let i = 0; i < total; i++) out[i] += (Math.random() * 2 - 1) * ROLL_NOISE_PEAK * Math.pow(i / total, 2);
+    }
+
+    const seconds = total / sr / rate;
+    const source = this.ctx.createBufferSource();
+    source.buffer = roll;
+    source.playbackRate.value = rate;
+    source.connect(this.lowFilter);
+    this.sourceNode.stop(startTime);
+    source.start(startTime);
+    source.stop(startTime + seconds);
+    this.rollSource = source;
+    this.scheduleFilterSweepOut(startTime, startTime + seconds, ROLL_SWEEP_HZ);
+    return seconds;
   }
 
   public async loadAudioFile(file: File): Promise<TrackMetadata> {
@@ -528,16 +648,16 @@ export class VirtualDeck {
   }
 
   /**
-   * Filter-sweep exit: the high-pass rises from open to ~1.5 kHz between startTime and endTime,
-   * so the outgoing song thins to a hiss and gets out of the way instead of its harmony
+   * Filter-sweep exit: the high-pass rises steadily (linearly) from open to 1 kHz over the blend,
+   * so the outgoing song's bass and chords thin out while the new song comes in, instead of its harmony
    * rubbing against a new song in a key that doesn't fit.
    */
-  public scheduleFilterSweepOut(startTime: number, endTime: number) {
+  public scheduleFilterSweepOut(startTime: number, endTime: number, toHz: number = SWEEP_CLOSED_HZ) {
     const f = this.sweepFilter.frequency;
     f.cancelScheduledValues(this.ctx.currentTime);
     f.setValueAtTime(SWEEP_OPEN_HZ, this.ctx.currentTime);
     f.setValueAtTime(SWEEP_OPEN_HZ, startTime);
-    f.exponentialRampToValueAtTime(SWEEP_CLOSED_HZ, endTime);
+    f.linearRampToValueAtTime(toHz, endTime);
   }
 
   /** Opens the sweep filter again (after a mix, or when a mix is cancelled). */
@@ -718,6 +838,15 @@ export class VirtualDeck {
   }
 
   private stopSource() {
+    if (this.rollSource) {
+      try {
+        this.rollSource.stop();
+      } catch {
+        // Already finished
+      }
+      this.rollSource.disconnect();
+      this.rollSource = null;
+    }
     if (this.sourceNode) {
       try {
         this.sourceNode.stop();

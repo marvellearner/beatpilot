@@ -16,6 +16,7 @@ import {
   BannedSong,
   TempoInfo,
   PlayLogEntry,
+  ExitFx,
 } from '../types';
 import {
   keyCompatibility,
@@ -24,7 +25,7 @@ import {
 } from './KeyDetector';
 import { loudnessGainDb } from './Loudness';
 import { DeckCues } from './engine/DeckCues';
-import { planMix, MixPlan, MixSongInfo } from './MixPointPlanner';
+import { planMix, vocalClash, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
 import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dSong, isMashupSong, type SongRef } from './songMatch';
@@ -75,6 +76,15 @@ const MAX_INCOMING_SHIFT = 0.04; // sudden speed change applied to the incoming 
 const MAX_OUTGOING_RAMP = 0.08; // gradual ramp of the outgoing song before an auto-mix
 const MIN_BEATMATCH_CONFIDENCE = 0.6;
 const UNMATCHED_TRANSITION_SECONDS = 2; // tempos too far apart: short cut on the beat, no long flam
+const GAP_CUT_SECONDS = 0.08; // a gap exit: the old song is silent there, so the swap is near instant
+const KEY_CLASH_MAX_BARS = 8; // blend length cap when the keys don't fit perfectly
+// Show-off exits (loop roll, brake) at most once every this many mixes: the research is unanimous
+// that effects stop working when they're on every transition
+const SHOW_FX_EVERY = 4;
+const ROLL_LOUDER_DB = 1.5; // a loop roll builds into a song at least this much louder (or a favourite)
+// Set flow breathers: a song this much quieter than the one before it gave the floor a rest
+const BREATHER_STEP_DB = 1.5;
+const ON_AIR_LOUDNESS_MAX = 12;
 const MANUAL_MIX_LOOKAHEAD_SECONDS = 45; // Mix / Next: find the best blend point within the next 45 s per MIXING_RULES.md
 const OUTRO_PLAN_SECONDS = 45; // auto-mix: plan the blend point within the last 45 s
 // Ask the AI DJ this much earlier than that: on a CPU model the next-song pick plus the mix
@@ -268,6 +278,8 @@ export class AudioEngine {
   private lastRecordedTrackId: string | null = null;
   private topBangersCache: { key: string; raw: SongHistoryItem[]; list: SongHistoryItem[] } | null = null;
 
+  private mixesSinceShowFx = SHOW_FX_EVERY; // mixes since the last loop roll / brake
+  private onAirLoudness: Array<{ id: string; db: number }> = []; // newest first, for set-flow breathers
   // A mix waiting for its planned blend point (the song is out of the queue meanwhile)
   private pendingMix: {
     item: QueuedTrack;
@@ -865,6 +877,7 @@ export class AudioEngine {
       musicStartTime: track.musicStartTime,
       musicEndTime: track.musicEndTime,
       hooks: track.hooks,
+      peakTime: track.peakTime,
     };
     track.tempoRatio = 1;
   }
@@ -884,6 +897,7 @@ export class AudioEngine {
     track.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / bufferRatio : undefined;
     track.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / bufferRatio : undefined;
     track.hooks = original.hooks?.map((h) => ({ ...h, time: h.time / bufferRatio }));
+    track.peakTime = original.peakTime !== undefined ? original.peakTime / bufferRatio : undefined;
     track.energyProfile = undefined; // recomputed from the new audio when a mix is planned
     deck.replaceAudio(track, naturalPosition / bufferRatio);
   }
@@ -941,6 +955,7 @@ export class AudioEngine {
         musicStartTime: item.musicStartTime,
         musicEndTime: item.musicEndTime,
         hooks: item.hooks,
+        peakTime: item.peakTime,
       };
     }
     const original = item.original;
@@ -954,7 +969,7 @@ export class AudioEngine {
       } else {
         // Back to the natural tempo
         item.audioBuffer = item.originalBuffer;
-        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime, musicEndTime: original.musicEndTime, hooks: original.hooks });
+        Object.assign(item, { bpm: original.bpm, duration: original.duration, firstDownbeatTime: original.firstDownbeatTime, highlightTime: original.highlightTime, cueInTime: original.cueInTime, musicStartTime: original.musicStartTime, musicEndTime: original.musicEndTime, hooks: original.hooks, peakTime: original.peakTime });
         item.energyProfile = undefined;
         item.tempoLockedTo = undefined;
       }
@@ -979,6 +994,7 @@ export class AudioEngine {
       item.musicStartTime = original.musicStartTime !== undefined ? original.musicStartTime / ratio : undefined;
       item.musicEndTime = original.musicEndTime !== undefined ? original.musicEndTime / ratio : undefined;
       item.hooks = original.hooks?.map((h) => ({ ...h, time: h.time / ratio }));
+      item.peakTime = original.peakTime !== undefined ? original.peakTime / ratio : undefined;
       item.energyProfile = undefined; // recomputed from the tuned audio when needed
       item.tempoLockedTo = target;
     } catch (err) {
@@ -1153,13 +1169,14 @@ export class AudioEngine {
       .reduce((best, rate) => (Math.abs(rate - 1) < Math.abs(best - 1) ? rate : best));
   }
 
+  /**
+   * Whether the two can be blended: the same rule the mix itself applies (computeBeatmatchRate,
+   * at the outgoing song's actual playing tempo), so a planned blend never turns into a cut.
+   */
   private canBeatmatch(out: TrackMetadata, inc: { bpm?: number; bpmConfidence?: number }): boolean {
-    if ((out.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE || (inc.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE) {
-      return false;
-    }
-    const gap = Math.abs(this.closestTempoRatio(out.bpm, inc.bpm ?? 128) - 1);
-    // Hard limit: never beatmatch if required shift exceeds ±16% per MIXING_RULES.md
-    return gap <= BPM_LIMITS.MAX_PERMITTED_PCT;
+    const deck = [this.deckA, this.deckB].find((d) => d.getTrack() === out);
+    const outBpm = deck ? deck.getPlaybackState().effectiveBpm : out.bpm;
+    return this.computeBeatmatchRate(outBpm, out.bpmConfidence ?? 0, { bpm: inc.bpm ?? 128, bpmConfidence: inc.bpmConfidence }).matched;
   }
 
   // --- Planned mixes: blend at the best point instead of immediately ---
@@ -1187,6 +1204,7 @@ export class AudioEngine {
       downbeat: track.firstDownbeatTime ?? 0,
       duration: Math.min(track.duration, track.musicEndTime ?? track.duration),
       hookTime: track.highlightTime,
+      hookTimes: track.hooks?.map((h) => h.time),
       musicStartTime: track.musicStartTime,
       title: track.title,
       artist: track.artist,
@@ -1196,13 +1214,16 @@ export class AudioEngine {
 
   /**
    * Best Parts mode: the stretch of the on-air song to mix out in (song seconds): from a full
-   * chorus after its hook to 16 bars later. Null when the mode is off, the song is short, its
+   * chorus after its best part to 16 bars later. The best part is the later of its first chorus
+   * (the hook) and its most-loved moment (most replayed, else loudest), so a song whose first
+   * chorus comes early still plays its peak. Null when the mode is off, the song is short, its
    * hook isn't known yet, or the window would run into the song's own outro (then it plays out).
    */
   private bestPartExitWindow(track: TrackMetadata): { from: number; to: number } | null {
     if (!this.bestPartsMode || track.highlightTime === undefined || !track.bpm || track.duration < BEST_PART_MIN_SONG_SECONDS) return null;
     const bar = 240 / track.bpm;
-    const from = track.highlightTime + BEST_PART_HOOK_BARS * bar;
+    const bestPart = Math.max(track.highlightTime, track.peakTime ?? track.highlightTime);
+    const from = bestPart + BEST_PART_HOOK_BARS * bar;
     const to = from + BEST_PART_EXIT_BARS * bar;
     return to < this.musicEnd(track) - OUTRO_PLAN_SECONDS / 2 ? { from, to } : null;
   }
@@ -1262,8 +1283,9 @@ export class AudioEngine {
     const outInfo = outTrack ? this.mixSongInfo(outTrack) : null;
     const incInfo = this.mixSongInfo(incoming);
     const keyFit = outTrack ? this.keyFit(outTrack, outState.playbackRate, incoming) : 'unknown';
-    // Clashing keys: keep the overlap to 4 bars so the harmonies never sit on top of each other long
-    const maxBars = keyFit === 'clash' || keyFit === 'ok' ? 4 : this.blendBars();
+    // Keys that don't fit perfectly: at most 8 bars (a clash also leaves through a filter sweep,
+    // so its harmonies are thinned out instead of the blend being cut short)
+    const maxBars = this.keyBlendBars(keyFit, this.blendBars());
     const blendBeats = outTrack && this.canBeatmatch(outTrack, incoming) ? maxBars * 4 : 4;
     const plan =
       outTrack && outInfo && incInfo
@@ -1296,7 +1318,7 @@ export class AudioEngine {
       durationSeconds,
       timer: 0,
       keyFit,
-      blendBars: keyFit === 'clash' || keyFit === 'ok' ? 4 : undefined,
+      blendBars: keyFit === 'clash' || keyFit === 'ok' ? maxBars : undefined,
       harmonicShift,
     };
     this.schedulePendingMix();
@@ -1304,7 +1326,8 @@ export class AudioEngine {
     const shiftTag = harmonicCompat ? ` [${harmonicCompat.badgeText}]` : '';
     // Say when the song's ending (a closing scene, dialogue, fade) is being skipped
     const outroTag = outTrack?.outroReason && outTrack.musicEndTime !== undefined && plan.exitTime < outTrack.duration - 5 ? ` (${outTrack.outroReason})` : '';
-    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag}: ${plan.reason}${outroTag}. Click Mix Now to mix immediately.`;
+    const cutTag = !durationSeconds && vocalClash(plan) ? '; both songs sing here, so a quick cut' : '';
+    this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag}: ${plan.reason}${outroTag}${cutTag}. Click Mix Now to mix immediately.`;
     this.notify();
 
     if (!outTrack || durationSeconds) return true;
@@ -1497,9 +1520,50 @@ export class AudioEngine {
       recentArtists: log.slice(1, 3).map((e) => e.artist),
       languageRun: Math.max(1, languageRun),
       danceFloor: this.mood === 'party' || this.mood === 'bhangra',
+      peakRun: this.peakRun(current),
     });
     if (reason) this.lastAiDecision = `Next: "${pick.title}" — ${reason}`;
     return pick.item;
+  }
+
+  /**
+   * Songs on air in a row (newest first, incl. `current`) without a step down in energy: a song
+   * at least BREATHER_STEP_DB quieter than the one before it was a breather and ends the run.
+   */
+  private peakRun(current: TrackMetadata): number {
+    if (current.loudnessDb === undefined) return 0;
+    if (this.onAirLoudness[0]?.id !== current.id) {
+      this.onAirLoudness = [{ id: current.id, db: current.loudnessDb }, ...this.onAirLoudness].slice(0, ON_AIR_LOUDNESS_MAX);
+    }
+    const songs = this.onAirLoudness;
+    let run = 0;
+    while (run < songs.length && !(run + 1 < songs.length && songs[run].db < songs[run + 1].db - BREATHER_STEP_DB)) run++;
+    return run;
+  }
+
+  /**
+   * How the old song leaves (MIXING_RULES.md "Ways to Mix"), or undefined for a plain blend:
+   * - Tempos match: a loop roll build into a bigger song on a dance floor (now and then);
+   *   otherwise a blend (with a filter sweep when the keys clash).
+   * - Tempos can't match: a reverb wash in a calm mood (an echo would fight the new beat), a
+   *   brake on a dance floor (now and then), else a beat-timed echo-out.
+   */
+  private chooseExitFx(out: TrackMetadata, inc: TrackMetadata, keyFit: string | undefined, aiCut: boolean): ExitFx | undefined {
+    const danceFloor = this.mood === 'party' || this.mood === 'bhangra';
+    const calm = this.mood === 'chill' || this.mood === 'romantic';
+    const showFxOk = this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
+    const bigger = (inc.loudnessDb ?? 0) - (out.loudnessDb ?? 0) >= ROLL_LOUDER_DB || this.isFavorite(inc);
+    if (this.canBeatmatch(out, inc) && !aiCut) {
+      return danceFloor && showFxOk && bigger && keyFit !== 'good' ? 'roll' : undefined;
+    }
+    if (calm) return 'reverb';
+    if (danceFloor && showFxOk) return 'brake';
+    return 'echo';
+  }
+
+  /** Blend length for a key fit: keys that don't fit perfectly get at most KEY_CLASH_MAX_BARS. */
+  private keyBlendBars(keyFit: 'good' | 'ok' | 'clash' | 'unknown' | undefined, bars: number): number {
+    return keyFit === 'clash' || keyFit === 'ok' ? Math.min(KEY_CLASH_MAX_BARS, bars) : bars;
   }
 
   /** Switches a planned mix to the AI DJ's exit/entry points and style, if there's still time. */
@@ -1515,7 +1579,7 @@ export class AudioEngine {
       reason: `🤖 ${choice.reason}`,
     };
     pending.style = choice.style;
-    pending.blendBars = pending.keyFit === 'clash' || pending.keyFit === 'ok' ? Math.min(4, choice.bars) : choice.bars;
+    pending.blendBars = this.keyBlendBars(pending.keyFit, choice.bars);
     this.schedulePendingMix();
 
     const startsIn = Math.round(this.pendingMixStartsIn() ?? 0);
@@ -1585,7 +1649,17 @@ export class AudioEngine {
 
     // AI DJ choices: a cut, or a blend of its chosen length (at the outgoing tempo)
     let durationSeconds = pending.durationSeconds;
-    if (durationSeconds === undefined && pending.style === 'cut') {
+    const gapCut = !exitNow && !!pending.plan.exitOptions.find((o) => Math.abs(o.time - pending.plan.exitTime) < 0.01)?.gap;
+    // Both songs sing (or carry a lead) over even the best blend: don't force it, cut quickly
+    // (a length the user chose for this mix still applies)
+    const vocalCut = !exitNow && !gapCut && pending.durationSeconds === undefined && vocalClash(pending.plan);
+    const quickCut = pending.style === 'cut' || vocalCut;
+    const outTrack = onAir.getTrack();
+    const exitFx = gapCut || !outTrack ? undefined : this.chooseExitFx(outTrack, this.queuedItemToTrack(pending.item), pending.keyFit, quickCut);
+    this.mixesSinceShowFx = exitFx === 'roll' || exitFx === 'brake' ? 0 : this.mixesSinceShowFx + 1;
+    if (gapCut || exitFx === 'roll' || exitFx === 'brake') {
+      durationSeconds = GAP_CUT_SECONDS;
+    } else if (durationSeconds === undefined && quickCut) {
       durationSeconds = UNMATCHED_TRANSITION_SECONDS;
     } else if (durationSeconds === undefined && pending.blendBars) {
       durationSeconds = Math.max(4, Math.min(40, (pending.blendBars * 4 * 60) / onAir.getPlaybackState().effectiveBpm));
@@ -1602,8 +1676,14 @@ export class AudioEngine {
       style: 'bass_swap',
       sourceExitTime: exitNow ? undefined : pending.plan.exitTime,
       targetEntryTime: isStrict ? 0 : pending.plan.entryTime,
-      filterSweep: pending.keyFit === 'clash',
+      filterSweep: pending.keyFit === 'clash' && !gapCut && !exitFx && !quickCut,
+      gapCut,
+      exitFx,
     });
+    if (vocalCut) {
+      this.acquisitionStatus += ' Both songs sing here, so a quick cut instead of a blend.';
+      this.notify();
+    }
   }
 
   /** Drops a planned mix and puts its song back at the front of the queue. */
@@ -2410,6 +2490,7 @@ export class AudioEngine {
           musicStartTime: track.musicStartTime,
           musicEndTime: track.musicEndTime,
           hooks: track.hooks,
+      peakTime: track.peakTime,
           introSkipReason: track.introSkipReason,
           bpm: track.bpm,
           bpmConfidence: track.bpmConfidence,
@@ -2456,6 +2537,7 @@ export class AudioEngine {
         musicStartTime: t.musicStartTime,
         musicEndTime: t.musicEndTime,
         hooks: t.hooks,
+        peakTime: t.peakTime,
         introSkipReason: t.introSkipReason,
         bpm: t.bpm || 128,
         bpmConfidence: t.bpmConfidence ?? 0.8,
@@ -2530,6 +2612,7 @@ export class AudioEngine {
         introSkipReason: q.introSkipReason,
         musicEndTime: q.musicEndTime,
         hooks: q.hooks,
+        peakTime: q.peakTime,
         outroReason: q.outroReason,
         status: (q.status === 'ready' || q.status === 'queued') ? 'queued' : q.status,
         isAiRecommended: q.isAiRecommended,
@@ -2979,7 +3062,7 @@ export class AudioEngine {
     const unmeasured = track.bpmConfidence === undefined || !track.bpm;
     for (const [name, value] of Object.entries(saved)) {
       const field = name as keyof typeof saved;
-      const highlight = field === 'highlightTime' || field === 'cueInTime' || field === 'highlightSource' || field === 'highlightIntensity';
+      const highlight = field === 'highlightTime' || field === 'cueInTime' || field === 'highlightSource' || field === 'highlightIntensity' || field === 'peakTime';
       if (track[field] === undefined || (hooksDecide && highlight)) (track as unknown as Record<string, unknown>)[field] = value;
     }
     if (unmeasured && saved.bpm && saved.bpmConfidence !== undefined) {
@@ -3019,6 +3102,7 @@ export class AudioEngine {
     item.musicEndTime = track.musicEndTime;
     item.outroReason = track.outroReason;
     item.hooks = track.hooks;
+    item.peakTime = track.peakTime;
     item.energyProfile = track.energyProfile;
     item.key = track.key;
     item.keyConfidence = track.keyConfidence;
@@ -3508,6 +3592,7 @@ export class AudioEngine {
       musicStartTime: isStrict ? 0 : item.musicStartTime,
       musicEndTime: item.musicEndTime,
       hooks: item.hooks,
+      peakTime: item.peakTime,
       outroReason: item.outroReason,
       introSkipReason: isStrict ? undefined : item.introSkipReason,
       energyProfile: item.energyProfile,
@@ -3938,7 +4023,7 @@ export class AudioEngine {
    * Picks the playback rate that beatmatches the incoming track, trying half/double-time.
    * Returns rate 1 (natural pitch) when either BPM is unreliable or the shift would be audible.
    */
-  private computeBeatmatchRate(sourceBpm: number, sourceConfidence: number, target: TrackMetadata) {
+  private computeBeatmatchRate(sourceBpm: number, sourceConfidence: number, target: { bpm: number; bpmConfidence?: number }) {
     if (sourceConfidence < MIN_BEATMATCH_CONFIDENCE || (target.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE) {
       return { rate: 1, matched: false };
     }
@@ -4008,6 +4093,7 @@ export class AudioEngine {
     // Without this, even two songs at identical BPM have kicks that clash (flam).
     // A planned mix starts at its chosen bar of the outgoing song and its chosen entry point.
     let startTime = this.ctx.currentTime + 0.05;
+    let appliedFx: ExitFx | undefined;
     const isSourcePlaying = sourceState.isPlaying && !!sourceState.track;
     if (!targetDeck.getPlaybackState().isPlaying) {
       // Never start from hook because buildup is also important!
@@ -4030,6 +4116,19 @@ export class AudioEngine {
         } else if (sourceConfidence >= MIN_BEATMATCH_CONFIDENCE) {
           startTime = this.ctx.currentTime + this.secondsToNextBeat(sourceState);
         }
+      }
+      appliedFx = isSourcePlaying && config.exitFx ? config.exitFx : undefined;
+      const beat = 60 / Math.max(60, sourceBpm);
+      if (appliedFx === 'roll') {
+        // The bar at the exit rolls for 8 beats, then the new song lands
+        const rollSeconds = sourceDeck.scheduleLoopRoll(startTime, beat);
+        if (rollSeconds > 0) startTime += rollSeconds;
+        else appliedFx = 'echo';
+      } else if (appliedFx === 'brake') {
+        // The old song brakes over its last beat; the new one hits on the 1
+        const brakeAt = startTime - beat >= this.ctx.currentTime + 0.02 ? startTime - beat : startTime;
+        if (sourceDeck.scheduleBrake(brakeAt, beat)) startTime = brakeAt + beat;
+        else appliedFx = 'echo';
       }
       targetDeck.play(cuePoint, startTime);
     }
@@ -4060,7 +4159,16 @@ export class AudioEngine {
     // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
     // echoes out on its own beat instead of stopping dead
     const isCut = isSourcePlaying && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
-    if (isCut) {
+    if (config.gapCut && isSourcePlaying) {
+      this.acquisitionStatus = `Cut into the silence after the old song's high point: "${targetTrack.title}" comes in on the beat.`;
+    } else if (appliedFx === 'roll') {
+      this.acquisitionStatus = `Loop roll build on the old song: "${targetTrack.title}" lands on the 1.`;
+    } else if (appliedFx === 'brake') {
+      this.acquisitionStatus = `Brake (vinyl stop) on the old song: "${targetTrack.title}" hits on the 1.`;
+    } else if (appliedFx === 'reverb') {
+      sourceDeck.scheduleReverbWash(startTime + durationSeconds / 2, 60 / Math.max(60, sourceBpm));
+      this.acquisitionStatus += ' Reverb wash on the old song.';
+    } else if (isCut) {
       sourceDeck.scheduleEchoOut(startTime + durationSeconds / 2, 60 / Math.max(60, sourceBpm));
       this.acquisitionStatus += ' Echo-out on the old song.';
     } else if (config.filterSweep && isSourcePlaying) {

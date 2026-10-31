@@ -34,7 +34,7 @@
   - `Energy +1 ⚡` (Gold / Amber): +1 Camelot step clockwise (adds 1 sharp) to raise room energy smoothly.
   - `Deep -1 🌊` (Cyan): -1 Camelot step counter-clockwise (adds 1 flat) for a smooth chill/deep groove.
   - `Drop Jump 🚀` (Purple): +1 Semitone modulation for dramatic climax drop transitions.
-  - `Clash ⚠️` (Rose): Key clash (3+ steps); blend is kept to **4 bars** and the outgoing song leaves through a **filter sweep**: a high-pass rises from fully open to ~1.5 kHz over the blend, so it thins to a hiss instead of its harmony rubbing against the new key (`VirtualDeck.scheduleFilterSweepOut`). A cut echoes out instead. See [MusicRadar: EQ and filter tricks](https://www.musicradar.com/news/eq-and-filter-tricks-for-djs).
+  - `Clash ⚠️` (Rose): Key clash (3+ steps); the blend is at most **8 bars** and the outgoing song leaves through a **filter sweep**: a high-pass rises steadily from fully open to 1 kHz over the blend, so its bass and chords thin out while the new song comes in, instead of its harmony rubbing against the new key (`VirtualDeck.scheduleFilterSweepOut`). Keys that only partly fit (`ok`) are also capped at 8 bars, without the sweep. See [MusicRadar: EQ and filter tricks](https://www.musicradar.com/news/eq-and-filter-tricks-for-djs).
 - **Energy-Shift Mixing**: Tag transitions in the header and status line with their exact harmonic relationship (e.g. `⚡ Energy +1 (8A → 9A)`).
 - **One-Click Harmonic Queue Reordering (`🪄 Harmonic Flow`)**: Automatically sorts the 50-song queue into a continuous, clash-free Camelot wheel wave starting from the currently playing track.
 - **Next song:** the AI DJ sees which ready songs' keys fit. Without the AI, if the next song clashes and one of the two after it fits, that one plays first (guest requests are never skipped).
@@ -66,6 +66,8 @@
 - Consider vocal separation when an instrumental transition is needed.
 
 **In this app** (`planMix` in `src/audio/MixPointPlanner.ts`): each candidate exit and entry gets a vocal-activity value: the 300 Hz–3 kHz band's share of the loudness over the blend window, relative to the song's own average share (so a loud chorus without singing doesn't count). The exit and entry are chosen **as a pair**, and pairs where both sides sing lose 3 points (an 8-bar phrase start is worth 1). On 24 real song pairs this halved the blends with two vocals at once (10 → 5) while giving up 0.08 points of phrase/energy score on average; the remaining 5 had vocals in every candidate window. The status line says *"chosen so the two vocals don't overlap"* when it made a difference. This is a vocal/lead *proxy* from the frequency band, not true vocal separation.
+
+**When even the best pair has both singing** (both sides at least about 0.7 vocal over the blend, `vocalClash`), the app doesn't force the blend: it does a **quick cut** instead (about 2 s, the old song echoing out on its beat, or a reverb wash / brake as in "Ways to Mix"). The "Mixing into…" status line says *"both songs sing here, so a quick cut"* ahead of time. A blend length the user chose for that mix still applies. The same check covers two competing melodies or leads, since they sit in the same band.
 
 ## 9. Choose the Right Entry and Exit Points
 - **Never start from the hook because buildup is also important:** Incoming and first songs must build up naturally from where the music begins (skipping initial dialogue/conversation skits). Do not jump straight into the hook or chorus drop. *(In Best Parts mode the incoming song enters later, in the build-up 16–4 bars before its hook, but still never at the hook: see "Best Parts Mode".)*
@@ -131,6 +133,65 @@ The best transition is the one that sounds musically intentional, not necessaril
 - Use drop swaps, echo effects, beat switches, or vocal transitions.
 - Apply effects only when they improve the transition.
 - Prioritize musical timing and intentionality.
+
+# Ways to Mix (What the App Chooses, and When)
+
+The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of these for every pair. Both use the same rule for "can these two be beatmatched" (`computeBeatmatchRate`, at the outgoing song's actual playing tempo), so a planned blend never turns into a cut at the last moment.
+
+| Way | When | What you hear |
+|---|---|---|
+| **Long blend with bass swap** | Tempos match, keys fit | The mood's length (8 bars Normal / Party, 16 Chill / Romantic, 4 Bhangra). The new song's bass comes in as the old one's goes out. |
+| **Blend with filter sweep** | Tempos match, keys clash | Up to 8 bars. The old song's bass and chords thin out (rising high-pass) while the new song comes in. |
+| **Cut into the silence** | The old song stops dead after a high point | No overlap. The old song plays into its stop, and the new song comes in on the beat where the old one would have come back. Works whatever the tempos and keys. |
+| **Loop roll build** | Tempos match, on a dance floor (Party / Bhangra), the new song is bigger (≥ 1.5 dB louder, or a favourite) and the keys aren't a perfect fit. At most once every 4 mixes. | The bar at the exit repeats in slices of 1, ½ and ¼ beat (8 beats in all) under a rising filter (to 400 Hz) and a white-noise riser, then the new song lands on the 1. |
+| **Reverb wash** | Tempos too far apart, in a calm mood (Chill / Romantic) | About 2 s. The old song's last 4 beats feed a 3.5 s reverb, which washes on under the new song. A rhythmic echo would fight the new beat; a reverb tail has no rhythm. |
+| **Brake (vinyl stop)** | Tempos too far apart, on a dance floor. At most once every 4 mixes. | The old song slows to a halt over its last beat, pitch falling with it, and the new song hits on the 1. |
+| **Echo-out cut** | Tempos too far apart, otherwise | About 2 s. The old song's last beat echoes away under the new one. |
+
+**Cut into the silence (a gap exit):**
+- **What counts as a gap:** 0.3–4 s quieter than 15% of the song's average level, right after 2 bars at least as loud as its average (a high point), with the music coming back afterwards (`findGaps`).
+- **Score:** a gap is worth 2.5, more than an 8-bar phrase start (1) plus a drop into a calmer section, so it wins when there is one in the window.
+- **Never before a chorus:** a stop that comes right before a chorus is the build-up to it, so it isn't used. The crowd is waiting for that chorus.
+- **Shown:** the status line says "Cut into the silence after the old song's high point".
+
+**Why these, and when (research):**
+- **Most mixes are plain blends.** A study of 20,765 real DJ transitions found transitions and cue points cluster on 32-beat phrases, and 86% of songs were tempo-adjusted by less than 5% ([Kim et al., ISMIR 2020](https://arxiv.org/html/2008.10267v1)). Blending on phrases at small tempo changes is what DJs do most.
+- **Long blend / bass swap** when the songs are close; **filter** when they're moderately different (it tolerates tempo and key differences); **echo-out** or a cut when they're far apart ([MixReady](https://mixready.art/guides/dj-transition-types), [Mixgraph](https://www.mixgraph.io/learn/dj-transition-techniques)).
+- **Delay vs reverb:** a rhythmic delay suits beatmatched songs, a reverb tail suits songs at different tempos ([Digital DJ Pool](https://digitaldjpool.com/blog/dj-transitions-for-beginners/)).
+- **Loop and build** is for building into a peak or bringing in a big song; a big build into a mellow song disappoints ([Mixgraph](https://www.mixgraph.io/learn/dj-transition-techniques)).
+- **Brake / spinback** is a deliberate, theatrical hard exit, best used sparingly; about one beat long ([We Are Crossfader](https://wearecrossfader.co.uk/blog/five-ways-djs-mix-songs-together/), [Thomann](https://www.thomann.de/blog/en/the-5-most-important-dj-transitions)).
+- **Never every time, never stacked:** effects stop working when they're on every transition, and a filter, echo and loop together is too much. Hence the "once every 4 mixes" limit and one effect per mix.
+
+**Shown:** the status line names the style, e.g. "Loop roll build on the old song: … lands on the 1".
+
+**Every hook is protected:** an exit never fades the old song out over any of its hooks (each chorus and a drop), not only the first one.
+
+**Best Parts timing:** a song mixes out only after its best part: the later of its first chorus and its most-loved moment (most replayed, else loudest; `peakTime`). The first chorus often comes early, and leaving after it cut songs short.
+
+---
+
+
+# The 15 Golden Rules (and How the App Follows Each)
+
+| # | Rule | In the app |
+|---|---|---|
+| 1 | Match the speed (BPM) | Beatmatching within the BPM limits ("BPM Adjustment Rules"); small adjustments preferred |
+| 2 | Mix at the right moment (phrases) | Exits and entries on 8 / 16 / 32-beat phrase starts (`planMix`) |
+| 3 | Don't mix two vocals carelessly | Exit and entry chosen as a pair to avoid two vocals; a **quick cut** when both still sing (rule 8 above) |
+| 4 | Bass swap | Old song's bass out over the first half, new song's bass in over the second |
+| 5 | Harmonic mixing | Camelot key fit; clashing keys get at most 8 bars with a filter sweep, or a cut |
+| 6 | Respect the energy | Set Flow: no energy drop on a dance floor, a **breather** after 5 peak songs, moods |
+| 7 | Right technique per pair | "Ways to Mix" above: blend, filter, gap cut, loop roll, reverb, brake, echo |
+| 8 | Match loudness | Every song levelled by its measured loudness; master limiter |
+| 9 | Not too long | Length per mood and key fit (4–16 bars), a quick cut when vocals or tempos clash |
+| 10 | Intros and outros | Talking intros and closing scenes skipped; entry in the build-up |
+| 11 | No competing melodies | Same vocal/lead check as rule 3 |
+| 12 | Surprises | Loop roll and brake now and then (at most once every 4 mixes), dhol fills, breathers |
+| 13 | Keep the rhythm alive | Live Rhythm Enhancer: locked to each song's beat grid, light during blends, softer on romantic and vocal-heavy songs (it rests during a cut between two tempos, where any beat would clash) |
+| 14 | Don't force a bad mix | Gap cut, echo-out, quick cut on two vocals, brake, reverb wash |
+| 15 | Prepare the next song | Analysed in the background as it arrives; mix planned up to 45 s ahead, the AI asked earlier still |
+
+---
 
 # Core Principle
 
@@ -321,7 +382,7 @@ Switch: **"Best parts only"** under the transport controls (Party console), **"B
 - A mix that can't be planned (immediate mix) also cues the incoming song at the start of its build-up range.
 
 ## 3. Exit: the outgoing song leaves after its hook
-- The on-air song keeps playing for **16 bars from its hook** (`BEST_PART_HOOK_BARS`, a full chorus), then mixes out at the **best phrase in the next 16 bars** (`BEST_PART_EXIT_BARS`): its *exit window*.
+- The on-air song keeps playing for **16 bars from its best part** (`BEST_PART_HOOK_BARS`, a full chorus; the best part is the later of its first chorus and its most-loved moment, `peakTime`), then mixes out at the **best phrase in the next 16 bars** (`BEST_PART_EXIT_BARS`): its *exit window*.
 - Inside the window the normal exit rules choose the bar: phrase starts, a drop into a calmer section, few vocals, never fading out over the hook (Rules 3, 8, 9).
 - The auto-mix treats the end of the exit window as the song's end: it plans the mix (and asks the AI DJ ahead of time) 45 s before it, exactly as it would before a real outro.
 - **Never cut a phrase short to hit a time:** the exit is always a bar start chosen for musical reasons inside the window.
@@ -530,8 +591,9 @@ A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's o
    - a step over 16% loses 2.
 5. **Language runs:** a few songs (3) in one language before switching. An earlier switch loses 0.7. This only counts when the language is known for sure (script, artist or label).
 6. **No energy drop on a dance floor:** in Party or Bhangra mood, a song more than 3 dB quieter than the one on air loses 1.
-7. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
-8. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
+7. **Breathers:** on a dance floor, after 5 songs in a row with no step down in energy (no song at least 1.5 dB quieter than the one before it), a song 1.5–6 dB quieter than the one on air **gains** 0.8 instead of losing points, so people get a breather. A song more than 6 dB quieter still loses 1: a breather, not an empty floor.
+8. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
+9. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
 
 **Why:** the craft sources agree that a set is shaped as waves of energy rather than a random order or a flat line. Big tempo jumps need planning, and abrupt changes of genre or energy lose the floor. See [DJ.Studio: anatomy of a great mix](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic), [ZipDJ: how to structure a set](https://zipdj.com/blog/how-to-structure-a-dj-set) and [DJ Will Gill: setlist flow](https://djwillgill.com/pro-tactics-for-flawless-song-selection-for-dj-setlist-flow/).
 

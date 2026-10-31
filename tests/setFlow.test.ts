@@ -52,3 +52,22 @@ describe('set flow', () => {
     expect(tempoStep(120, 126)).toBeCloseTo(0.05);
   });
 });
+
+describe('set flow breathers', () => {
+  const ready = [song('Peak', 'X'), song('Breather', 'Y', { loudnessDb: -12 })];
+
+  it('keeps the energy up while the run of peak songs is short', () => {
+    expect(chooseNext(ready, ctx({ peakRun: 2 })).pick.title).toBe('Peak');
+  });
+
+  it('welcomes a slightly calmer song after a long run of peak songs', () => {
+    const r = chooseNext(ready, ctx({ peakRun: 5 }));
+    expect(r.pick.title).toBe('Breather');
+    expect(r.reason).toContain('breather');
+  });
+
+  it('still avoids a big energy drop after a long run', () => {
+    const deep = [song('Peak', 'X'), song('Ballad', 'Y', { loudnessDb: -17 })];
+    expect(chooseNext(deep, ctx({ peakRun: 8 })).pick.title).toBe('Peak');
+  });
+});

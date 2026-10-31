@@ -6,7 +6,7 @@
 
 import { ANALYSIS_FIELDS, AnalysisFields } from './trackAnalysis';
 
-const ANALYSIS_VERSION = 1;
+const ANALYSIS_VERSION = 2; // 2: peakTime
 const STORAGE_KEY = `ai_dj_analysis_v${ANALYSIS_VERSION}`;
 const MAX_SONGS = 800; // ~0.5 KB each
 const SAVE_DELAY_MS = 2000;
@@ -20,6 +20,7 @@ function load(): Map<string, Saved> {
   if (entries) return entries;
   entries = new Map();
   try {
+    for (let v = 1; v < ANALYSIS_VERSION; v++) localStorage.removeItem(`ai_dj_analysis_v${v}`);
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, Saved>)) entries.set(k, v);
   } catch {
