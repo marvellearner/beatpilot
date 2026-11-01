@@ -52,6 +52,7 @@ export interface MixOption {
   score: number;
   vocals?: number; // 0 = instrumental, 1 = vocal-heavy, over the blend window (see vocalActivity)
   gap?: boolean; // an exit into the silence after a high point: a cut, no blend
+  low?: boolean; // the song is in a low part (verse, breakdown, intro, outro) at this point, not a high one
 }
 
 // Pairs where both songs sing during the blend lose this much (an 8-bar phrase start is worth 1).
@@ -94,6 +95,40 @@ const GAP_MAX_SECONDS = 4;
 // A gap exit is worth more than an 8-bar phrase start (1) plus a drop into a calmer section:
 // a stop after a high point is the cleanest place there is to change songs
 const GAP_SCORE = 2.5;
+// Quieter than this × the song's mean level for the rest of the song: its fade-out
+const FADE_LEVEL = 0.5;
+// A high part (chorus, drop): bars at least HIGH_PART × the song's loud level, which is the
+// LOUD_PERCENTILE of its bar levels (its choruses). The rhythm layer uses the same idea (§3).
+const HIGH_PART = 0.85;
+const LOUD_PERCENTILE = 0.9;
+// The Mix button looks LOOKAHEAD seconds ahead; when the old song is in a high part all that time,
+// the exit may be up to this far ahead, where the high part ends
+const HIGH_PART_EXTEND_SECONDS = 90;
+// Leaving right as a high part ends, into a low part, is the classic exit
+const END_OF_HIGH_BONUS = 1;
+
+/** The song's loud level: the LOUD_PERCENTILE of its bar averages (from the music start). */
+export function loudLevel(song: MixSongInfo, bar: number): number {
+  const { full, rate } = song.profile;
+  const bars: number[] = [];
+  for (let t = Math.max(song.musicStartTime ?? 0, song.downbeat); t + bar <= song.duration; t += bar) bars.push(average(full, rate, t, t + bar));
+  if (!bars.length) return songMean(full) || 1;
+  bars.sort((a, b) => a - b);
+  return bars[Math.min(bars.length - 1, Math.floor(LOUD_PERCENTILE * bars.length))] || 1;
+}
+
+/**
+ * Where the song's music ends: the end of the last bar averaging at least FADE_LEVEL × its mean
+ * level. Everything after is a fade-out or silence.
+ */
+export function lastLoudTime(song: MixSongInfo, bar: number): number {
+  const { full, rate } = song.profile;
+  const mean = songMean(full) || 1;
+  for (let t = song.duration; t > bar; t -= 0.25) {
+    if (average(full, rate, t - bar, t) >= FADE_LEVEL * mean) return t;
+  }
+  return song.duration;
+}
 
 /**
  * Silences after a high point that start in [from, to] (song seconds): where each starts and
@@ -200,6 +235,7 @@ export function planMix(params: {
   preferIncomingHook: boolean; // land the incoming hook at the end of the blend
   earliestExit?: number; // Best Parts: don't leave before this (outgoing song seconds)
   entryRange?: { from: number; to: number }; // Best Parts: enter in this build-up (incoming song seconds)
+  latestExit?: number; // Best Parts play limit: the old song is half faded by this (outgoing song seconds)
 }): MixPlan | null {
   const { out, inc, outPosition, blendBeats } = params;
   const outBlend = (blendBeats * 60) / out.bpm;
@@ -211,23 +247,52 @@ export function planMix(params: {
   const outMean = songMean(out.profile.full) || 1;
   const outMidMean = songMean(out.profile.mid) || 1;
   const outShare = outMidMean / outMean;
-  const exitLatest = Math.min(outPosition + params.lookAheadSeconds, out.duration - outBlend - 0.5);
   const exitFrom = outPosition + params.minLeadSeconds;
+  // Hard limit (Best Parts): no exit, not even the high-part or gap search, may start after the
+  // point where half the blend would run past it; at least the next bar stays possible
+  const hardLimit = params.latestExit !== undefined ? Math.max(params.latestExit - outBlend / 2, exitFrom + outBar) : Infinity;
+  const exitLatest = Math.min(outPosition + params.lookAheadSeconds, out.duration - outBlend - 0.5, hardLimit);
   let exits = barStarts(out, Math.max(exitFrom, params.earliestExit ?? 0), exitLatest);
   // The window may have closed (e.g. no song was ready in time): then the next good bar from here
   if (exits.length === 0 && params.earliestExit !== undefined) exits = barStarts(out, exitFrom, exitLatest);
 
+  // Never wait into the old song's fade-out: an exit starts at most a bar after its music ends
+  // (some endings fade or go quiet for several seconds before the file ends)
+  const musicEnd = lastLoudTime(out, outBar);
+  const beforeFade = exits.filter((c) => c.time <= musicEnd + outBar);
+  exits = beforeFade.length ? beforeFade : exits.slice(0, 1);
+
   const outHooks = out.hookTimes ?? (out.hookTime !== undefined ? [out.hookTime] : []);
+  // High parts: never leave in the middle of one, or just as one begins (MIXING_RULES.md "Never
+  // in a high part"). If the whole window is high, look further ahead for where it ends.
+  const outLoud = loudLevel(out, outBar);
+  const outAvg = (from: number, to: number) => average(out.profile.full, out.profile.rate, from, to);
+  const outHigh = (from: number, to: number) => outAvg(from, to) >= HIGH_PART * outLoud;
+  const inHighPart = (t: number) => {
+    if (outHigh(t - outBar, t) && outHigh(t, t + outBar)) return true; // in the middle of one
+    const firstHalf = Math.max(outBar, outBlend / 2);
+    for (let b = t; b < t + firstHalf; b += outBar) if (outHigh(b, b + outBar)) return true; // one starts in the mix
+    return false;
+  };
+  let allowed = exits.filter((c) => !inHighPart(c.time));
+  if (!allowed.length && exits.length) {
+    const further = barStarts(out, exits[0].time, Math.min(outPosition + HIGH_PART_EXTEND_SECONDS, out.duration - outBlend - 0.5, musicEnd + outBar, hardLimit));
+    allowed = further.filter((c) => !inHighPart(c.time));
+  }
+  if (allowed.length) exits = allowed;
+
   const exitOptions: MixOption[] = [];
   for (const candidate of exits) {
     const t = candidate.time;
-    const avg = (from: number, to: number) => average(out.profile.full, out.profile.rate, from, to);
+    const avg = outAvg;
     const before = avg(t - 2 * outBar, t);
     const after = avg(t, t + 2 * outBar);
     const sectionChange = Math.abs(after - before) / (Math.max(before, after) || 1);
     const calm = Math.max(-1, Math.min(1, 1 - avg(t, t + outBlend) / outMean));
     const vocals = average(out.profile.mid, out.profile.rate, t, t + outBlend) / outMidMean;
     const overHook = outHooks.some((h) => h > t - 4 && h < t + outBlend);
+    const low = !outHigh(t, t + Math.max(outBar, Math.min(outBlend, 2 * outBar)));
+    const endOfHigh = low && outHigh(t - 2 * outBar, t);
 
     // Dropping into a calmer section (breakdown, outro) is the classic exit; jumping into a
     // louder one (a chorus) is weaker since the blend would throw that chorus away
@@ -238,10 +303,13 @@ export function planMix(params: {
       changeWeight * sectionChange +
       0.5 * calm -
       0.5 * Math.max(0, vocals - 1) -
-      (overHook ? 1.5 : 0) -
+      (overHook ? 1.5 : 0) +
+      (endOfHigh ? END_OF_HIGH_BONUS : 0) -
       0.01 * (t - outPosition); // Scaled for up to 45s lookahead window per MIXING_RULES.md
     const why =
-      (sectionChange > 0.3
+      (endOfHigh
+        ? "current song's high part just ended"
+        : sectionChange > 0.3
         ? after < before
           ? 'current song drops into a calmer section'
           : 'current song gets louder (new section)'
@@ -250,19 +318,19 @@ export function planMix(params: {
           : phraseBonus(candidate.index) > 0
             ? 'start of a 4-bar phrase'
             : 'bar boundary') + (vocals > 1.2 ? ', vocal-heavy' : vocals < 0.8 ? ', few vocals' : '');
-    exitOptions.push({ time: t, why, score, vocals: vocalActivity(out.profile, t, t + outBlend, outShare) });
+    exitOptions.push({ time: t, why, score, vocals: vocalActivity(out.profile, t, t + outBlend, outShare), low });
   }
 
   // Gaps: the new song cuts in on the beat where the old one would come back
   const beat = 60 / out.bpm;
-  for (const gap of findGaps(out, Math.max(exitFrom, params.earliestExit ?? 0) - 0.5, Math.min(outPosition + params.lookAheadSeconds, out.duration - 1))) {
+  for (const gap of findGaps(out, Math.max(exitFrom, params.earliestExit ?? 0) - 0.5, Math.min(outPosition + params.lookAheadSeconds, out.duration - 1, hardLimit + outBar))) {
     const t = out.downbeat + Math.round((gap.end - out.downbeat) / beat) * beat;
-    if (t <= gap.start || t < exitFrom) continue;
+    if (t <= gap.start || t < exitFrom || t > musicEnd + outBar || t > hardLimit) continue;
     // A stop right before a chorus is a build-up to it: the crowd is waiting for that chorus
     if (outHooks.some((h) => h >= gap.start && h < t + 2 * outBar)) continue;
     const score = GAP_SCORE - 0.01 * (t - outPosition);
     const why = `current song stops after a high point (${(gap.end - gap.start).toFixed(1)} s of silence): the new song comes in where it would come back`;
-    exitOptions.push({ time: t, why, score, vocals: 0, gap: true });
+    exitOptions.push({ time: t, why, score, vocals: 0, gap: true, low: true });
   }
   if (exitOptions.length === 0) return null;
 
@@ -280,6 +348,7 @@ export function planMix(params: {
   const entryFirst = range ? Math.max(minEntry, range.from) : minEntry;
   const entryLatest = range ? Math.min(range.to, inc.duration - incBlend - 1) : Math.min(minEntry + 8 * incBar, maxIntroLimit, inc.duration * 0.25);
   const entries = barStarts(inc, entryFirst, Math.max(entryFirst, entryLatest));
+  const incLoud = loudLevel(inc, incBar);
   const entryOptions: MixOption[] = [];
   for (const candidate of entries) {
     const e = candidate.time;
@@ -308,7 +377,8 @@ export function planMix(params: {
         : dropAtEnd > 0.3
           ? 'on an intro rise'
           : 'on a phrase start (intro build-up)';
-    entryOptions.push({ time: e, why, score, vocals: vocalActivity(inc.profile, e, e + incBlend, incShare) });
+    const low = avg(e, e + Math.max(incBar, Math.min(incBlend, 2 * incBar))) < HIGH_PART * incLoud;
+    entryOptions.push({ time: e, why, score, vocals: vocalActivity(inc.profile, e, e + incBlend, incShare), low });
   }
   if (isStrict) {
     entryOptions.length = 0;
@@ -349,4 +419,10 @@ export function vocalClash(plan: Pick<MixPlan, 'exitTime' | 'entryTime' | 'exitO
   const entry = at(plan.entryOptions, plan.entryTime);
   if (!exit || !entry || exit.gap) return false;
   return (exit.vocals ?? 0) * (entry.vocals ?? 0) >= VOCAL_CLASH_LEVEL;
+}
+
+/** Whether the plan's chosen exit and entry are in each song's low part (see MixOption.low). */
+export function lowParts(plan: Pick<MixPlan, 'exitTime' | 'entryTime' | 'exitOptions' | 'entryOptions'>): { exit: boolean; entry: boolean } {
+  const at = (options: MixOption[], t: number) => options.find((o) => Math.abs(o.time - t) < 0.01);
+  return { exit: !!at(plan.exitOptions, plan.exitTime)?.low, entry: !!at(plan.entryOptions, plan.entryTime)?.low };
 }

@@ -25,4 +25,7 @@ cache/
 # Offline music library: your songs and the saved most-played MP3s (server/localLibrary.ts)
 music/
 data/local_library.json
+
+# Transition QA recordings and reports (qa/transitions.mjs)
+qa/out/
 data/banned_songs.json

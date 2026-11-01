@@ -8,7 +8,39 @@ import path from 'path';
 import { IncomingMessage, ServerResponse } from 'http';
 import { ROOT_DIR } from './paths';
 import { sendFile } from './sendFile';
-import { resolveAudio, searchVideos } from './audioSource';
+import { resolveAudio, searchVideos, type VideoHit } from './audioSource';
+import { describedSongs, filterQueries } from '../shared/songFilter';
+import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, scoreHit } from '../shared/taste';
+
+/**
+ * A search box query. One that describes a kind of songs instead of naming one ("Play all the
+ * classic hindi dance songs of all time", "90s bollywood party hits") becomes the searches that
+ * find such songs ("90s Bollywood party songs", "… hits", "best …"), their results taken in
+ * turns; those are songs, so jukeboxes, long mixes, shorts and covers are left out.
+ */
+async function searchFor(query: string, page: number): Promise<VideoHit[]> {
+  const described = describedSongs(query);
+  if (!described) return searchVideos(query, page);
+  // "… songs" mostly finds jukeboxes; "… song full video" finds the songs themselves
+  const base = filterQueries(described, [])[0];
+  const single = base.replace(/\bsongs$/, 'song');
+  const queries = [`${single} full video`, base, `${single} official video`, `best ${base}`, `${base} hits`, `${single} video`];
+  const lists = await Promise.all(queries.map((q) => searchVideos(q, page).catch(() => [] as VideoHit[])));
+  const isSong = (h: VideoHit) => h.lengthSeconds >= 90 && h.lengthSeconds <= MAX_AUTO_SONG_SECONDS && scoreHit(h, 0, EMPTY_TASTE) > -1;
+  const ranked = lists.map((l) => l.filter(isSong));
+  const seen = new Set<string>();
+  const out: VideoHit[] = [];
+  for (let i = 0; ranked.some((l) => i < l.length); i++) {
+    for (const l of ranked) {
+      const h = l[i];
+      if (h && !seen.has(h.videoId)) {
+        seen.add(h.videoId);
+        out.push(h);
+      }
+    }
+  }
+  return out.length || page > 1 ? out : searchVideos(query, page); // nothing found that way: as typed
+}
 import { getDownload, sendFromDownload } from './audioDownload';
 import { logError } from './logger';
 import { isLocalUrl, localById, savedCopyFor, searchLocal, serveLocalFile, toSearchResult } from './localLibrary';
@@ -145,8 +177,10 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
     res.end(JSON.stringify({ results: track ? [toSearchResult(track)] : [] }));
     return;
   }
-  // Songs on this laptop come first: instant, and they work with no internet
-  const local = extractYouTubeVideoId(query) ? [] : searchLocal(query, 3);
+  // ?page=2, 3…: the further results of the same search (lists load them as they're scrolled)
+  const page = Math.min(20, Math.max(1, Math.floor(Number(url.searchParams.get('page')) || 1)));
+  // Songs on this laptop come first (first page only): instant, and they work with no internet
+  const local = extractYouTubeVideoId(query) || page > 1 ? [] : searchLocal(query, 3);
 
   try {
     // Check if query is already a YouTube/YouTube Music URL
@@ -180,10 +214,10 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
 
     // Otherwise, perform title search using yt-search with caching & fast in-flight deduplication
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
-    const cacheKey = `${query.toLowerCase().trim()}:${limit}`;
+    const cacheKey = `${query.toLowerCase().trim()}:${limit}${page > 1 ? `:p${page}` : ''}`;
     const cachedVideos = getCachedSearch(cacheKey);
     if (cachedVideos) {
-      res.end(JSON.stringify({ results: [...local, ...cachedVideos.filter((v) => !local.some((l) => l.title === v.title))] }));
+      res.end(JSON.stringify({ results: [...local, ...cachedVideos.filter((v) => !local.some((l) => l.title === v.title))], page, hasMore: cachedVideos.length > 0 }));
       return;
     }
 
@@ -196,7 +230,7 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
         const timeoutPromise = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Search timed out after 15s')), 15_000)
         );
-        const hits = await Promise.race([searchVideos(query), timeoutPromise]);
+        const hits = await Promise.race([searchFor(query, page), timeoutPromise]);
         const videos: SearchResult[] = hits.slice(0, limit).map((v) => ({
           title: v.title,
           url: canonicalYouTubeUrl(v.videoId),
@@ -236,7 +270,7 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
     const videos = await searchPromise;
     if (req.destroyed || req.socket?.destroyed) return;
 
-    res.end(JSON.stringify({ results: [...local, ...videos.filter((v) => !local.some((l) => l.title === v.title))] }));
+    res.end(JSON.stringify({ results: [...local, ...videos.filter((v) => !local.some((l) => l.title === v.title))], page, hasMore: videos.length > 0 }));
   } catch (err: unknown) {
     if (local.length) {
       // Offline (or YouTube failing/timing out): the local matches still answer instantly

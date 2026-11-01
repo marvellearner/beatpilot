@@ -639,12 +639,20 @@ export class VirtualDeck {
 
   /** Schedules a linear low-EQ ramp on the audio clock (keeps running when the tab is hidden). */
   public scheduleLowRamp(fromDb: number, toDb: number, startTime: number, endTime: number) {
-    const param = this.lowFilter.gain;
+    this.scheduleEqRamp('low', fromDb, toDb, startTime, endTime);
+  }
+
+  /** Holds an EQ band at fromDb until startTime, then ramps it linearly to toDb by endTime. */
+  public scheduleEqRamp(band: 'low' | 'mid' | 'high', fromDb: number, toDb: number, startTime: number, endTime: number) {
+    const filter = band === 'low' ? this.lowFilter : band === 'mid' ? this.midFilter : this.highFilter;
+    const param = filter.gain;
     param.cancelScheduledValues(this.ctx.currentTime);
     param.setValueAtTime(fromDb, this.ctx.currentTime);
     param.setValueAtTime(fromDb, startTime);
     param.linearRampToValueAtTime(toDb, endTime);
-    this.lowGain = toDb;
+    if (band === 'low') this.lowGain = toDb;
+    else if (band === 'mid') this.midGain = toDb;
+    else this.highGain = toDb;
   }
 
   /**

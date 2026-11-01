@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findGaps, planMix, vocalClash, type MixSongInfo } from '../src/audio/MixPointPlanner';
+import { findGaps, lastLoudTime, lowParts, planMix, vocalClash, type MixSongInfo } from '../src/audio/MixPointPlanner';
 
 const RATE = 10;
 
@@ -68,4 +68,62 @@ describe('vocalClash', () => {
   it('flags a blend where both songs sing', () => expect(vocalClash(plan(0.9, 0.8))).toBe(true));
   it('lets a blend go ahead when one side is instrumental', () => expect(vocalClash(plan(1, 0.2))).toBe(false));
   it('never flags a cut into the silence', () => expect(vocalClash(plan(1, 1, true))).toBe(false));
+});
+
+describe('fade-outs', () => {
+  // The music ends at 180 s; the file runs on, fading, to 200 s
+  const fading = (t: number) => (t >= 180 ? 0.15 * Math.max(0, (200 - t) / 20) : undefined);
+
+  it('finds where the music ends', () => {
+    expect(lastLoudTime(song(fading), 2)).toBeCloseTo(181, 0); // the last bar still mostly before the fade
+  });
+
+  it("doesn't wait into the old song's fade-out", () => {
+    const result = planMix({ out: song(fading), inc: song(), outPosition: 160, blendBeats: 4, lookAheadSeconds: 45, minLeadSeconds: 1.5, preferIncomingHook: false })!;
+    expect(result.exitTime).toBeLessThanOrEqual(182);
+  });
+});
+
+describe('high parts', () => {
+  // Low parts at 0.5, choruses at 1.2
+  const twoChoruses = (t: number) => (t >= 100 && t < 120) || (t >= 140 && t < 170) ? 1.2 : 0.5;
+  const mixAt = (out: MixSongInfo, outPosition: number, blendBeats = 32) =>
+    planMix({ out, inc: song(), outPosition, blendBeats, lookAheadSeconds: 45, minLeadSeconds: 1.5, preferIncomingHook: false })!;
+
+  it("doesn't leave in a chorus or just before one: it waits for the chorus to end", () => {
+    const result = mixAt(song(twoChoruses), 135);
+    expect(result.exitTime).toBeCloseTo(170, 0);
+    expect(result.reason).toContain('high part just ended');
+    expect(lowParts(result).exit).toBe(true);
+  });
+
+  it('looks past the 45 s window when the high part lasts longer', () => {
+    // The chorus runs past the 45 s window (to 177 s) and ends at 180 s
+    const longChorus = (t: number) => (t >= 130 && t < 180 ? 1.2 : 0.5);
+    expect(mixAt(song(longChorus), 132).exitTime).toBeCloseTo(180, 0);
+  });
+
+  it('leaves in a low part right away when one is playing', () => {
+    const result = mixAt(song(twoChoruses), 121, 8);
+    expect(result.exitTime).toBeLessThan(140);
+    expect(lowParts(result).exit).toBe(true);
+  });
+});
+
+describe('Best Parts play limit', () => {
+  const longChorus = (t: number) => (t >= 130 && t < 180 ? 1.2 : 0.5);
+  const limited = (latestExit: number, outPosition = 132) =>
+    planMix({ out: song(longChorus), inc: song(), outPosition, blendBeats: 32, lookAheadSeconds: 45, minLeadSeconds: 1.5, preferIncomingHook: false, latestExit })!;
+
+  it("doesn't wait past the limit for a high part to end", () => {
+    // Without the limit it waits for the chorus to end at 180 s (see "high parts")
+    const result = limited(160);
+    expect(result.exitTime).toBeLessThanOrEqual(160 - 16 / 2); // half the 16 s blend before the limit
+  });
+
+  it('still leaves at the next bar when the limit has already passed', () => {
+    const result = limited(100);
+    expect(result).not.toBeNull();
+    expect(result.exitTime).toBeLessThanOrEqual(132 + 1.5 + 2 + 0.01);
+  });
 });

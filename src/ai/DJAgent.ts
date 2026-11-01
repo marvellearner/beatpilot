@@ -1,4 +1,4 @@
-import { VIBE_MOOD, describeFilter, type Era, type FilterLanguage, type Vibe } from '../../shared/songFilter';
+import { REQUEST_FILLER, VIBE_MOOD, describeFilter, parseSongKinds, type Vibe } from '../../shared/songFilter';
 
 /** What each vibe means, for the AI's song checks. */
 const VIBE_DESCRIPTION: Record<Vibe, string> = {
@@ -12,6 +12,17 @@ import { AICommandSchema, type AICommandPlan } from './schema';
 import type { AudioEngine } from '../audio/AudioEngine';
 import { RHYTHM_STYLES, type RhythmStyleId } from '../audio/rhythm/styles';
 import { SONG_LANGUAGES, type SongLanguage } from '../audio/rhythm/rhythmPlan';
+import { tempoStep } from '../audio/engine/setFlow';
+
+// A tempo step up to this (half / double time counts) can be blended; more forces a quick cut
+const BLENDABLE_STEP = 0.08;
+
+/** How a ready song's tempo sits next to the song on air, for the next-song prompt. */
+function tempoNote(currentBpm: number, bpm: number): string {
+  const step = tempoStep(currentBpm, bpm);
+  if (step === null) return '';
+  return step <= BLENDABLE_STEP ? `, tempo step ${Math.round(step * 100)}% (can blend)` : `, tempo jump ${Math.round(step * 100)}% (forces a cut)`;
+}
 
 export interface AIResponseResult {
   plan: AICommandPlan;
@@ -227,8 +238,8 @@ Reply ONLY with JSON: {"language": "..."}`;
 NOW PLAYING: "${ctx.current.title}" by ${ctx.current.artist}, ${Math.round(ctx.current.bpm)} BPM.
 RECENTLY PLAYED: ${ctx.recentlyPlayed.length ? ctx.recentlyPlayed.map((t) => `"${t}"`).join(', ') : 'none'}.
 ${ctx.sessionBpm ? `The set is locked to ${ctx.sessionBpm} BPM.\n` : ''}READY SONGS:
-${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round(o.bpm)} BPM${o.keyFit === 'good' ? ', key fits' : o.keyFit === 'clash' ? ', key clashes' : ''}${o.requested ? ' (requested by a guest)' : ''}`).join('\n')}
-Consider energy flow, genre and language continuity, and the mood. Prefer songs whose key fits; avoid a key clash unless it's a guest request. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
+${ctx.options.map((o, i) => `${i + 1}) "${o.title}" by ${o.artist}, ${Math.round(o.bpm)} BPM${tempoNote(ctx.current.bpm, o.bpm)}${o.keyFit === 'good' ? ', key fits' : o.keyFit === 'clash' ? ', key clashes' : ''}${o.requested ? ' (requested by a guest)' : ''}`).join('\n')}
+Consider energy flow, genre and language continuity, and the mood. Prefer a song that can blend (a small tempo step) over a tempo jump, which forces a quick cut. Prefer songs whose key fits; avoid a key clash unless it's a guest request. Guest requests should usually come soon. Avoid two songs by the same artist back to back.
 Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
 
     const res = await this.askJson(prompt, 40, 12_000);
@@ -247,11 +258,16 @@ Reply ONLY with JSON: {"pick": <number>, "reason": "<max 12 words>"}`;
     artist: string;
     bpm?: number;
     taste?: string; // tasteForPrompt(): the listener's artists, loved and just-played songs
+    before?: Array<{ title: string; artist: string }>; // songs they chose just before this one, newest first
   }): Promise<MoodReadingResult> {
+    const before = track.before?.length
+      ? `Just before it they chose: ${track.before.map((b) => `"${b.title}"${b.artist ? ` by ${b.artist}` : ''}`).join(', then ')}. Find what these songs have in common (the TYPE: e.g. item songs, 90s Bollywood dance, sad Punjabi, Sufi, wedding songs) and recommend more of exactly that type.
+`
+      : '';
     const prompt = `You are an elite party AI DJ with deep musical psychology and genre expertise.
 A user just searched for and played this song:
 TRACK: "${track.title}" by "${track.artist || 'Unknown'}"${track.bpm ? ` (${Math.round(track.bpm)} BPM)` : ''}.
-${track.taste ? `\n${track.taste}\nFit the picks to this listener's taste as well as the mood, and never repeat a song they just played.\n` : ''}
+${before}${track.taste ? `\n${track.taste}\nFit the picks to this listener's taste as well as the mood, and never repeat a song they just played.\n` : ''}
 TASK:
 1. READ THE USER'S MOOD: Analyze the musical vibe, lyrical emotion, cultural context, danceability, and energy of this song to determine what mood the user is in.
 2. RECOMMEND TOP 5 SONGS: Pick the 5 best, most musically compatible songs that match this exact mood and momentum to play immediately next in the DJ set.
@@ -664,38 +680,10 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
   }
 }
 
-// Filler words around an artist's name in "play only Diljit Dosanjh songs please"
-// Kinds of songs in plain words (removed before the rest is read as artists' names)
-const KIND_WORDS: Array<[RegExp, 'vibe' | 'language' | 'era', string]> = [
-  [/\b(dance|dancing|danceable|party|club|upbeat|bangers?|floor ?fillers?)\b/gi, 'vibe', 'dance'],
-  [/\b(romantic|love|slow)\b/gi, 'vibe', 'romantic'],
-  [/\b(chill|relax(ing)?|calm|soft)\b/gi, 'vibe', 'chill'],
-  [/\bbhangra\b/gi, 'vibe', 'bhangra'],
-  [/\bpunjabi\b/gi, 'language', 'punjabi'],
-  [/\b(hindi|bollywood)\b/gi, 'language', 'hindi'],
-  [/\benglish\b/gi, 'language', 'english'],
-  [/\b(spanish|latin)\b/gi, 'language', 'spanish'],
-  [/\b(90s|nineties)\b/gi, 'era', '90s'],
-  [/\b(2000s)\b/gi, 'era', '2000s'],
-  [/\b(old|retro|classic|evergreen)\b/gi, 'era', 'old'],
-  [/\b(new|latest)\b/gi, 'era', 'new'],
-];
-
-/** The vibe, language and era named in a request, and the text without those words. */
-function songKinds(text: string): { vibe?: Vibe; language?: FilterLanguage; era?: Era; rest: string } {
-  const found: { vibe?: Vibe; language?: FilterLanguage; era?: Era } = {};
-  let rest = text;
-  for (const [re, kind, value] of KIND_WORDS) {
-    if (re.test(rest)) {
-      (found as Record<string, string>)[kind] ??= value;
-      rest = rest.replace(re, ' ');
-    }
-    re.lastIndex = 0;
-  }
-  return { ...found, rest };
-}
-
-const FILLER = /\b(please|pls|plz|now|from now on|tonight|for now|the|songs?|tracks?|music|hits?|gaane|gane|gaana|gana|ke|ki|ka|wale|waale|sirf|bas|chalao|by|of|from|play|playing|put on|only|just|nothing but|more|some|let'?s|can you|could you|i want|we want|want|wanna|to|i|me|us|we)\b/gi;
+// Kinds of songs and filler words: shared/songFilter.ts (the search box reads them too)
+const songKinds = parseSongKinds;
+// Filler around an artist's name in "play only Diljit Dosanjh songs please" ("and" / "or" separate names)
+const FILLER = new RegExp(REQUEST_FILLER.source.replace('|or|and|', '|'), 'gi');
 
 /** A typo of "song(s)" ("osngs", "sogns", "sngs", "songz"): same letters, or one letter off. */
 const isSongTypo = (w: string) => {
@@ -729,7 +717,7 @@ export function parseSongCommand(input: string): AICommandPlan | null {
       .trim();
   const artists = (s: string) =>
     name(s)
-      .split(/\s*(?:,|\band\b|&|\+)\s*/i)
+      .split(/\s*(?:,|\band\b|\bor\b|&|\+|\/)\s*/i)
       .map((a) => a.trim())
       .filter((a) => a.length >= 2)
       .slice(0, 5);
@@ -753,15 +741,16 @@ export function parseSongCommand(input: string): AICommandPlan | null {
     };
   };
 
-  // "only X" / "just X" / "X only" / "nothing but X" (X: artists and/or kinds of songs)
-  if (/\b(only|just|nothing but|sirf)\b/.test(lower)) {
+  // "only X" / "just X" / "X only" / "nothing but X" (X: artists and/or kinds of songs), and
+  // "play all the classic Hindi dance songs": all of them, i.e. only those
+  if (/\b(only|just|nothing but|sirf)\b/.test(lower) || (hasKind && /\bplay all\b|\ball the\b/.test(lower))) {
     const p = plan(true);
     if (p) return p;
   }
 
   // "more X" / "play more X songs", and "play dance songs" (a kind of song, no artist: more of it)
   // ("songs" must be said then: "play Love Dose" is a song, not "more romantic songs by Dose")
-  if (/\bmore\b/.test(lower) || (hasKind && !artists(rest).length && /\b(songs?|music|gaane|gaana|tracks?)\b/.test(lower))) {
+  if (/\bmore\b/.test(lower) || (hasKind && !artists(rest).length && /\b(songs?|music|gaane|gaana|tracks?|hits|classics|bangers)\b/.test(lower))) {
     const p = plan(false);
     if (p) return p;
   }

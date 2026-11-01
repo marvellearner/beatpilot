@@ -8,7 +8,9 @@
     "build": "tsc && tsc -p tsconfig.server.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc && tsc -p tsconfig.server.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "qa:transitions": "node qa/transitions.mjs",
+    "qa:flamingo": "node qa/musicFlamingo.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.63.0",
@@ -20,6 +22,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@gradio/client": "^2.7.2",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.6",
     "@types/qrcode": "^1.5.5",
@@ -27,6 +30,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.1.2",
+    "playwright-core": "^1.64.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",

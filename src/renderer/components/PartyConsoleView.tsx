@@ -52,6 +52,11 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const searchAbortControllerRef = useRef<AbortController | null>(null);
+  // Lazy load: scrolling to the bottom of the results fetches the next page of the same search
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const searchPageRef = useRef(1);
+  const loadingMoreRef = useRef(false);
 
   const [isEditingFile, setIsEditingFile] = useState(false);
   const [fileContent, setFileContent] = useState('');
@@ -77,6 +82,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
 
     setIsDropdownOpen(true);
     setIsSearching(true);
+    searchPageRef.current = 1;
+    loadingMoreRef.current = false;
+    setIsLoadingMore(false);
+    setSearchHasMore(false);
 
     if (searchAbortControllerRef.current) {
       searchAbortControllerRef.current.abort();
@@ -93,6 +102,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
           const data = await res.json();
           if (Array.isArray(data.results)) {
             setSearchResults(data.results);
+            setSearchHasMore(!!data.hasMore);
           }
         }
       } catch (err: unknown) {
@@ -110,6 +120,35 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
       clearTimeout(timer);
     };
   }, [searchQuery]);
+
+  // The next page of the current search, added below (songs already listed are skipped)
+  const loadMoreResults = async () => {
+    const q = searchQuery.trim();
+    if (loadingMoreRef.current || !searchHasMore || isSearching || q.length < 2) return;
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    const signal = searchAbortControllerRef.current?.signal; // a new search cancels this too
+    const page = searchPageRef.current + 1;
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=20&page=${page}`, { signal });
+      const data = res.ok ? await res.json() : null;
+      if (signal?.aborted) return;
+      const more: SearchResult[] = Array.isArray(data?.results) ? data.results : [];
+      searchPageRef.current = page;
+      const seen = new Set(searchResults.map((s) => s.url));
+      const fresh = more.filter((s) => s.url && !seen.has(s.url));
+      setSearchResults((prev) => [...prev, ...fresh]);
+      // The search ran out, or the page brought nothing new: stop asking
+      setSearchHasMore(!!data?.hasMore && fresh.length > 0);
+    } catch (err: unknown) {
+      if ((err as Error)?.name !== 'AbortError') setSearchHasMore(false);
+    } finally {
+      if (!signal?.aborted) {
+        loadingMoreRef.current = false;
+        setIsLoadingMore(false);
+      }
+    }
+  };
 
   // Close search dropdown when clicking outside
   useEffect(() => {
@@ -228,7 +267,8 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   };
 
   const handleSelectSong = async (song: SearchResult, autoMix: boolean = false) => {
-    setIsDropdownOpen(false);
+    // Keep the search dropdown open after queuing a track so the user can continue adding more music.
+    // Removed setIsDropdownOpen(false) to prevent closing.
     setSearchQuery('');
     setSearchResults([]);
     showToast(`${autoMix ? 'Mixing in & AI reading mood' : 'Queued at top of Up Next'}: "${song.title}"`);
@@ -412,6 +452,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                 {isDropdownOpen && searchQuery.trim().length >= 2 && (
                   <div
                     id="party-console-search-dropdown"
+                    onScroll={(e) => {
+                      const el = e.currentTarget;
+                      if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) void loadMoreResults();
+                    }}
                     className="absolute left-0 right-0 top-full mt-1.5 bg-[#0e1322]/98 backdrop-blur-2xl border border-cyan-500/40 rounded-2xl p-2 shadow-2xl z-50 flex flex-col gap-1 max-h-[440px] overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 hover:scrollbar-thumb-cyan-500/30 scrollbar-track-transparent animate-in fade-in slide-in-from-top-1 duration-150 ring-1 ring-black/80"
                   >
                     <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono text-slate-400 border-b border-white/10 mb-1">
@@ -497,6 +541,20 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                         </div>
                       ))
                     )}
+                    {searchResults.length > 0 && (isLoadingMore || searchHasMore) && (
+                      <div className="flex items-center justify-center gap-2 py-3 text-[11px] text-slate-400 shrink-0">
+                        {isLoadingMore ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+                            <span>Loading more songs…</span>
+                          </>
+                        ) : (
+                          <button type="button" onClick={() => void loadMoreResults()} className="text-cyan-300 hover:text-cyan-200 font-semibold">
+                            Scroll for more songs
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -514,7 +572,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                     </span>
                   </div>
                 ) : (
-                  engine.queue.map((item, idx) => (
+                  engine.queue.filter(item => item.id !== currentTrack?.id).map((item, idx) => (
                     <UpNextQueueItem key={item.id} engine={engine} item={item} idx={idx} curKey={curKey} pendingMixId={pendingMix?.id} />
                   ))
                 )}
@@ -537,7 +595,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
             </div>
       );
     },
-    [rightColumnKey, searchQuery, searchResults, isSearching, isDropdownOpen, pendingMix?.id, engine.isTransitioning,
+    [rightColumnKey, searchQuery, searchResults, isSearching, isDropdownOpen, searchHasMore, isLoadingMore, pendingMix?.id, engine.isTransitioning,
       engine.diskCacheCount, engine.diskCacheMb, engine.refreshingQueue, engine.artistFocus, curKey]
   );
 
@@ -1505,7 +1563,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                   </button>
                   <label
                     className="inline-flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer select-none"
-                    title="For a dancing crowd: each song plays only its build-up and hook (about 1–1.5 min), then mixes into the next"
+                    title="For a dancing crowd: each song plays only its build-up and hook (at most the length picked next to this switch), then mixes into the next"
                   >
                     <span>Best parts only</span>
                     <button
@@ -1524,6 +1582,21 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                       />
                     </button>
                   </label>
+                  {engine.bestPartsMode && (
+                    <select
+                      aria-label="Most of each song that plays"
+                      title="The most of each song that plays, from where it comes in (the mix included)"
+                      value={engine.bestPartsMaxSeconds}
+                      onChange={(e) => engine.setBestPartsMaxSeconds(Number(e.target.value))}
+                      className="bg-white/5 border border-orange-500/30 text-orange-200 text-[11px] rounded-md px-1.5 py-1 focus:outline-none focus:border-orange-400"
+                    >
+                      {[60, 75, 90, 120, 150].map((s) => (
+                        <option key={s} value={s} className="bg-[#0b0f1a]">
+                          max {Math.floor(s / 60)}:{String(s % 60).padStart(2, '0')}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
 

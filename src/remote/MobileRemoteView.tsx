@@ -387,7 +387,11 @@ syncState.queue.length === 0 ? (
                             <span className="font-bold text-white line-clamp-2 leading-snug break-words text-[11px]" title={item.title}>
                               {item.title}
                             </span>
-                            {item.isAiRecommended && (
+                            {item.unheard ? (
+                              <span className="text-[7px] font-mono bg-amber-500/20 text-amber-300 px-1 rounded border border-amber-500/30 font-bold shrink-0" title={item.pickReason}>
+                                NEW TO YOU
+                              </span>
+                            ) : item.isAiRecommended && (
                               <span className="text-[7px] font-mono bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/30 font-bold shrink-0">
                                 AI
                               </span>

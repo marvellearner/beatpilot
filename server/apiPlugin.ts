@@ -7,7 +7,7 @@ import type { Connect, Plugin } from 'vite';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'http';
 import { attachRemoteHub, handleRemoteInfo } from './remoteHub';
 import { handleSearch, handleCacheStatus, handleStream, handleHeatmap } from './youtube';
-import { handleRecommend } from './recommendations';
+import { handleRecommend, handleSimilar } from './recommendations';
 import { handleLlmHealth, handleLlm } from './llm';
 import { handleHistory, handleFavorites, handleBanned, handleMySongs } from './library';
 import { handleSystemMemory } from './system';
@@ -40,6 +40,7 @@ function attachApi(httpServer: HttpServer, middlewares: Connect.Server) {
     if (path === '/api/cache/status') return handleCacheStatus(req, res, url);
     if (path === '/api/stream') return handleStream(req, res, url);
     if (path === '/api/recommend') return handleRecommend(req, res, url);
+    if (path === '/api/similar') return handleSimilar(req, res, url);
     if (path === '/api/remote-info') return handleRemoteInfo(res, httpServer);
     // AI DJ brain proxy: local Ollama first, Gemini as the cloud backup
     if (path === '/api/llm/health') return handleLlmHealth(req, res, url);

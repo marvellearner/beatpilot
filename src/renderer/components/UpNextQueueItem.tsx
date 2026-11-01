@@ -65,8 +65,15 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
             <span className="bg-gradient-to-r from-cyan-300 via-teal-200 to-cyan-400 bg-clip-text text-transparent font-black tracking-wide whitespace-nowrap shrink-0 inline-block py-0.5 leading-tight">
               #1 ON DECK • UP NEXT
             </span>
-            {item.isAiRecommended && (
-              <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded font-bold text-[8px] whitespace-nowrap shrink-0">
+            {item.unheard ? (
+              <span
+                className="bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.2 rounded font-bold text-[8px] whitespace-nowrap shrink-0"
+                title={item.pickReason}
+              >
+                NEW TO YOU
+              </span>
+            ) : item.isAiRecommended && (
+              <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded font-bold text-[8px] whitespace-nowrap shrink-0" title={item.pickReason}>
                 AI PICK
               </span>
             )}
@@ -179,6 +186,11 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
             {item.lastPlayedAt !== undefined && (
               <span className="text-violet-300 shrink-0 text-[8.5px] whitespace-nowrap">
                 🔁 played {timeAgo(item.lastPlayedAt)}
+              </span>
+            )}
+            {item.unheard && item.pickReason && (
+              <span className="text-amber-300/90 truncate text-[8.5px]" title={item.pickReason}>
+                ✨ {item.pickReason}
               </span>
             )}
           </div>
@@ -311,8 +323,15 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
             </span>
           )}
 
-          {item.isAiRecommended && (
-            <span className="text-[7.5px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded shrink-0 font-bold">
+          {item.unheard ? (
+            <span
+              className="text-[7.5px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.2 rounded shrink-0 font-bold"
+              title={item.pickReason}
+            >
+              NEW TO YOU
+            </span>
+          ) : item.isAiRecommended && (
+            <span className="text-[7.5px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 py-0.2 rounded shrink-0 font-bold" title={item.pickReason}>
               AI
             </span>
           )}
@@ -333,6 +352,12 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
           {item.lastPlayedAt !== undefined && (
             <span className="text-violet-300 shrink-0 text-[8px]">
               • 🔁 {timeAgo(item.lastPlayedAt)}
+            </span>
+          )}
+
+          {item.unheard && item.pickReason && (
+            <span className="text-amber-300/80 truncate text-[8px]" title={item.pickReason}>
+              • {item.pickReason.replace(/^Unheard: /, '')}
             </span>
           )}
         </div>

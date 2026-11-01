@@ -93,6 +93,10 @@ export interface TransitionConfig {
   filterSweep?: boolean; // keys clash: the outgoing song leaves through a rising high-pass
   gapCut?: boolean; // the old song stopped after a high point: cut in on the beat, no blend, no echo
   exitFx?: ExitFx; // how the old song leaves on a cut (see AudioEngine.chooseExitFx)
+  showcase?: 'eq_blend' | 'wash'; // a showcase transition (see AudioEngine SHOWCASE_BARS / WASH_FADE_SECONDS)
+  lowFade?: boolean; // tempos can't be beatmatched: fade over a low part for durationSeconds instead of a quick cut
+  naturalTempo?: boolean; // a cut with no overlap: start the new song at its own speed, not beatmatched
+  xfadeSeconds?: number; // linear cross-fade length for the smooth_crossfade style (default: the whole mix)
 }
 
 /**
@@ -136,6 +140,9 @@ export interface QueuedTrack {
   source?: 'ai' | 'playlist' | 'request';
   lastPlayedAt?: number; // set when a requested song was played within the last hour
   queuedAt?: number; // when it joined Up Next (new picks expire after 30 min unplayed, see queueRules.ts)
+  unheard?: boolean; // a song by an artist the listener plays that they have never played (see queueRules.ts)
+  moodPick?: boolean; // picked to follow the type of songs the listener just chose: stays at the top (see readMoodAndPushTop5)
+  pickReason?: string; // why an automatic pick is there, shown in Up Next (e.g. "Unheard: Karan Aujla (played 2× tonight)")
   highlightTime?: number;
   cueInTime?: number;
   bpm?: number;

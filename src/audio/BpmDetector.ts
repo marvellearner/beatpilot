@@ -1,13 +1,22 @@
 /**
  * Web Audio BPM, Beat-Grid & Confidence Analyzer
  *
- * 1. Low-pass (~150 Hz) the PCM to isolate kicks and dhol strikes.
- * 2. Build a 5 ms energy envelope and its onset strength (rises in log energy).
+ * 1. Split the PCM into three bands: low (< 150 Hz: kick, bass, dhol bass), mid (150 Hz – 2 kHz:
+ *    snare, claps, dholak, chords) and high (> 2 kHz: hi-hats, shakers, dhol stick crack).
+ * 2. Build 5 ms energy envelopes and their onset strength (rises in log energy). The tempo
+ *    comes from the low band when it is clear (confidence ≥ 0.6): kick and bass are the most
+ *    reliable pulse. Otherwise all three bands are used (low at half weight): many pop and desi
+ *    songs carry their pulse in claps, snares and hats. On 200 cached songs the low band alone
+ *    was confident for 34 %; the three bands alone moved some of those to a 3:2 tempo (triplet
+ *    hats, e.g. Dope Shope 90.6 -> 136), hence the low band first.
  * 3. Autocorrelate the onset strength over 70–180 BPM beat periods, weighted by a
  *    tempo prior centred on 120 BPM, then refine the period with sub-frame
  *    interpolation on the 4-beat (1 bar) peak for ~0.1 BPM precision.
- * 4. Find the beat-grid phase as the peak of an onset histogram folded over one beat.
+ * 4. Find the beat-grid phase as the peak of a low-band onset histogram folded over one beat
+ *    (kicks and bass land on the beat; hats would pull it toward the off-beat).
  * 5. Estimate which beat is the bar downbeat from where the strongest low-end hits fall.
+ * 6. Stability: the tempo is measured again on separate 40 s stretches; a tempo that most of
+ *    them don't confirm isn't trusted for beatmatching (confidence capped below 0.6).
  *
  * Precision matters: a 1 BPM error drifts a 8-bar blend by ~1/4 beat, which is an
  * audible flam, so BPM is returned with two decimals rather than rounded.
@@ -20,50 +29,106 @@ export interface BpmAnalysisResult {
   firstDownbeatTime: number; // Time of the first estimated bar downbeat (beat "1"), within the first bar
 }
 
+// Tempo onset weights for the low, mid and high bands (picked on 200 cached songs, see above)
+const BAND_WEIGHTS = [0.5, 1, 1];
+const LOW_ONLY = [1, 0, 0];
+const CLEAR_LOW_CONFIDENCE = 0.6; // the low band's own tempo is used from here up
+const STABILITY_STARTS = [20, 60, 100, 140]; // song seconds
+const STABILITY_SECONDS = 40;
+const STABILITY_TOLERANCE = 0.01;
+const UNSTABLE_MAX_CONFIDENCE = 0.55; // just below the beatmatch threshold (0.6)
+
 const NO_BEAT: BpmAnalysisResult = { bpm: 128, confidence: 0.1, isRegularBeat: false, firstDownbeatTime: 0 };
 
-export function detectBpmFromBuffer(buffer: AudioBuffer): BpmAnalysisResult {
+export function detectBpmFromBuffer(buffer: AudioBuffer, window?: { start: number; length: number }): BpmAnalysisResult {
+  const low = analyse(buffer, window, LOW_ONLY);
+  const weights = low.confidence >= CLEAR_LOW_CONFIDENCE ? LOW_ONLY : BAND_WEIGHTS;
+  let result = low;
+  if (weights !== LOW_ONLY) {
+    const all = analyse(buffer, window, BAND_WEIGHTS);
+    if (all.confidence > low.confidence) result = all;
+  }
+  if (window) return result;
+
+  // 6. Stability: most separate 40 s stretches must confirm the tempo (half or double time counts)
+  const checks: number[] = [];
+  for (const start of STABILITY_STARTS) {
+    if (start + STABILITY_SECONDS < buffer.duration - 10) checks.push(analyse(buffer, { start, length: STABILITY_SECONDS }, result === low ? LOW_ONLY : BAND_WEIGHTS).bpm);
+  }
+  const agrees = (b: number) => [0.5, 1, 2].some((m) => Math.abs((b * m) / result.bpm - 1) <= STABILITY_TOLERANCE);
+  const needed = Math.ceil(checks.length / 2) + (checks.length >= 4 ? 1 : 0); // 3 of 4, 2 of 3, 1 of 2
+  if (checks.length >= 2 && checks.filter(agrees).length < needed && result.confidence > UNSTABLE_MAX_CONFIDENCE) {
+    return { ...result, confidence: UNSTABLE_MAX_CONFIDENCE, isRegularBeat: false };
+  }
+  return result;
+}
+
+function analyse(buffer: AudioBuffer, window: { start: number; length: number } | undefined, weights: number[]): BpmAnalysisResult {
   try {
     const sampleRate = buffer.sampleRate;
     const channelData = buffer.getChannelData(0);
     // Analyse up to 60 s from past the intro, where the groove is established
-    const startOffsetSec = buffer.duration > 70 ? 20 : 0;
+    const startOffsetSec = window ? window.start : buffer.duration > 70 ? 20 : 0;
     const startSample = Math.floor(startOffsetSec * sampleRate);
-    const numSamples = Math.min(Math.floor(Math.min(60, buffer.duration) * sampleRate), channelData.length - startSample);
+    const numSamples = Math.min(Math.floor(Math.min(window?.length ?? 60, buffer.duration) * sampleRate), channelData.length - startSample);
 
-    // 1. One-pole low-pass at ~150 Hz + RMS envelope at 5 ms hops
+    // 1. Band envelopes at 5 ms hops (one-pole filters at 150 Hz and 2 kHz)
     const hop = Math.max(1, Math.round(sampleRate * 0.005));
     const frameRate = sampleRate / hop;
     const numFrames = Math.floor(numSamples / hop);
     if (numFrames < frameRate * 8) return NO_BEAT; // under 8 s of audio
 
-    const alpha = 1 - Math.exp((-2 * Math.PI * 150) / sampleRate);
-    const envelope = new Float32Array(numFrames);
+    const aLow = 1 - Math.exp((-2 * Math.PI * 150) / sampleRate);
+    const aMid = 1 - Math.exp((-2 * Math.PI * 2000) / sampleRate);
+    const bands = [new Float32Array(numFrames), new Float32Array(numFrames), new Float32Array(numFrames)];
+    const bandPeaks = [0, 0, 0];
     let lp = 0;
-    let peakEnvelope = 0;
+    let lp2 = 0;
     for (let f = 0; f < numFrames; f++) {
-      let sumSq = 0;
+      let low = 0;
+      let mid = 0;
+      let high = 0;
       const base = startSample + f * hop;
       for (let i = 0; i < hop; i++) {
-        lp += alpha * (channelData[base + i] - lp);
-        sumSq += lp * lp;
+        const x = channelData[base + i];
+        lp += aLow * (x - lp);
+        lp2 += aMid * (x - lp2);
+        low += lp * lp;
+        mid += (lp2 - lp) * (lp2 - lp);
+        high += (x - lp2) * (x - lp2);
       }
-      envelope[f] = Math.sqrt(sumSq / hop);
-      if (envelope[f] > peakEnvelope) peakEnvelope = envelope[f];
+      const sums = [low, mid, high];
+      for (let k = 0; k < 3; k++) {
+        bands[k][f] = Math.sqrt(sums[k] / hop);
+        if (bands[k][f] > bandPeaks[k]) bandPeaks[k] = bands[k][f];
+      }
     }
-    if (peakEnvelope < 0.001) return NO_BEAT; // silence
+    if (Math.max(...bandPeaks) < 0.001) return NO_BEAT; // silence
 
-    // 2. Onset strength: half-wave rectified rise in log-compressed energy
+    // 2. Onset strength per band: half-wave rectified rise in log-compressed energy
+    const bandOnset = (k: number) => {
+      const out = new Float32Array(numFrames);
+      if (bandPeaks[k] <= 0) return out;
+      let prevLog = Math.log1p((100 * bands[k][0]) / bandPeaks[k]);
+      for (let f = 1; f < numFrames; f++) {
+        const curLog = Math.log1p((100 * bands[k][f]) / bandPeaks[k]);
+        out[f] = Math.max(0, curLog - prevLog);
+        prevLog = curLog;
+      }
+      return out;
+    };
+    const lowOnset = bandOnset(0);
+    const midOnset = bandOnset(1);
+    const highOnset = bandOnset(2);
     const onset = new Float32Array(numFrames);
     let onsetMean = 0;
-    let prevLog = Math.log1p((100 * envelope[0]) / peakEnvelope);
     for (let f = 1; f < numFrames; f++) {
-      const curLog = Math.log1p((100 * envelope[f]) / peakEnvelope);
-      onset[f] = Math.max(0, curLog - prevLog);
+      onset[f] = weights[0] * lowOnset[f] + weights[1] * midOnset[f] + weights[2] * highOnset[f];
       onsetMean += onset[f];
-      prevLog = curLog;
     }
     onsetMean /= numFrames;
+    // Phase and downbeat from the low band (kicks / bass land on the beat), unless the song has none
+    const gridOnset = bandPeaks[0] >= 0.001 ? lowOnset : onset;
     // Light smoothing (~15 ms) so a beat period that falls between two frames still
     // correlates fully; raw one-frame spikes made fast tempos lose to their half-time
     const smooth = new Float32Array(numFrames);
@@ -126,9 +191,9 @@ export function detectBpmFromBuffer(buffer: AudioBuffer): BpmAnalysisResult {
     const bins = Math.max(8, Math.round(periodFrames));
     const histogram = new Float32Array(bins);
     for (let f = 1; f < numFrames; f++) {
-      if (onset[f] <= 0) continue;
+      if (gridOnset[f] <= 0) continue;
       const t = startOffsetSec + (f - 0.5) / frameRate; // rise happened between frames f-1 and f
-      histogram[Math.floor(((t % beatSeconds) / beatSeconds) * bins) % bins] += onset[f];
+      histogram[Math.floor(((t % beatSeconds) / beatSeconds) * bins) % bins] += gridOnset[f];
     }
     const at = (i: number) => histogram[(i + bins) % bins];
     let peakBin = 0;
@@ -151,7 +216,7 @@ export function detectBpmFromBuffer(buffer: AudioBuffer): BpmAnalysisResult {
       const f = Math.round((phase + m * beatSeconds - startOffsetSec) * frameRate + 0.5);
       if (f >= numFrames - 1) break;
       if (f < 1) continue;
-      barStrength[m % 4] += Math.max(onset[f - 1], onset[f], onset[f + 1]);
+      barStrength[m % 4] += Math.max(gridOnset[f - 1], gridOnset[f], gridOnset[f + 1]);
     }
     const sortedStrength = [...barStrength].sort((a, b) => b - a);
     const strongest = barStrength.indexOf(sortedStrength[0]);

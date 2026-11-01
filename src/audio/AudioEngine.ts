@@ -25,7 +25,7 @@ import {
 } from './KeyDetector';
 import { loudnessGainDb } from './Loudness';
 import { DeckCues } from './engine/DeckCues';
-import { planMix, vocalClash, MixPlan, MixSongInfo } from './MixPointPlanner';
+import { lowParts, planMix, vocalClash, MixPlan, MixSongInfo } from './MixPointPlanner';
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
 import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dSong, isMashupSong, type SongRef } from './songMatch';
@@ -37,8 +37,11 @@ import {
   isChosen,
   isNewPick,
   isQueueFull,
+  UNHEARD_MAX,
+  mainArtistKey,
   mixFamiliarAndNew,
   sameSongAs,
+  spreadArtists,
   staleSongs,
   type SongLike,
 } from './engine/queueRules';
@@ -46,7 +49,7 @@ import { DJAgent } from '../ai/DJAgent';
 import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
 import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter } from '../../shared/songFilter';
 import type { IntroAnalysisResult } from './IntroSkitDetector';
-import { chooseNext } from './engine/setFlow';
+import { chooseNext, tempoStep } from './engine/setFlow';
 import { guessLanguage } from '../../shared/songLanguage';
 import { runAnalysis, analysisComplete, ANALYSIS_FIELDS, AnalysisFields } from './analysis/trackAnalysis';
 import { analyzeInWorker } from './analysis/analyzeInWorker';
@@ -60,6 +63,16 @@ const TOP_SONG_AVOID_KEY = 'ai_dj_top_song_avoid';
 const NO_REPEAT_WINDOW_MS = 60 * 60 * 1000;
 // ...nor one played in the last 3 hours (older plays come back: they're the songs people know)
 const REPLAY_GAP_MS = 3 * 60 * 60 * 1000;
+// Following the listener's mood: at least this many songs like the ones they just chose, from
+// their last MOOD_RUN_SONGS choices made within MOOD_RUN_MS of each other
+const MOOD_PICKS = 6;
+const MOOD_RUN_SONGS = 3;
+const MOOD_RUN_MS = 45 * 60 * 1000;
+const MOOD_MORE = 3; // a pick played: this many more of the type
+const MOOD_MAX_WAITING = 10; // ...up to this many picks waiting
+const TONIGHT_MS = 12 * 60 * 60 * 1000; // "tonight" for unheard picks: the last 12 hours, so a party past midnight counts as one
+const UNHEARD_TONIGHT_ARTISTS = 3; // tonight's artists whose unheard songs are looked for
+const UNHEARD_TOP_ARTISTS = 3; // most played artists whose unheard songs are looked for
 // About 70 % of automatically picked songs come from the listener's own songs, the rest are new
 const FAMILIAR_SHARE = 0.7;
 // A new pick that expired or was refreshed away isn't suggested again for this long
@@ -77,13 +90,26 @@ const MAX_OUTGOING_RAMP = 0.08; // gradual ramp of the outgoing song before an a
 const MIN_BEATMATCH_CONFIDENCE = 0.6;
 const UNMATCHED_TRANSITION_SECONDS = 2; // tempos too far apart: short cut on the beat, no long flam
 const GAP_CUT_SECONDS = 0.08; // a gap exit: the old song is silent there, so the swap is near instant
+// STRICT: never an abrupt change unless the old song itself pauses there (a gap cut). Every other
+// transition, whoever asked for it (AI, planner, Mix now, a skip), overlaps for at least this long
+const SMOOTH_MIN_SECONDS = 4;
+const SMOOTH_FALLBACK_SECONDS = 5; // unmatched tempos and no low part: a bass-swapped fade, not a cut
 const KEY_CLASH_MAX_BARS = 8; // blend length cap when the keys don't fit perfectly
 // Show-off exits (loop roll, brake) at most once every this many mixes: the research is unanimous
 // that effects stop working when they're on every transition
 const SHOW_FX_EVERY = 4;
-const ROLL_LOUDER_DB = 1.5; // a loop roll builds into a song at least this much louder (or a favourite)
 // Set flow breathers: a song this much quieter than the one before it gave the floor a rest
 const BREATHER_STEP_DB = 1.5;
+// Safety clipper on the output: unchanged up to the knee, never above the ceiling
+const SAFETY_KNEE = 0.9;
+// A low-part fade between songs that can't be beatmatched (see lowFadeSeconds)
+const LOW_FADE_MIN_SECONDS = 4;
+const LOW_FADE_MAX_SECONDS = 9;
+// Showcases, at most once every SHOW_FX_EVERY mixes: a 16-bar band-by-band blend for songs that
+// can be beatmatched, a slow wash fade over two low parts for songs that can't
+const SHOWCASE_BARS = 16;
+const WASH_FADE_SECONDS = 12;
+const SAFETY_CEILING = 0.99;
 const ON_AIR_LOUDNESS_MAX = 12;
 const MANUAL_MIX_LOOKAHEAD_SECONDS = 45; // Mix / Next: find the best blend point within the next 45 s per MIXING_RULES.md
 const OUTRO_PLAN_SECONDS = 45; // auto-mix: plan the blend point within the last 45 s
@@ -124,6 +150,11 @@ const BEST_PART_EXIT_BARS = 16; // ...then mix out at the best phrase within the
 const BEST_PART_BUILD_BARS = 16; // incoming songs enter up to 16 bars before their hook
 const BEST_PART_MIN_BUILD_BARS = 4; // ...and never later than 4 bars before it
 const BEST_PART_MIN_SONG_SECONDS = 120; // shorter songs play whole
+const BEST_PARTS_MAX_KEY = 'ai_dj_best_parts_max_seconds';
+const BEST_PARTS_DEFAULT_SECONDS = 90; // the most of a song that plays, from where it came in, mix included
+const BEST_PARTS_MIN_LIMIT = 45;
+const BEST_PARTS_MAX_LIMIT = 180;
+const LIMIT_PASSED_LEAD_SECONDS = 8; // the limit already passed (no song was ready): mix out within this
 const PLAN_STABLE_SECONDS = 2.5; // stop ramping tempo this close to a planned mix so timing is exact
 // Tempo glide speed for both the pre-mix ramp and the return to natural pitch (0.4% per second)
 const PITCH_RETURN_PER_SECOND = 0.004;
@@ -206,6 +237,22 @@ export class AudioEngine {
       return false;
     }
   })();
+  // Best Parts mode: the most of each song that plays, in seconds from where it came in (adjustable, remembered)
+  public bestPartsMaxSeconds: number = (() => {
+    try {
+      const saved = Number(window.localStorage.getItem(BEST_PARTS_MAX_KEY));
+      return saved >= BEST_PARTS_MIN_LIMIT && saved <= BEST_PARTS_MAX_LIMIT ? saved : BEST_PARTS_DEFAULT_SECONDS;
+    } catch {
+      return BEST_PARTS_DEFAULT_SECONDS;
+    }
+  })();
+  // Where the song on air came in (song seconds), for the Best Parts play limit
+  private playStart: { trackId: string; pos: number } | null = null;
+  // The songs the listener chose lately, newest first: their type is followed (readMoodAndPushTop5)
+  private chosenRun: Array<{ title: string; artist: string; url?: string; at: number }> = [];
+  private moodToken = 0;
+  // Songs put in Up Next to follow the listener's type: when one plays, more of that type follow
+  private moodPickUrls = new Set<string>();
   private isFetchingRecommendations: boolean = false;
   // Songs dropped by expiry, Refresh or a failed load, so the same songs don't come straight back
   private droppedPicks: Array<{ song: SongLike; at: number }> = [];
@@ -290,6 +337,7 @@ export class AudioEngine {
     blendBars?: number; // set by the AI DJ (or 4 when the keys clash)
     keyFit?: 'good' | 'ok' | 'clash' | 'unknown';
     harmonicShift?: string;
+    showcase?: boolean; // planned as a showcase blend (16 bars, band-by-band handover)
   } | null = null;
 
   // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
@@ -385,9 +433,11 @@ export class AudioEngine {
     this.masterAnalyserL.fftSize = 256;
     this.masterAnalyserR.fftSize = 256;
 
-    // Chain: Limiter -> Master Gain -> Master Analyser -> Output
+    // Chain: Limiter -> Master Gain -> Safety Clipper -> Master Analyser -> Output
     this.limiter.connect(this.masterGain);
-    this.masterGain.connect(this.masterAnalyser);
+    const [clipIn, clipOut] = this.createSafetyClipper();
+    this.masterGain.connect(clipIn);
+    clipOut.connect(this.masterAnalyser);
     this.masterAnalyser.connect(this.channelSplitter);
     this.channelSplitter.connect(this.masterAnalyserL, 0);
     this.channelSplitter.connect(this.masterAnalyserR, 1);
@@ -1249,11 +1299,50 @@ export class AudioEngine {
    * (`earliestExit`). Normally its end; in Best Parts mode its exit window, or, once that has
    * passed without a song ready, the next 16 bars.
    */
-  private mixOutWindow(track: TrackMetadata, position: number): { endsAt: number; earliestExit?: number } {
+  private mixOutWindow(track: TrackMetadata, position: number): { endsAt: number; earliestExit?: number; latestExit?: number } {
     const best = this.bestPartExitWindow(track);
-    if (!best) return { endsAt: this.musicEnd(track) };
-    if (position < best.to - 4) return { endsAt: best.to, earliestExit: best.from };
-    return { endsAt: Math.min(this.musicEnd(track), position + BEST_PART_EXIT_BARS * (240 / track.bpm)) };
+    const win: { endsAt: number; earliestExit?: number } = !best
+      ? { endsAt: this.musicEnd(track) }
+      : position < best.to - 4
+        ? { endsAt: best.to, earliestExit: best.from }
+        : { endsAt: Math.min(this.musicEnd(track), position + BEST_PART_EXIT_BARS * (240 / track.bpm)) };
+    const limit = this.playLimitEnd(track, position);
+    if (limit === undefined) return win;
+    // The hard limit: the old song is gone by then, whatever the hook window, a high part or the
+    // phrase search would prefer (passed already, e.g. no song was ready: the next few seconds)
+    const latestExit = Math.max(limit, position + LIMIT_PASSED_LEAD_SECONDS);
+    const endsAt = Math.min(win.endsAt, latestExit);
+    const earliestExit = win.earliestExit !== undefined && win.earliestExit < endsAt - 4 ? win.earliestExit : undefined;
+    return { endsAt, earliestExit, latestExit };
+  }
+
+  /**
+   * Best Parts mode: the song second by which the song on air must be mixed out, at most
+   * bestPartsMaxSeconds after it came in. Undefined when the mode is off or the song is short.
+   */
+  private playLimitEnd(track: TrackMetadata, position: number): number | undefined {
+    if (!this.bestPartsMode || isStrictStartSong(track) || !track.duration || track.duration < BEST_PART_MIN_SONG_SECONDS) return undefined;
+    // First seen on air without a recorded entry (first song, reload): count from here
+    if (this.playStart?.trackId !== track.id) this.playStart = { trackId: track.id, pos: position };
+    return this.playStart.pos + this.bestPartsMaxSeconds;
+  }
+
+  /** Best Parts mode: how much of each song plays at most (45–180 s). Remembered. */
+  public setBestPartsMaxSeconds(seconds: number) {
+    this.bestPartsMaxSeconds = Math.round(Math.max(BEST_PARTS_MIN_LIMIT, Math.min(BEST_PARTS_MAX_LIMIT, seconds)));
+    try {
+      window.localStorage.setItem(BEST_PARTS_MAX_KEY, String(this.bestPartsMaxSeconds));
+    } catch {
+      // storage unavailable
+    }
+    this.aiOutroPrep = null; // planned for the old limit
+    this.acquisitionStatus = `Best Parts: each song plays at most ${this.formatPlayLimit()}.`;
+    this.notify();
+  }
+
+  private formatPlayLimit(): string {
+    const s = this.bestPartsMaxSeconds;
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
 
   /** Where the song's music ends (a closing scene, dialogue, fade or silence after it doesn't count). */
@@ -1266,7 +1355,7 @@ export class AudioEngine {
    * and picks the incoming song's entry point, then waits for that moment.
    * Falls back to an immediate mix when no plan is possible (e.g. too close to the end).
    */
-  private planMixInto(itemId: string, lookAheadSeconds: number, durationSeconds?: number, earliestExit?: number): boolean {
+  private planMixInto(itemId: string, lookAheadSeconds: number, durationSeconds?: number, earliestExit?: number, latestExit?: number): boolean {
     const item = this.queue.find((q) => q.id === itemId);
     if (!item || !item.audioBuffer) return false;
 
@@ -1286,7 +1375,12 @@ export class AudioEngine {
     // Keys that don't fit perfectly: at most 8 bars (a clash also leaves through a filter sweep,
     // so its harmonies are thinned out instead of the blend being cut short)
     const maxBars = this.keyBlendBars(keyFit, this.blendBars());
-    const blendBeats = outTrack && this.canBeatmatch(outTrack, incoming) ? maxBars * 4 : 4;
+    // Unmatched tempos: 2 bars, the length of a low-part fade (see lowFadeSeconds)
+    // Now and then (SHOW_FX_EVERY) a beatmatched pair whose keys don't clash gets a showcase blend:
+    // 16 bars with the bands handed over one at a time, planned with room for all 16
+    const blendable = !!outTrack && this.canBeatmatch(outTrack, incoming);
+    const showcase = blendable && !durationSeconds && keyFit !== 'clash' && this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
+    const blendBeats = showcase ? SHOWCASE_BARS * 4 : blendable ? maxBars * 4 : 8;
     const plan =
       outTrack && outInfo && incInfo
         ? planMix({
@@ -1298,6 +1392,7 @@ export class AudioEngine {
             minLeadSeconds: 1.5,
             preferIncomingHook: false, // Never start from hook because build up is also important
             earliestExit,
+            latestExit,
             entryRange: this.bestPartEntryRange(incoming),
           })
         : null;
@@ -1318,15 +1413,16 @@ export class AudioEngine {
       durationSeconds,
       timer: 0,
       keyFit,
-      blendBars: keyFit === 'clash' || keyFit === 'ok' ? maxBars : undefined,
+      blendBars: showcase ? SHOWCASE_BARS : keyFit === 'clash' || keyFit === 'ok' ? maxBars : undefined,
       harmonicShift,
+      showcase,
     };
     this.schedulePendingMix();
     const startsIn = this.pendingMixStartsIn() ?? 0;
     const shiftTag = harmonicCompat ? ` [${harmonicCompat.badgeText}]` : '';
     // Say when the song's ending (a closing scene, dialogue, fade) is being skipped
     const outroTag = outTrack?.outroReason && outTrack.musicEndTime !== undefined && plan.exitTime < outTrack.duration - 5 ? ` (${outTrack.outroReason})` : '';
-    const cutTag = !durationSeconds && vocalClash(plan) ? '; both songs sing here, so a quick cut' : '';
+    const cutTag = !durationSeconds && vocalClash(plan) ? '; both songs sing here, so a short blend' : '';
     this.acquisitionStatus = `Mixing into "${item.title}" in ${Math.round(startsIn)}s${shiftTag}: ${plan.reason}${outroTag}${cutTag}. Click Mix Now to mix immediately.`;
     this.notify();
 
@@ -1399,6 +1495,7 @@ export class AudioEngine {
       minLeadSeconds: 1.5,
       preferIncomingHook: false,
       earliestExit: mixOut.earliestExit,
+      latestExit: mixOut.latestExit,
       entryRange: this.bestPartEntryRange(incoming),
     });
     if (!plan) return;
@@ -1548,17 +1645,11 @@ export class AudioEngine {
    * - Tempos can't match: a reverb wash in a calm mood (an echo would fight the new beat), a
    *   brake on a dance floor (now and then), else a beat-timed echo-out.
    */
-  private chooseExitFx(out: TrackMetadata, inc: TrackMetadata, keyFit: string | undefined, aiCut: boolean): ExitFx | undefined {
-    const danceFloor = this.mood === 'party' || this.mood === 'bhangra';
-    const calm = this.mood === 'chill' || this.mood === 'romantic';
-    const showFxOk = this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
-    const bigger = (inc.loudnessDb ?? 0) - (out.loudnessDb ?? 0) >= ROLL_LOUDER_DB || this.isFavorite(inc);
-    if (this.canBeatmatch(out, inc) && !aiCut) {
-      return danceFloor && showFxOk && bigger && keyFit !== 'good' ? 'roll' : undefined;
-    }
-    if (calm) return 'reverb';
-    if (danceFloor && showFxOk) return 'brake';
-    return 'echo';
+  private chooseExitFx(out: TrackMetadata, inc: TrackMetadata, aiCut: boolean): ExitFx | undefined {
+    // STRICT no abrupt changes: no loop roll or brake (both end in a hard landing, MIXING_RULES.md
+    // "No abrupt transitions"). Beatmatched songs blend; the rest fade with a reverb or echo tail.
+    if (this.canBeatmatch(out, inc) && !aiCut) return undefined;
+    return this.mood === 'chill' || this.mood === 'romantic' ? 'reverb' : 'echo';
   }
 
   /** Blend length for a key fit: keys that don't fit perfectly get at most KEY_CLASH_MAX_BARS. */
@@ -1627,8 +1718,9 @@ export class AudioEngine {
     const state = this.onAirDeck().getPlaybackState();
     if (!state.isPlaying || !state.track) return;
     const mixOut = this.mixOutWindow(state.track, state.currentTime);
-    this.planMixInto(choice.id, mixOut.endsAt - state.currentTime, undefined, mixOut.earliestExit);
-    if (this.lastAiDecision.startsWith('Next:') && !this.acquisitionStatus.startsWith('🤖')) {
+    this.planMixInto(choice.id, mixOut.endsAt - state.currentTime, undefined, mixOut.earliestExit, mixOut.latestExit);
+    // Only the decision about this song (an older one can still be stored when the rules picked it)
+    if (this.lastAiDecision.startsWith(`Next: "${choice.title}"`) && !this.acquisitionStatus.startsWith('🤖')) {
       this.acquisitionStatus = `🤖 AI DJ picked ${this.lastAiDecision.slice(6)}. ${this.acquisitionStatus}`;
     }
   }
@@ -1655,12 +1747,35 @@ export class AudioEngine {
     const vocalCut = !exitNow && !gapCut && pending.durationSeconds === undefined && vocalClash(pending.plan);
     const quickCut = pending.style === 'cut' || vocalCut;
     const outTrack = onAir.getTrack();
-    const exitFx = gapCut || !outTrack ? undefined : this.chooseExitFx(outTrack, this.queuedItemToTrack(pending.item), pending.keyFit, quickCut);
-    this.mixesSinceShowFx = exitFx === 'roll' || exitFx === 'brake' ? 0 : this.mixesSinceShowFx + 1;
-    if (gapCut || exitFx === 'roll' || exitFx === 'brake') {
+    // Tempos that can't be beatmatched: fade over a low part (verse, breakdown, intro, outro) when
+    // either song is in one at the mix point, instead of an abrupt cut (MIXING_RULES.md "Low-part fade")
+    // (STRICT: with no pause in the old song this replaces every cut, the AI's and the vocal-clash one too)
+    const lowFade =
+      !gapCut && durationSeconds === undefined && outTrack && !this.canBeatmatch(outTrack, this.queuedItemToTrack(pending.item))
+        ? this.lowFadeSeconds(pending.plan, onAir.getPlaybackState().effectiveBpm)
+        : 0;
+    let exitFx = gapCut || !outTrack ? undefined : this.chooseExitFx(outTrack, this.queuedItemToTrack(pending.item), quickCut);
+    if (lowFade) exitFx = this.mood === 'chill' || this.mood === 'romantic' ? 'reverb' : undefined;
+    // Showcases (now and then): the planned 16-bar band-by-band blend, or for songs that can't be
+    // beatmatched a slow wash fade when both are in a low part
+    const showDue = this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
+    const showcase: TransitionConfig['showcase'] =
+      pending.showcase && !quickCut && !gapCut && exitFx !== 'roll'
+        ? 'eq_blend'
+        : showDue && lowFade && lowParts(pending.plan).exit && lowParts(pending.plan).entry
+          ? 'wash'
+          : undefined;
+    if (showcase) exitFx = undefined;
+    this.mixesSinceShowFx = exitFx === 'roll' || exitFx === 'brake' || showcase ? 0 : this.mixesSinceShowFx + 1;
+    if (showcase === 'wash') {
+      durationSeconds = WASH_FADE_SECONDS;
+    } else if (lowFade) {
+      durationSeconds = lowFade;
+    } else if (gapCut) {
       durationSeconds = GAP_CUT_SECONDS;
     } else if (durationSeconds === undefined && quickCut) {
-      durationSeconds = UNMATCHED_TRANSITION_SECONDS;
+      // Beatmatched but both sing (or the AI wanted a cut): a short 2-bar blend, never a cut
+      durationSeconds = Math.max(SMOOTH_MIN_SECONDS, (2 * 4 * 60) / onAir.getPlaybackState().effectiveBpm);
     } else if (durationSeconds === undefined && pending.blendBars) {
       durationSeconds = Math.max(4, Math.min(40, (pending.blendBars * 4 * 60) / onAir.getPlaybackState().effectiveBpm));
     }
@@ -1677,11 +1792,14 @@ export class AudioEngine {
       sourceExitTime: exitNow ? undefined : pending.plan.exitTime,
       targetEntryTime: isStrict ? 0 : pending.plan.entryTime,
       filterSweep: pending.keyFit === 'clash' && !gapCut && !exitFx && !quickCut,
+      naturalTempo: gapCut,
+      lowFade: lowFade > 0,
+      showcase,
       gapCut,
       exitFx,
     });
     if (vocalCut) {
-      this.acquisitionStatus += ' Both songs sing here, so a quick cut instead of a blend.';
+      this.acquisitionStatus += ' Both songs sing here, so a short blend instead of a long one.';
       this.notify();
     }
   }
@@ -1795,8 +1913,12 @@ export class AudioEngine {
         // What was just played (only this browser knows) shapes the suggestions too
         const recent = JSON.stringify(this.playLog.slice(0, 12).map((e) => [e.title.slice(0, 80), (e.artist || '').slice(0, 40)]));
         const avoid = JSON.stringify(this.sessionAvoidArtists());
+        // Unheard songs by tonight's and the most played artists: asked with the first request only
+        const unheard = iterations === 1 && !this.artistFocus?.only ? this.unheardArtists() : [];
         const res = await fetch(
           `/api/recommend?seeds=${encodeURIComponent(seeds)}&mood=${this.mood}&recent=${encodeURIComponent(recent)}&avoid=${encodeURIComponent(avoid)}${
+            unheard.length ? `&unheard=${encodeURIComponent(JSON.stringify(unheard))}` : ''
+          }${
             this.artistFocus ? `&focus=${encodeURIComponent(JSON.stringify(this.artistFocus))}` : ''
           }${
             // The AI (~30 s on CPU) for a background fill's first seed only; Refresh uses quick searches throughout
@@ -1808,11 +1930,14 @@ export class AudioEngine {
         );
         if (res.ok) {
           const data = await res.json();
-          const recs: Array<{ title: string; url: string; author: string; duration: number; thumbnail: string }> =
-            data.recommendations || [];
+          type Rec = { title: string; url: string; author: string; duration: number; thumbnail: string; why?: string };
+          const recs: Rec[] = data.recommendations || [];
+          // Unheard songs first (up to UNHEARD_MAX in Up Next, one per artist), then the other picks
+          const unheardRecs: Rec[] = (data.unheard || []).map((r: Rec) => ({ ...r, unheard: true }));
 
-          for (const item of recs) {
+          for (const item of [...unheardRecs, ...recs] as Array<Rec & { unheard?: boolean }>) {
             if (isQueueFull(this.queue)) break;
+            if (item.unheard && !this.wantsUnheard(item)) continue;
             // RULE: Never add any song longer than 6 minutes on your own in up next queue
             if (item.duration && item.duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
             // RULE: Never include 8D or mashup songs in next queue on your own
@@ -1841,6 +1966,8 @@ export class AudioEngine {
                 isAiRecommended: true,
                 source: 'ai',
                 queuedAt: Date.now(),
+                unheard: item.unheard || undefined,
+                pickReason: item.why,
               });
             }
           }
@@ -1854,6 +1981,34 @@ export class AudioEngine {
     } finally {
       this.isFetchingRecommendations = false;
       this.refillRequest = null;
+    }
+  }
+
+  /**
+   * A queued song known only by its link (e.g. a link line in my_songs.txt): its title and artist
+   * from the listener's own songs if it's there, else from a lookup. Left as is if both fail.
+   */
+  private async fillLinkDetails(item: QueuedTrack) {
+    const key = item.url.toLowerCase();
+    const known = [...this.favorites, ...this.library.history, ...this.playLog].find(
+      (s) => s.url?.toLowerCase() === key && s.title && !/^https?:\/\//i.test(s.title),
+    );
+    if (known) {
+      item.title = known.title;
+      item.artist = known.artist || '';
+      item.thumbnail ??= known.thumbnail;
+      return;
+    }
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(item.url)}`);
+      const match = res.ok ? (await res.json()).results?.[0] : undefined;
+      if (!match?.title) return;
+      item.title = match.title;
+      item.artist = match.author || '';
+      item.thumbnail ??= match.thumbnail;
+      if (match.duration) item.duration = match.duration;
+    } catch {
+      // Lookup unavailable: the link stays as the title
     }
   }
 
@@ -1875,6 +2030,7 @@ export class AudioEngine {
       let streamUrl = item.url;
       // YouTube links and songs from the offline library (local:<id>) are fetched directly
       const isDirectUrl = streamUrl.startsWith('http://') || streamUrl.startsWith('https://') || streamUrl.startsWith('local:');
+      if (isDirectUrl && /^https?:\/\//i.test(item.title)) await this.fillLinkDetails(item);
       if (!isDirectUrl) {
         // Resolve raw song title / query to YouTube stream URL via /api/search
         const query = item.title + (item.artist && item.artist !== 'Artist' ? ' ' + item.artist : '');
@@ -2150,6 +2306,43 @@ export class AudioEngine {
     }
   }
 
+  /**
+   * Artists to look for unheard songs by, with why: the ones played most tonight (last 12 hours,
+   * up to 3), then the most played of all time (up to 3), leaving out artists being avoided.
+   */
+  private unheardArtists(): Array<[string, string]> {
+    const taste = this.tasteProfile();
+    const avoid = new Set(taste.avoidArtists.map(artistKey));
+    const since = Date.now() - TONIGHT_MS;
+    const tonight = new Map<string, { name: string; n: number }>();
+    for (const e of this.playLog) {
+      if (e.playedAt < since) continue;
+      const name = songArtists({ title: e.title, artist: e.artist })[0];
+      const key = name ? artistKey(name) : '';
+      if (key.length < 3 || avoid.has(key)) continue;
+      const entry = tonight.get(key) ?? { name, n: 0 };
+      entry.n++;
+      tonight.set(key, entry);
+    }
+    const out: Array<[string, string]> = [...tonight.values()]
+      .sort((a, b) => b.n - a.n)
+      .slice(0, UNHEARD_TONIGHT_ARTISTS)
+      .map((a) => [a.name, a.n > 1 ? `played ${a.n}× tonight` : 'played tonight']);
+    const taken = new Set(out.map(([name]) => artistKey(name)));
+    for (const name of taste.artists.filter((a) => !taken.has(artistKey(a))).slice(0, UNHEARD_TOP_ARTISTS)) out.push([name, 'one of your most played']);
+    return out;
+  }
+
+  /** Whether an unheard pick can join Up Next: room left (UNHEARD_MAX), none by that artist yet, and truly never played or liked. */
+  private wantsUnheard(song: { title: string; author: string; url: string }): boolean {
+    const waiting = this.queue.filter((q) => q.unheard && !isChosen(q));
+    if (waiting.length >= UNHEARD_MAX) return false;
+    const artist = mainArtistKey({ title: song.title, artist: song.author });
+    if (artist && waiting.some((q) => mainArtistKey(q) === artist)) return false;
+    const matches = sameSongAs({ title: song.title, artist: song.author, url: song.url });
+    return ![...this.library.history, ...this.favorites, ...this.playLog].some((s) => matches(s));
+  }
+
   /** The listener's taste from Most Played, Favourites, the play log, banned songs and tonight's removals (see shared/taste.ts). */
   public tasteProfile(): TasteProfile {
     return buildTaste({
@@ -2243,108 +2436,137 @@ export class AudioEngine {
   }
 
   /**
-   * Reads user mood from a searched/played song and pushes the top 5
-   * matching songs to the top of the Up Next queue.
+   * The listener chose a song (searched and played it): read the TYPE of songs they're in the
+   * mood for from it and the songs they chose just before (Shararat, then Aaj Ki Raat → item
+   * songs), and put at least MOOD_PICKS such songs at the top of Up Next, after their own picks.
+   * Songs come first from what people play with those songs (/api/similar: a song played with
+   * several of them is that type for sure), then from the AI's ideas. A new choice replaces the
+   * picks for the last one that haven't started loading. MIXING_RULES.md "Following the listener's mood".
+   *
+   * `continue`: one of those picks is now playing, so the listener is staying with that type: more
+   * of it (MOOD_MORE, keeping at least MOOD_PICKS waiting) join the end of the picks. The songs
+   * they chose themselves stay the anchors, so one off-type pick doesn't drift the type away.
    */
-  public async readMoodAndPushTop5(track: TrackMetadata): Promise<void> {
+  public async readMoodAndPushTop5(track: TrackMetadata, mode: 'new' | 'continue' = 'new'): Promise<void> {
     if (!track?.title) return;
+    const now = Date.now();
+    if (mode === 'continue') {
+      // The listener's own choice that is just starting is read as a new choice already
+      if (this.chosenRun[0] && sameSongAs(track)(this.chosenRun[0]) && now - this.chosenRun[0].at < 15_000) return;
+    }
+    const anchors = this.chosenRun.filter((s) => now - s.at < MOOD_RUN_MS);
+    const run =
+      mode === 'new'
+        ? this.rememberChosen(track)
+        : [{ title: track.title, artist: track.artist, url: track.url, at: now }, ...anchors.filter((s) => !sameSongAs(track)(s))].slice(0, MOOD_RUN_SONGS);
+    const waitingPicks = () => this.queue.filter((q) => q.moodPick && q.status !== 'failed').length;
+    const limit = mode === 'new' ? MOOD_PICKS : Math.max(MOOD_PICKS - waitingPicks(), Math.min(MOOD_MORE, MOOD_MAX_WAITING - waitingPicks()));
+    if (limit <= 0) return;
+    const token = (this.moodToken = (this.moodToken ?? 0) + 1);
     try {
-      this.acquisitionStatus = `🤖 AI reading mood from "${track.title}"…`;
+      const names = run.map((s) => `"${cleanCoreTitle(s.title) || s.title}"`).slice(0, 3).join(', then ');
+      this.acquisitionStatus = mode === 'new' ? `🤖 Reading the type of songs from ${names}…` : `🤖 You're staying with this type: finding more like ${names}…`;
       this.notify();
 
-      const moodResult = await this.djAgent.readMoodAndRecommendTop5({
-        title: track.title,
-        artist: track.artist,
-        bpm: track.bpm,
-        taste: tasteForPrompt(this.tasteProfile()),
-      });
+      type Pick = { title: string; artist: string; url: string; duration?: number; thumbnail?: string; why: string };
+      const seeds = JSON.stringify(run.map((s) => [s.title.slice(0, 80), (s.artist || '').slice(0, 40), s.url?.startsWith('http') ? s.url : '']));
+      const [similar, mood] = await Promise.all([
+        fetch(`/api/similar?seeds=${encodeURIComponent(seeds)}`)
+          .then((r) => (r.ok ? r.json() : { songs: [] }))
+          .then((j) => (j.songs ?? []) as Array<{ title: string; author: string; url: string; duration: number; thumbnail?: string; why: string }>)
+          .catch(() => []),
+        this.djAgent
+          .readMoodAndRecommendTop5({ title: track.title, artist: track.artist, bpm: track.bpm, taste: tasteForPrompt(this.tasteProfile()), before: run.slice(1) })
+          .catch(() => null),
+      ]);
+      if (token !== this.moodToken) return; // a newer choice is being read
 
-      if (!moodResult || !moodResult.top5Songs || moodResult.top5Songs.length === 0) return;
+      const usable = (s: { title: string; artist?: string; url?: string; duration?: number }) =>
+        !this.autoBlocked(s) &&
+        !this.isDontPlayAgain(s) &&
+        !this.playedRecently(s) &&
+        !this.isSongInQueueOrPlayed(s) &&
+        !this.isTitleInQueue(s.title, s.artist, s.url) &&
+        !this.wasDropped(s) &&
+        this.allowedByFocus(s) &&
+        !run.some((r) => cleanCoreTitle(r.title) === cleanCoreTitle(s.title)) &&
+        !(s.duration && s.duration > MAX_AUTO_QUEUE_SONG_DURATION);
 
-      const newQueuedItems: QueuedTrack[] = [];
+      const picks: Pick[] = [];
+      const take = (p: Pick) => {
+        if (picks.length < limit && usable(p) && !picks.some((q) => sameSongAs(q)(p))) picks.push(p);
+      };
+      for (const s of similar) take({ title: s.title, artist: s.author, url: s.url, duration: s.duration, thumbnail: s.thumbnail, why: `Like your picks: ${s.why}` });
 
-      for (let i = 0; i < moodResult.top5Songs.length; i++) {
-        const s = moodResult.top5Songs[i];
+      // Too few from research: the AI's ideas (its fixed fallback lists only when nothing else came)
+      const ideas = mood && (mood.source === 'ai' || picks.length === 0) ? mood.top5Songs : [];
+      for (const s of ideas) {
+        if (picks.length >= limit) break;
         const searchPrompt = s.searchPrompt || `${s.artist} - ${s.title}`;
-
-        // RULE: Never include 8D or mashup songs in next queue on your own
-        if (this.autoBlocked({ title: s.title, artist: s.artist, url: searchPrompt })) continue;
-
-        // Skip if this song is in previously played, already in queue, or in Don't Play Again Ever
-        if (
-          this.isDontPlayAgain({ title: s.title, artist: s.artist, url: searchPrompt }) ||
-          this.playedRecently({ title: s.title, artist: s.artist, url: searchPrompt }) ||
-          this.isSongInQueueOrPlayed({ title: s.title, artist: s.artist, url: searchPrompt }) ||
-          this.isTitleInQueue(s.title, s.artist, searchPrompt) ||
-          this.wasDropped({ title: s.title, artist: s.artist, url: searchPrompt }) ||
-          !this.allowedByFocus({ title: s.title, artist: s.artist }) ||
-          cleanCoreTitle(track.title) === cleanCoreTitle(s.title)
-        ) {
-          continue;
-        }
-
-        // Quick search to get thumbnail and YouTube url
-        let url = searchPrompt;
-        let duration = 180;
-        let thumbnail: string | undefined;
+        if (!usable({ title: s.title, artist: s.artist, url: searchPrompt })) continue;
         try {
           const res = await fetch(`/api/search?q=${encodeURIComponent(searchPrompt)}&limit=5`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.results && data.results.length > 0) {
-              const r = data.results.find((res: { title: string; author?: string; url?: string }) => !this.autoBlocked({ title: res.title, artist: res.author, url: res.url })) || data.results[0];
-              url = r.url || url;
-              duration = r.duration || duration;
-              thumbnail = r.thumbnail;
-            }
-          }
+          const results: Array<{ title: string; author?: string; url: string; duration?: number; thumbnail?: string }> = res.ok ? (await res.json()).results ?? [] : [];
+          const r = results.find((x) => !this.autoBlocked({ title: x.title, artist: x.author, url: x.url }) && (!x.duration || x.duration <= MAX_AUTO_QUEUE_SONG_DURATION));
+          if (r) take({ title: s.title, artist: s.artist, url: r.url, duration: r.duration, thumbnail: r.thumbnail, why: `AI: ${mood!.detectedMood}` });
         } catch {
-          // fallback to search prompt query string
+          // search unavailable: skip this idea
         }
-
-        // RULE: Never include 8D or mashup songs in next queue on your own
-        if (this.autoBlocked({ title: s.title, artist: s.artist, url })) continue;
-
-        // RULE: Never add any song longer than 6 minutes on your own in up next queue
-        if (duration > MAX_AUTO_QUEUE_SONG_DURATION) continue;
-
-        const queuedItem: QueuedTrack = {
-          id: `ai_mood_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
-          title: s.title,
-          artist: s.artist,
-          duration,
-          url,
-          thumbnail,
-          status: 'queued',
-          isAiRecommended: true,
-          source: 'ai',
-          queuedAt: Date.now(),
-        };
-
-        newQueuedItems.push(queuedItem);
       }
+      if (token !== this.moodToken || !picks.length) return;
 
-      if (newQueuedItems.length > 0) {
-        // Push to the VERY TOP of the Up Next queue
-        this.queue.unshift(...newQueuedItems);
-        this.deduplicateQueue();
-        if (this.queue.length > MAX_QUEUE_TARGET) {
-          this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
-        }
-        this.saveQueueToStorage();
-
-        // Pre-fetch the first song buffer from disk/cache for instant mix
-        if (newQueuedItems[0]) {
-          void this.ensureTrackBuffer(newQueuedItems[0]);
-        }
-
-        this.lastAiDecision = `Mood: ${moodResult.detectedMood} — ${moodResult.reason}`;
-        this.acquisitionStatus = `🤖 AI read mood: "${moodResult.detectedMood}" from "${track.title}". Pushed top ${newQueuedItems.length} songs to top of queue!`;
-        this.notify();
+      // A new choice: the picks for the previous one that haven't started loading make room for these
+      if (mode === 'new') this.queue = this.queue.filter((q, i) => !(q.moodPick && q.status === 'queued' && i > 0));
+      const items: QueuedTrack[] = picks.map((p, i) => ({
+        id: `ai_mood_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+        title: p.title,
+        artist: p.artist,
+        duration: p.duration || 180,
+        url: p.url,
+        thumbnail: p.thumbnail,
+        status: 'queued',
+        isAiRecommended: true,
+        source: 'ai',
+        queuedAt: Date.now(),
+        moodPick: true,
+        pickReason: p.why,
+      }));
+      for (const it of items) this.moodPickUrls.add(it.url.toLowerCase());
+      // After the songs the listener queued themselves at the top (theirs come first)
+      let at = 0;
+      while (at < this.queue.length && isChosen(this.queue[at])) at++;
+      // More of the same type: after the picks still waiting, so they stay one group
+      if (mode === 'continue') {
+        const last = this.queue.map((q) => !!q.moodPick).lastIndexOf(true);
+        if (last >= at) at = last + 1;
       }
+      this.queue.splice(at, 0, ...items);
+      this.deduplicateQueue();
+      if (this.queue.length > MAX_QUEUE_TARGET) this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
+      this.saveQueueToStorage();
+      void this.ensureTrackBuffer(items[0]);
+
+      const label = mood?.source === 'ai' ? mood.detectedMood : 'the same type';
+      this.lastAiDecision = `Mood: ${label} — from ${names}`;
+      this.acquisitionStatus =
+        mode === 'new'
+          ? `🤖 More like ${names} (${label}): ${items.length} songs at the top of Up Next.`
+          : `🤖 Staying with ${label}: ${items.length} more like ${names} added after the others.`;
+      this.notify();
     } catch (err) {
-      console.warn('Failed to read mood and push top 5 songs:', err);
+      console.warn('Failed to read the mood and queue similar songs:', err);
     }
+  }
+
+  /**
+   * The songs the listener chose lately (newest first, at most MOOD_RUN_SONGS, within
+   * MOOD_RUN_MS of each other), with this one added: the "run" whose type is followed.
+   */
+  private rememberChosen(track: TrackMetadata): Array<{ title: string; artist: string; url?: string; at: number }> {
+    const now = Date.now();
+    const same = sameSongAs(track);
+    this.chosenRun = [{ title: track.title, artist: track.artist, url: track.url, at: now }, ...this.chosenRun.filter((s) => !same(s) && now - s.at < MOOD_RUN_MS)].slice(0, MOOD_RUN_SONGS);
+    return this.chosenRun;
   }
 
   /** Returns top party bangers filtered to never include songs in queue, previously played, or on air. */
@@ -2619,6 +2841,9 @@ export class AudioEngine {
         source: q.source,
         lastPlayedAt: q.lastPlayedAt,
         queuedAt: q.queuedAt,
+        unheard: q.unheard,
+        pickReason: q.pickReason,
+        moodPick: q.moodPick,
       }));
       window.localStorage.setItem('ai_dj_up_next_queue', JSON.stringify(serializable));
     } catch {
@@ -2639,6 +2864,8 @@ export class AudioEngine {
               status: 'queued',
               audioBuffer: undefined,
             }));
+            // Songs picked to follow the listener's type: when one plays, more of the type follow
+            for (const q of this.queue) if (q.moodPick && q.url) this.moodPickUrls.add(q.url.toLowerCase());
             this.deduplicateQueue();
             const onAirTrack = this.onAirDeck().getTrack();
             if (onAirTrack) {
@@ -2787,6 +3014,8 @@ export class AudioEngine {
 
       this.deduplicateQueue();
       this.queue = mixFamiliarAndNew(this.queue);
+      // One artist doesn't flood Up Next (not under "play only <artist>", where every song is theirs)
+      if (!this.artistFocus?.only || !this.artistFocus.artists.length) this.queue = spreadArtists(this.queue);
       if (this.queue.length > MAX_QUEUE_TARGET) {
         this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
       }
@@ -3323,6 +3552,9 @@ export class AudioEngine {
   public seekTo(targetSeconds: number) {
     const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
     cur.seek(targetSeconds);
+    // A jump the listener chose (e.g. to a hook): the Best Parts limit counts from there
+    const seeked = cur.getTrack();
+    if (seeked) this.playStart = { trackId: seeked.id, pos: targetSeconds };
     this.afterSeek();
     this.saveCurrentTrackToStorage();
     this.notify();
@@ -3535,6 +3767,7 @@ export class AudioEngine {
       targetDeck.loadTrack(track);
       const startPos = isStrict ? 0 : (track.musicStartTime && track.musicStartTime > 0 ? track.musicStartTime : 0);
       targetDeck.play(startPos);
+      this.playStart = { trackId: track.id, pos: startPos };
       this.recordSongPlay(track);
       this.saveCurrentTrackToStorage();
       this.notify();
@@ -3803,9 +4036,22 @@ export class AudioEngine {
         throw new Error('No audio found for query.');
       }
 
-      const match = (source !== 'request')
-        ? (searchData.results.find((r: { title: string; author?: string; url?: string }) => !this.autoBlocked({ title: r.title, artist: r.author, url: r.url })) || searchData.results[0])
-        : searchData.results[0];
+      type Hit = { title: string; author?: string; url?: string; duration?: number };
+      const results: Hit[] = searchData.results;
+      // Typed words (AI chat, Enter in search): the app picks the result, so never a jukebox or a
+      // long mix over the length limit. Only a video the listener picked itself (its link) may be longer.
+      const pickedByListener = /^(https?:\/\/|local:)/i.test(queryOrUrl.trim());
+      const fitsLength = (r: Hit) => pickedByListener || !r.duration || r.duration <= MAX_AUTO_QUEUE_SONG_DURATION;
+      const match = (source !== 'request'
+        ? results.find((r) => fitsLength(r) && !this.autoBlocked({ title: r.title, artist: r.author, url: r.url })) || results.find(fitsLength)
+        : results.find(fitsLength)) as (Hit & { url: string; author: string; duration: number; thumbnail?: string; highlightTime?: number; highlightIntensity?: number }) | undefined;
+      if (!match) {
+        this.queue = this.queue.filter((q) => q.id !== queuedItem.id);
+        this.saveQueueToStorage();
+        this.acquisitionStatus = `Only long mixes (over ${Math.round(MAX_AUTO_QUEUE_SONG_DURATION / 60)} min) found for "${queryOrUrl}". Pick one in search to play it anyway.`;
+        this.notify();
+        return null;
+      }
 
       // RULE: Never include 8D or mashup songs in next queue on your own
       if (source !== 'request' && this.autoBlocked({ title: match.title, artist: match.author, url: match.url })) {
@@ -4055,6 +4301,58 @@ export class AudioEngine {
     this.notify();
   }
 
+  /**
+   * The last stage before the speakers. The limiter (a DynamicsCompressor) lets fast peaks through
+   * and adds its own make-up gain: in a 15-mix test, echo-out cuts peaked at 1.01–1.08 (clipping).
+   * This passes everything up to SAFETY_KNEE unchanged and rounds anything louder off smoothly
+   * so the output never exceeds SAFETY_CEILING. Inputs up to 2.0 are shaped (halved going in,
+   * since a WaveShaper's curve covers -1..1).
+   */
+  private createSafetyClipper(): [AudioNode, AudioNode] {
+    const pre = this.ctx.createGain();
+    pre.gain.value = 0.5;
+    const shaper = this.ctx.createWaveShaper();
+    const points = 4096;
+    const curve = new Float32Array(points);
+    const room = SAFETY_CEILING - SAFETY_KNEE;
+    for (let i = 0; i < points; i++) {
+      const x = 2 * ((2 * i) / (points - 1) - 1); // -2 … 2
+      const a = Math.abs(x);
+      curve[i] = Math.sign(x) * (a <= SAFETY_KNEE ? a : SAFETY_KNEE + room * Math.tanh((a - SAFETY_KNEE) / room));
+    }
+    shaper.curve = curve;
+    shaper.oversample = '2x';
+    pre.connect(shaper);
+    return [pre, shaper];
+  }
+
+  /**
+   * Length of a low-part fade between songs that can't be beatmatched: 4 bars when both songs are
+   * in a low part at the mix point, 2 when one is, 0 (no fade: a quick cut) when neither is.
+   * Unsynced beats overlap only where at least one side is quiet, so they don't clash.
+   */
+  private lowFadeSeconds(plan: MixPlan, outBpm: number): number {
+    const low = lowParts(plan);
+    const bars = low.exit && low.entry ? 4 : low.exit || low.entry ? 2 : 0;
+    // Neither in a low part: still a short fade (STRICT: no cut unless the old song pauses)
+    if (!bars) return SMOOTH_FALLBACK_SECONDS;
+    return Math.max(LOW_FADE_MIN_SECONDS, Math.min(LOW_FADE_MAX_SECONDS, (bars * 4 * 60) / Math.max(60, outBpm)));
+  }
+
+  /** Why two songs can't be beatmatched, for the status line (see computeBeatmatchRate). */
+  private cutReason(sourceBpm: number, sourceConfidence: number, target: TrackMetadata): string {
+    const oldUnsure = sourceConfidence < MIN_BEATMATCH_CONFIDENCE;
+    const newUnsure = (target.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE;
+    if (oldUnsure || newUnsure) {
+      return `The beat isn't clear enough on ${oldUnsure && newUnsure ? 'either song' : oldUnsure ? 'the old song' : 'the new song'} to beatmatch`;
+    }
+    const step = tempoStep(sourceBpm, target.bpm) ?? 1;
+    if (step <= BPM_LIMITS.MAX_PERMITTED_PCT && this.mood === 'party') {
+      return `Party mood never slows a song down (${sourceBpm} → ${target.bpm} BPM)`;
+    }
+    return `Tempos too far apart (${sourceBpm} → ${target.bpm} BPM)`;
+  }
+
   public startTransition(config: TransitionConfig) {
     if (this.isTransitioning || config.sourceDeck === config.targetDeck) return;
     // Target already fully on air (e.g. an AI command naming the playing deck): nothing to mix
@@ -4072,7 +4370,12 @@ export class AudioEngine {
     // Set the incoming rate BEFORE it starts so it never plays a moment at the wrong speed
     this.analyzeTrack(targetTrack);
     const sourceConfidence = sourceState.isPlaying ? sourceState.track?.bpmConfidence ?? 0 : 0;
-    const match = this.computeBeatmatchRate(sourceBpm, sourceConfidence, targetTrack);
+    const matched = this.computeBeatmatchRate(sourceBpm, sourceConfidence, targetTrack);
+    // STRICT: only a gap cut (the old song is silent there) may be abrupt
+    const smoothOnly = sourceState.isPlaying && !!sourceState.track && !config.gapCut;
+    // A cut (no overlap) needs no beatmatch: the new song starts at its natural speed and pitch.
+    // Anything that overlaps keeps the beatmatch, so the two songs' beats don't flam.
+    const match = config.naturalTempo && matched.matched && !smoothOnly ? { rate: 1, matched: true } : matched;
     targetDeck.setPlaybackRate(match.rate, true);
 
     // Beatmatched: blend over the mood's bar count (4 Bhangra, 8 Normal/Party, 16 Chill/Romantic).
@@ -4080,14 +4383,23 @@ export class AudioEngine {
     const blendSeconds = (this.blendBars() * 4 * 60) / sourceBpm;
     let durationSeconds = config.durationSeconds ?? Math.max(4, Math.min(40, blendSeconds));
     if (config.style === 'drop_cut') {
-      durationSeconds = config.durationSeconds ?? 0.3;
+      durationSeconds = smoothOnly ? Math.max(SMOOTH_MIN_SECONDS, config.durationSeconds ?? 0) : config.durationSeconds ?? 0.3;
+      if (smoothOnly) this.acquisitionStatus += ` Fading out over ${Math.round(durationSeconds)} s (no abrupt stop).`;
+    } else if (config.naturalTempo && match.matched && !smoothOnly) {
+      this.acquisitionStatus = `Quick cut on the beat at natural pitch (${sourceBpm} → ${targetTrack.bpm} BPM).`;
     } else if (match.matched) {
       const shift = (match.rate - 1) * 100;
       this.acquisitionStatus = `Beatmatched mix at ${sourceBpm} BPM (${shift >= 0 ? '+' : ''}${shift.toFixed(1)}% tempo on the new song, gliding back to normal after).`;
+    } else if (sourceState.isPlaying && config.lowFade) {
+      this.acquisitionStatus = `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — fading over the low part at natural pitch (${Math.round(durationSeconds)} s).`;
     } else if (sourceState.isPlaying) {
-      durationSeconds = Math.min(durationSeconds, UNMATCHED_TRANSITION_SECONDS);
-      this.acquisitionStatus = `Tempos too far apart (${sourceBpm} → ${targetTrack.bpm} BPM) — quick cut on the beat at natural pitch.`;
+      // No pause in the old song here: a short bass-swapped fade with an echo tail, never a cut
+      durationSeconds = smoothOnly ? Math.max(SMOOTH_MIN_SECONDS, Math.min(durationSeconds, SMOOTH_FALLBACK_SECONDS)) : Math.min(durationSeconds, UNMATCHED_TRANSITION_SECONDS);
+      this.acquisitionStatus = smoothOnly
+        ? `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — smooth ${Math.round(durationSeconds)} s fade at natural pitch (no pause in the old song to cut into).`
+        : `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — quick cut on the beat at natural pitch.`;
     }
+    if (smoothOnly && durationSeconds < SMOOTH_MIN_SECONDS) durationSeconds = SMOOTH_MIN_SECONDS;
 
     // Start "on the one": the incoming song's first beat lands exactly on an outgoing beat.
     // Without this, even two songs at identical BPM have kicks that clash (flam).
@@ -4117,7 +4429,8 @@ export class AudioEngine {
           startTime = this.ctx.currentTime + this.secondsToNextBeat(sourceState);
         }
       }
-      appliedFx = isSourcePlaying && config.exitFx ? config.exitFx : undefined;
+      // A loop roll or brake ends in a hard landing: only where the old song pauses anyway
+      appliedFx = isSourcePlaying && config.exitFx && !(smoothOnly && (config.exitFx === 'roll' || config.exitFx === 'brake')) ? config.exitFx : undefined;
       const beat = 60 / Math.max(60, sourceBpm);
       if (appliedFx === 'roll') {
         // The bar at the exit rolls for 8 beats, then the new song lands
@@ -4131,6 +4444,7 @@ export class AudioEngine {
         else appliedFx = 'echo';
       }
       targetDeck.play(cuePoint, startTime);
+      if (targetTrack) this.playStart = { trackId: targetTrack.id, pos: cuePoint }; // the Best Parts limit counts from here
     }
 
     this.isTransitioning = true;
@@ -4145,20 +4459,38 @@ export class AudioEngine {
       return startCrossfader + (targetCrossfader - startCrossfader) * smooth;
     };
 
-    const curvePoints = 64;
-    const curveA = new Float32Array(curvePoints);
-    const curveB = new Float32Array(curvePoints);
-    for (let i = 0; i < curvePoints; i++) {
-      [curveA[i], curveB[i]] = this.equalPowerGains(crossfaderAt(i / (curvePoints - 1)));
+    // Apply crossfader scheduling based on transition style
+    if (config.style === 'smooth_crossfade') {
+      // Over the whole mix unless a shorter fade is asked for (a 50 ms default stopped one song dead)
+      const xfadeSec = Math.min(config.xfadeSeconds ?? durationSeconds, durationSeconds);
+      // Cancel any previous schedules
+      this.crossfaderGainA.gain.cancelScheduledValues(this.ctx.currentTime);
+      this.crossfaderGainB.gain.cancelScheduledValues(this.ctx.currentTime);
+      // Start with fully A, fully B off
+      this.crossfaderGainA.gain.setValueAtTime(1, startTime);
+      this.crossfaderGainB.gain.setValueAtTime(0, startTime);
+      // Linear crossfade over xfadeSec
+      this.crossfaderGainA.gain.linearRampToValueAtTime(0, startTime + xfadeSec);
+      this.crossfaderGainB.gain.linearRampToValueAtTime(1, startTime + xfadeSec);
+      // Hold target gains for remainder of transition
+      this.crossfaderGainA.gain.setTargetAtTime(0, startTime + xfadeSec, 0.001);
+      this.crossfaderGainB.gain.setTargetAtTime(1, startTime + xfadeSec, 0.001);
+    } else {
+      const curvePoints = 64;
+      const curveA = new Float32Array(curvePoints);
+      const curveB = new Float32Array(curvePoints);
+      for (let i = 0; i < curvePoints; i++) {
+        [curveA[i], curveB[i]] = this.equalPowerGains(crossfaderAt(i / (curvePoints - 1)));
+      }
+      this.crossfaderGainA.gain.cancelScheduledValues(this.ctx.currentTime);
+      this.crossfaderGainB.gain.cancelScheduledValues(this.ctx.currentTime);
+      this.crossfaderGainA.gain.setValueCurveAtTime(curveA, startTime, durationSeconds);
+      this.crossfaderGainB.gain.setValueCurveAtTime(curveB, startTime, durationSeconds);
     }
-    this.crossfaderGainA.gain.cancelScheduledValues(this.ctx.currentTime);
-    this.crossfaderGainB.gain.cancelScheduledValues(this.ctx.currentTime);
-    this.crossfaderGainA.gain.setValueCurveAtTime(curveA, startTime, durationSeconds);
-    this.crossfaderGainB.gain.setValueCurveAtTime(curveB, startTime, durationSeconds);
 
     // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
     // echoes out on its own beat instead of stopping dead
-    const isCut = isSourcePlaying && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
+    const isCut = isSourcePlaying && !config.lowFade && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
     if (config.gapCut && isSourcePlaying) {
       this.acquisitionStatus = `Cut into the silence after the old song's high point: "${targetTrack.title}" comes in on the beat.`;
     } else if (appliedFx === 'roll') {
@@ -4177,10 +4509,26 @@ export class AudioEngine {
     }
 
     // Bass swap: outgoing bass fades out over the first half, incoming bass comes in over the second
-    if (config.style === 'bass_swap') {
-      const midTime = startTime + durationSeconds / 2;
+    const at = (fraction: number) => startTime + fraction * durationSeconds;
+    if (config.showcase === 'eq_blend' && isSourcePlaying) {
+      // Band by band: the new song's highs first, then its mids, the bass swapped at the half,
+      // and the old song's mids and highs last
+      targetDeck.scheduleEqRamp('mid', -12, 0, at(0.25), at(0.5));
+      targetDeck.scheduleEqRamp('low', -24, 0, at(0.5), at(0.6));
+      sourceDeck.scheduleEqRamp('low', sourceState.lowGain, -24, at(0.4), at(0.5));
+      sourceDeck.scheduleEqRamp('mid', sourceState.midGain, -12, at(0.6), at(0.85));
+      sourceDeck.scheduleEqRamp('high', sourceState.highGain, -12, at(0.7), at(1));
+      this.acquisitionStatus = `Showcase blend over ${SHOWCASE_BARS} bars: the new song's highs come in first, then its mids, the bass swaps at the half, and the old song fades out last.`;
+    } else if (config.style === 'bass_swap') {
+      const midTime = at(0.5);
       sourceDeck.scheduleLowRamp(sourceState.lowGain, -24, startTime, midTime);
       targetDeck.scheduleLowRamp(-24, 0, midTime, startTime + durationSeconds);
+    }
+    if (config.showcase === 'wash' && isSourcePlaying) {
+      // The old song thins out through a rising filter and dissolves into a reverb tail
+      sourceDeck.scheduleFilterSweepOut(startTime, at(0.9));
+      sourceDeck.scheduleReverbWash(at(0.75), 60 / Math.max(60, sourceBpm));
+      this.acquisitionStatus = `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — slow wash fade (${Math.round(durationSeconds)} s): the old song thins out and dissolves into reverb as the new one rises.`;
     }
 
     this.transitionTimer = window.setInterval(() => {
@@ -4362,6 +4710,11 @@ export class AudioEngine {
     this.lastRecordedTrackId = track.id;
 
     this.library.logPlay(track);
+    // One of the songs picked to follow the listener's type is playing: more of that type
+    if (track.url && this.moodPickUrls.has(track.url.toLowerCase())) {
+      this.moodPickUrls.delete(track.url.toLowerCase());
+      void this.readMoodAndPushTop5(track, 'continue');
+    }
     // Drop any other copies of this song waiting in Up Next
     const playedKeys = this.songKeys(track);
     const before = this.queue.length;
@@ -4583,7 +4936,7 @@ export class AudioEngine {
     // The AI's ahead-of-time answers were for the old mix-out point; a mix already planned stands
     this.aiOutroPrep = null;
     this.acquisitionStatus = this.bestPartsMode
-      ? 'Best Parts ON: each song plays its build-up and hook (about 1–1.5 min), then mixes into the next.'
+      ? `Best Parts ON: each song plays its build-up and hook (at most ${this.formatPlayLimit()}), then mixes into the next.`
       : 'Best Parts OFF: songs play through to their outro again.';
     this.notify();
   }

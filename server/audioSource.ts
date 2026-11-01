@@ -163,8 +163,10 @@ export interface VideoHit {
   authorId?: string; // the uploading channel (Invidious), for its most popular uploads
 }
 
-async function searchInvidious(inst: Instance, query: string): Promise<VideoHit[]> {
-  const j = await getJson(`${inst.base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&fields=title,videoId,author,lengthSeconds,videoThumbnails,viewCount,published`);
+async function searchInvidious(inst: Instance, query: string, page = 1): Promise<VideoHit[]> {
+  const j = await getJson(
+    `${inst.base}/api/v1/search?q=${encodeURIComponent(query)}&type=video${page > 1 ? `&page=${page}` : ''}&fields=title,videoId,author,authorId,lengthSeconds,videoThumbnails,viewCount,published`
+  );
   if (!Array.isArray(j)) throw new Error('unexpected search answer');
   type Hit = { videoId: string; title: string; author: string; authorId?: string; lengthSeconds: number; viewCount?: number; published?: number; videoThumbnails?: Array<{ url: string; quality?: string }> };
   return j.map((v: Hit) => {
@@ -182,8 +184,23 @@ async function searchInvidious(inst: Instance, query: string): Promise<VideoHit[
   });
 }
 
-async function searchPiped(inst: Instance, query: string): Promise<VideoHit[]> {
-  const j = await getJson(`${inst.base}/search?q=${encodeURIComponent(query)}&filter=videos`);
+// Piped pages through a token from the page before: `${instance}|${query}|${page}` → token
+const pipedNextPage = new Map<string, string>();
+
+async function searchPiped(inst: Instance, query: string, page = 1): Promise<VideoHit[]> {
+  const q = encodeURIComponent(query);
+  let j;
+  if (page > 1) {
+    const token = pipedNextPage.get(`${inst.base}|${query}|${page}`);
+    if (!token) throw new Error('no next page from this instance');
+    j = await getJson(`${inst.base}/nextpage/search?nextpage=${encodeURIComponent(token)}&q=${q}&filter=videos`);
+  } else {
+    j = await getJson(`${inst.base}/search?q=${q}&filter=videos`);
+  }
+  if (typeof j.nextpage === 'string' && j.nextpage) {
+    if (pipedNextPage.size > 500) pipedNextPage.clear();
+    pipedNextPage.set(`${inst.base}|${query}|${page + 1}`, j.nextpage);
+  }
   return (j.items || [])
     .filter((v: { url?: string }) => v.url?.startsWith('/watch?v='))
     .map((v: { url: string; title: string; uploaderName: string; duration: number; thumbnail: string; views?: number; uploaded?: number }) => ({
@@ -197,8 +214,11 @@ async function searchPiped(inst: Instance, query: string): Promise<VideoHit[]> {
     }));
 }
 
-/** Video search through the third-party instances (the laptop never loads YouTube's search pages). */
-export async function searchVideos(query: string): Promise<VideoHit[]> {
+/**
+ * Video search through the third-party instances (the laptop never loads YouTube's search pages).
+ * `page` 2, 3… are the further results (search lists loading more as they're scrolled).
+ */
+export async function searchVideos(query: string, page = 1): Promise<VideoHit[]> {
   const now = Date.now();
   const instances = audioInstances();
   const ordered = [
@@ -208,11 +228,12 @@ export async function searchVideos(query: string): Promise<VideoHit[]> {
   const errors: string[] = [];
   for (const inst of ordered) {
     try {
-      const hits = inst.kind === 'invidious' ? await searchInvidious(inst, query) : await searchPiped(inst, query);
+      const hits = inst.kind === 'invidious' ? await searchInvidious(inst, query, page) : await searchPiped(inst, query, page);
       // Live streams and premieres have no length and can't be mixed
       return hits.filter((h) => /^[A-Za-z0-9_-]{11}$/.test(h.videoId) && h.lengthSeconds > 0);
     } catch (err) {
-      failedAt.set(inst.base, Date.now());
+      // An instance that just has no later page for this search isn't failing
+      if (!/no next page/.test((err as Error).message)) failedAt.set(inst.base, Date.now());
       errors.push(`${new URL(inst.base).host}: ${(err as Error).message}`);
     }
   }

@@ -5,6 +5,7 @@
  */
 import type { QueuedTrack } from '../../types';
 import { cleanCoreTitle, isSameSong, songKeys } from '../songMatch';
+import { artistKey, songArtists } from '../../../shared/taste';
 
 export type SongLike = { id?: string; title?: string; artist?: string; url?: string };
 
@@ -80,6 +81,11 @@ export const STALE_AFTER_MS = 30 * 60_000;
 
 /** A song the listener or a guest added on purpose: never moved, expired or refreshed away. */
 export const isChosen = (q: QueuedTrack) => q.source === 'request';
+/**
+ * Stays where it is when Up Next is reshuffled: songs someone chose, and the songs picked to
+ * follow the type of songs they just chose (`moodPick`, kept together at the top).
+ */
+export const isPinned = (q: QueuedTrack) => isChosen(q) || !!q.moodPick;
 /** A song the engine picked that the listener may not know (a recommendation, not their history). */
 export const isNewPick = (q: QueuedTrack) => !isChosen(q) && !!q.isAiRecommended;
 
@@ -91,15 +97,61 @@ export const isNewPick = (q: QueuedTrack) => !isChosen(q) && !!q.isAiRecommended
 export function mixFamiliarAndNew(queue: QueuedTrack[], keepTop = KEEP_AT_TOP): QueuedTrack[] {
   const head = queue.slice(0, keepTop);
   const rest = queue.slice(keepTop);
-  const familiar = rest.filter((q) => !isChosen(q) && !isNewPick(q));
-  const fresh = rest.filter(isNewPick);
+  const familiar = rest.filter((q) => !isPinned(q) && !isNewPick(q));
+  const fresh = rest.filter((q) => !isPinned(q) && isNewPick(q));
   let slot = 0;
   const mixed = rest.map((q) => {
-    if (isChosen(q)) return q;
+    if (isPinned(q)) return q;
     const wantNew = slot++ % 3 === 2;
     return (wantNew ? (fresh.shift() ?? familiar.shift()) : (familiar.shift() ?? fresh.shift()))!;
   });
   return [...head, ...mixed];
+}
+
+/** Unheard songs (by the listener's artists, never played here) in Up Next at once: about 1 in 4 new picks. */
+export const UNHEARD_MAX = 4;
+/** One artist at most ARTIST_MAX_IN_WINDOW times in any SPREAD_WINDOW songs of Up Next, never twice in a row. */
+export const ARTIST_MAX_IN_WINDOW = 2;
+export const SPREAD_WINDOW = 10;
+
+/** The song's main artist as a comparable key ('' when unknown). */
+export function mainArtistKey(q: { title?: string; artist?: string }): string {
+  const name = songArtists({ title: q.title || '', artist: q.artist })[0];
+  return name ? artistKey(name) : '';
+}
+
+/**
+ * Up Next with the same artist spread out: never two songs in a row by one artist and at most
+ * ARTIST_MAX_IN_WINDOW in any SPREAD_WINDOW, so one artist doesn't flood the night. Each slot
+ * takes the first song of the same kind (familiar or new pick) that fits, so the familiar / new
+ * turns stay; when none fits, the order is kept. The first `keepTop` and chosen songs don't move.
+ */
+export function spreadArtists(queue: QueuedTrack[], keepTop = KEEP_AT_TOP): QueuedTrack[] {
+  const keys = new Map<QueuedTrack, string>();
+  const keyOf = (q: QueuedTrack) => {
+    if (!keys.has(q)) keys.set(q, mainArtistKey(q));
+    return keys.get(q)!;
+  };
+  const out = queue.slice(0, keepTop);
+  const rest = queue.slice(keepTop);
+  const remaining = rest.filter((q) => !isPinned(q));
+  const fits = (q: QueuedTrack) => {
+    const a = keyOf(q);
+    if (!a) return true;
+    const recent = out.slice(-(SPREAD_WINDOW - 1)).map(keyOf);
+    return recent[recent.length - 1] !== a && recent.filter((x) => x === a).length < ARTIST_MAX_IN_WINDOW;
+  };
+  for (const slot of rest) {
+    if (isPinned(slot)) {
+      out.push(slot);
+      continue;
+    }
+    const kind = isNewPick(slot);
+    const pick = remaining.find((q) => isNewPick(q) === kind && fits(q)) ?? remaining.find((q) => isNewPick(q) === kind) ?? remaining[0];
+    remaining.splice(remaining.indexOf(pick), 1);
+    out.push(pick);
+  }
+  return out;
 }
 
 /** New picks below the top of Up Next that have waited longer than STALE_AFTER_MS without being played. */

@@ -408,7 +408,7 @@ Do not implement every advanced feature at once. Keep the system modular, test e
 
 | Rule | Implementation | Status |
 | :--- | :--- | :--- |
-| Precise BPM | Autocorrelation of a 5 ms onset envelope, refined on the bar peak; BPM to 0.01 (`BpmDetector.ts`) | ✅ |
+| Precise BPM | Autocorrelation of a 5 ms onset envelope (kick and bass first, else all three bands), refined on the bar peak, checked on four separate stretches; BPM to 0.01 (`BpmDetector.ts`) | ✅ |
 | Same phase ("on the one") | Beat grid from the onset histogram peak. The incoming song is scheduled to start exactly on the outgoing song's next beat, from a cue point on its own beat grid. | ✅ |
 | Same tempo, minimal pitch change | Outgoing song is ramped gradually (≤ 8%, 0.4%/s) in the 20 s before an auto-mix. The incoming song gets at most a 4% sudden change, then glides back to normal at 0.4%/s. | ✅ |
 | Half / double time | 0.5×, 1× and 2× interpretations are considered when matching | ✅ |

@@ -15,13 +15,16 @@ import { describeFilter, filterForPrompt, filterQueries, fitsFilter, type Era, t
 import { BANNED_SONGS_FILE, FAVORITES_FILE, PLAY_HISTORY_FILE, type HistoryEntry } from './library';
 import { readJsonArray } from './jsonFile';
 import { logError } from './logger';
-import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, namesArtist, rankHits, scoreHit, songArtists, tasteForPrompt, type TasteProfile, type TasteSong } from '../shared/taste';
+import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, namesArtist, cleanTitle, rankHits, scoreHit, songArtists, tasteForPrompt, type TasteProfile, type TasteSong } from '../shared/taste';
 
 const SEARCH_CONCURRENCY = 3;
 const RESEARCH_SEEDS = 10; // songs whose "also played" lists are fetched per request
 const DISCOVERY_ARTISTS = 4; // new artists (fans of yours also like) searched per request
 const FOCUS_EXTRA_SEEDS = 5; // with "play only <artist>": their top hits whose "also played" lists are fetched too
 const MAX_RECOMMENDATIONS = 40;
+const UNHEARD_ARTISTS = 6; // artists whose unheard songs are looked up per request
+const UNHEARD_DEPTH = 25; // only an artist's 25 biggest songs: well known, not deep album tracks
+const UNHEARD_PER_ARTIST = 3;
 // A busy CPU model times out; while it does, use the quick searches instead of waiting 45 s each time
 const OLLAMA_REST_MS = 5 * 60_000;
 let ollamaRestUntil = 0;
@@ -312,6 +315,46 @@ async function discoveryArtists(taste: TasteProfile, seedArtist?: string): Promi
   return [...votes.values()].sort((a, b) => b.n - a.n).slice(0, DISCOVERY_ARTISTS).map((v) => v.name);
 }
 
+/** Artists to find unheard songs by (?unheard=[[name, note], …]): tonight's and the most played. */
+function parseUnheard(url: URL): Array<{ name: string; note: string }> {
+  try {
+    const raw: unknown = JSON.parse(url.searchParams.get('unheard') || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((r) => ({ name: String(r?.[0] ?? '').slice(0, 60), note: String(r?.[1] ?? '').slice(0, 60) }))
+      .filter((a) => artistKey(a.name).length >= 3)
+      .slice(0, UNHEARD_ARTISTS);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Songs by the listener's artists they have never played or liked: from each artist's most viewed
+ * uploads (their hits, biggest first), so they're songs people know, just not ones played here yet.
+ */
+async function unheardSongs(
+  artists: Array<{ name: string; note: string }>,
+  isWanted: (h: VideoHit) => boolean,
+  taste: TasteProfile
+): Promise<Array<VideoHit & { why: string }>> {
+  if (!artists.length) return [];
+  const own = [...readJsonArray<HistoryEntry>(PLAY_HISTORY_FILE), ...readJsonArray<{ url?: string; title?: string }>(FAVORITES_FILE)];
+  const ownIds = new Set(own.map((s) => (s.url ? extractYouTubeVideoId(s.url) : null)).filter(Boolean));
+  const ownTitles = new Set(own.map((s) => cleanTitle(s.title || '').toLowerCase()).filter(Boolean));
+  const lists = await mapLimit(artists.map((a) => a.name), 3, artistHits, [] as VideoHit[]);
+  const out: Array<VideoHit & { why: string }> = [];
+  lists.forEach((hits, i) => {
+    const { name, note } = artists[i];
+    hits
+      .slice(0, UNHEARD_DEPTH)
+      .filter((h) => isWanted(h) && !ownIds.has(h.videoId) && !ownTitles.has(cleanTitle(h.title).toLowerCase()) && scoreHit(h, 0, taste) > -1)
+      .slice(0, UNHEARD_PER_ARTIST)
+      .forEach((h) => out.push({ ...h, why: `Unheard: ${name}${note ? ` (${note})` : ''}` }));
+  });
+  return out;
+}
+
 /** The listener's taste: their library on disk plus what the browser just played (?recent=[[title, artist], …]) and avoids. */
 function loadTaste(url: URL): TasteProfile {
   let recent: TasteSong[] = [];
@@ -404,6 +447,81 @@ function fallbackQueries(currentTitle: string, artist: string, mood: string): st
   ];
 }
 
+const SIMILAR_MAX = 12;
+const SIMILAR_DEPTH = 25; // how far down each "also played" list counts
+const SIMILAR_SECOND_STEP = 3; // songs surely of the type whose lists are fetched too
+
+/**
+ * Songs of the same type as the ones the listener just chose (?seeds=[[title, artist, url], …],
+ * newest first): from each song's "people who play this also play" list. A song on the lists of
+ * several of them is that type for sure (two item songs in a row → more item songs), so it ranks
+ * first; the newest song's list counts most. Songs without a link are looked up first.
+ */
+export async function handleSimilar(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  res.setHeader('Content-Type', 'application/json');
+  const seeds = parseSeeds(url).slice(0, 4);
+  try {
+    const ids = await mapLimit(
+      seeds,
+      3,
+      async (sd) => (sd.url ? extractYouTubeVideoId(sd.url) : null) ?? (await search(`${sd.artist} ${sd.title}`.trim()))[0]?.videoId ?? null,
+      null as string | null
+    );
+    const seedIds = new Set(ids.filter(Boolean) as string[]);
+    const lists = await mapLimit([...seedIds], 4, related, [] as VideoHit[]);
+    const banned = readJsonArray<{ url?: string; title?: string }>(BANNED_SONGS_FILE);
+    const bannedIds = new Set(banned.map((b) => (b.url ? extractYouTubeVideoId(b.url) : null)).filter(Boolean));
+    // Another upload of a song just played ("Aaj Ki Raat - 8K Video | Stree 2"): not a suggestion
+    const core = (t: string) => cleanTitle(t).toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+    const seedCores = seeds.map((sd) => core(sd.title)).filter((t) => t.length >= 3);
+    const isSeedSong = (title: string) => {
+      const t = core(title);
+      return seedCores.some((sc) => t === sc || t.startsWith(`${sc} `));
+    };
+    const ok = (h: VideoHit) =>
+      h.lengthSeconds >= 90 &&
+      h.lengthSeconds <= MAX_AUTO_SONG_SECONDS &&
+      !seedIds.has(h.videoId) &&
+      !bannedIds.has(h.videoId) &&
+      !isSeedSong(h.title) &&
+      !/\b(8|16|24)[-_ ]*d\b|\bmash[-_ ]*up\b/i.test(`${h.title} ${h.author || ''}`) &&
+      scoreHit(h, 0, EMPTY_TASTE) > -1;
+    const found = new Map<string, { hit: VideoHit; score: number; lists: number; seedLists: number }>();
+    const count = (hits: VideoHit[], weight: number, fromSeed: boolean) =>
+      hits.slice(0, SIMILAR_DEPTH).forEach((h, i) => {
+        if (!ok(h)) return;
+        const e = found.get(h.videoId) ?? { hit: h, score: 0, lists: 0, seedLists: 0 };
+        e.score += weight * (1 - i / SIMILAR_DEPTH);
+        e.lists++;
+        if (fromSeed) e.seedLists++;
+        found.set(h.videoId, e);
+      });
+    lists.forEach((hits, li) => count(hits, li === 0 ? 1.5 : 1, true)); // the newest song's list counts most
+    // Second step: the songs most surely of that type (on several lists, else the top ones) are
+    // asked about too, so the picks are many songs of that type rather than one list's mix
+    const sure = [...found.values()].sort((a, b) => b.lists - a.lists || b.score - a.score).slice(0, SIMILAR_SECOND_STEP);
+    const more = await mapLimit(sure.map((e) => e.hit.videoId), 3, related, [] as VideoHit[]);
+    more.forEach((hits) => count(hits, 0.8, false));
+    const names = seeds.map((sd) => cleanTitle(sd.title)).slice(0, 2).join('" and "');
+    const songs = [...found.values()]
+      .map((e) => ({ ...e, score: e.score + (e.lists > 1 ? 1.5 * (e.lists - 1) : 0) })) // on several lists: that type for sure
+      .sort((a, b) => b.score - a.score)
+      .slice(0, SIMILAR_MAX)
+      .map((e) => ({
+        title: e.hit.title,
+        url: canonicalYouTubeUrl(e.hit.videoId),
+        author: e.hit.author || 'Artist',
+        duration: e.hit.lengthSeconds || 180,
+        thumbnail: e.hit.thumbnail,
+        why: e.seedLists > 1 ? `played with both "${names}"` : e.seedLists === 1 ? `played with "${names.split('" and "')[0]}"` : 'played with songs like them',
+      }));
+    res.end(JSON.stringify({ songs, researched: seedIds.size }));
+  } catch (err) {
+    logError('similar', err);
+    res.end(JSON.stringify({ songs: [], error: String(err) }));
+  }
+}
+
 // 3. Autonomous Recommendations Based on Current Song
 export async function handleRecommend(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const mood = url.searchParams.get('mood') || 'normal';
@@ -447,6 +565,9 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
       }
       cands.set(h.videoId, { hit: h, score: scoreHit(h, 0, taste) + points, why });
     };
+
+    // Unheard songs by their artists, looked up alongside the rest (not under "play only …")
+    const unheardP = focus?.only ? Promise.resolve([] as Array<VideoHit & { why: string }>) : unheardSongs(parseUnheard(url), isWanted, taste).catch(() => []);
 
     // 1. "People who play your songs also play…" and 2. "fans of your artists also like…", together
     const [relatedLists, newArtists, ideas] = await Promise.all([
@@ -524,12 +645,23 @@ export async function handleRecommend(req: IncomingMessage, res: ServerResponse,
       }))
       .filter((r) => !bannedKeys.has(r.url.toLowerCase()) && !bannedKeys.has(r.title.toLowerCase()))
       .slice(0, MAX_RECOMMENDATIONS);
+    const unheard = (await unheardP)
+      .map((h) => ({
+        title: h.title,
+        url: canonicalYouTubeUrl(h.videoId),
+        author: h.author || 'Artist',
+        duration: h.lengthSeconds || 180,
+        thumbnail: h.thumbnail,
+        timestamp: formatDuration(h.lengthSeconds || 180),
+        why: h.why,
+      }))
+      .filter((r) => !bannedKeys.has(r.url.toLowerCase()) && !bannedKeys.has(r.title.toLowerCase()));
 
     // Every lookup failed (internet dropped mid-way): fall back to the local library
     res.end(
       JSON.stringify(
         recommendations.length
-          ? { recommendations, research: { relatedFrom: relatedLists.filter((l) => l.hits.length).length, newArtists, aiIdeas: ideas.length } }
+          ? { recommendations, unheard, research: { relatedFrom: relatedLists.filter((l) => l.hits.length).length, newArtists, aiIdeas: ideas.length } }
           : { recommendations: localRecommendations(seeds[0].title, seeds[0].artist, 12), offline: true }
       )
     );

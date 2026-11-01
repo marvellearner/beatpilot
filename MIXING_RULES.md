@@ -87,6 +87,10 @@
 
 **Cuts:** when two songs can't be beatmatched (or the AI DJ chooses a cut), the outgoing song **echoes out**: its last beat feeds a dotted-eighth echo at its own tempo, the repeats fade over about 3 s through a high-pass sweep (300 Hz → 3 kHz) so they thin out under the new song's bass. The echo goes straight to the master bus, so it rings on after the crossfader has cut the dry signal.
 
+**Why a cut:** the status line names the real reason: *"The beat isn't clear enough on the new song to beatmatch"*, *"Party mood never slows a song down"*, or *"Tempos too far apart (93 → 119 BPM)"*.
+
+**Safety clipper:** the limiter (a Web Audio compressor) lets fast peaks through and adds its own make-up gain; in a 15-mix test, echo-out cuts peaked at 1.01–1.08, which clips. The very last stage before the speakers now passes everything up to 0.9 unchanged and rounds anything louder off smoothly, so the output never goes above 0.99 (`createSafetyClipper`).
+
 ---
 
 # Recommended AI DJ Mixing Workflow
@@ -123,7 +127,7 @@ The best transition is the one that sounds musically intentional, not necessaril
 - Gradually transition volume and EQ.
 - Minimize vocal and bass clashes.
 
-## Quick Mix
+## Quick Mix (Last Choice)
 - Use a short transition.
 - Select compatible beat or phrase boundaries.
 - Minimize unnecessary overlap.
@@ -143,10 +147,13 @@ The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of
 | **Long blend with bass swap** | Tempos match, keys fit | The mood's length (8 bars Normal / Party, 16 Chill / Romantic, 4 Bhangra). The new song's bass comes in as the old one's goes out. |
 | **Blend with filter sweep** | Tempos match, keys clash | Up to 8 bars. The old song's bass and chords thin out (rising high-pass) while the new song comes in. |
 | **Cut into the silence** | The old song stops dead after a high point | No overlap. The old song plays into its stop, and the new song comes in on the beat where the old one would have come back. Works whatever the tempos and keys. |
-| **Loop roll build** | Tempos match, on a dance floor (Party / Bhangra), the new song is bigger (≥ 1.5 dB louder, or a favourite) and the keys aren't a perfect fit. At most once every 4 mixes. | The bar at the exit repeats in slices of 1, ½ and ¼ beat (8 beats in all) under a rising filter (to 400 Hz) and a white-noise riser, then the new song lands on the 1. |
-| **Reverb wash** | Tempos too far apart, in a calm mood (Chill / Romantic) | About 2 s. The old song's last 4 beats feed a 3.5 s reverb, which washes on under the new song. A rhythmic echo would fight the new beat; a reverb tail has no rhythm. |
-| **Brake (vinyl stop)** | Tempos too far apart, on a dance floor. At most once every 4 mixes. | The old song slows to a halt over its last beat, pitch falling with it, and the new song hits on the 1. |
-| **Echo-out cut** | Tempos too far apart, otherwise | About 2 s. The old song's last beat echoes away under the new one. |
+| **Loop roll build** | Tempos match, in Normal, Party or Bhangra mood, the new song is bigger (≥ 1.5 dB louder, or a favourite) and the keys aren't a perfect fit. At most once every 4 mixes. | The bar at the exit repeats in slices of 1, ½ and ¼ beat (8 beats in all) under a rising filter (to 400 Hz) and a white-noise riser, then the new song lands on the 1. |
+| **Low-part fade** | Tempos can't be beatmatched (too far apart, or a beat that isn't clear) and either song is in a low part at the mix point | 4 bars (about 8 s, at most 9) when both songs are in a low part, 2 bars (at least 4 s) when one is, with the bass swap. The two beats aren't synced, so they only overlap where one side is quiet. Calm moods add a reverb wash. Both songs play at their natural speed. |
+| **Showcase blend** | Now and then (at most once every 4 mixes): tempos match and the keys don't clash | 16 bars (about 30–40 s), the bands handed over one at a time: the new song's highs come in first, then its mids (25–50%), the bass swaps at the half, and the old song's mids and highs fade out last. Planned with room for all 16 bars. |
+| **Slow wash fade** | Now and then (at most once every 4 mixes): tempos can't be beatmatched and both songs are in a low part | 12 s. The old song thins out through a rising filter and dissolves into a reverb tail as the new song rises. |
+| **Reverb wash** | Tempos too far apart, in a calm mood (Chill / Romantic), and neither song in a low part | About 2 s. The old song's last 4 beats feed a 3.5 s reverb, which washes on under the new song. A rhythmic echo would fight the new beat; a reverb tail has no rhythm. |
+| **Brake (vinyl stop)** | Tempos too far apart, on a dance floor, neither song in a low part. At most once every 4 mixes. | The old song slows to a halt over its last beat, pitch falling with it, and the new song hits on the 1. |
+| **Echo-out cut** | Tempos too far apart, neither song in a low part, otherwise | About 2 s. The old song's last beat echoes away under the new one. |
 
 **Cut into the silence (a gap exit):**
 - **What counts as a gap:** 0.3–4 s quieter than 15% of the song's average level, right after 2 bars at least as loud as its average (a high point), with the music coming back afterwards (`findGaps`).
@@ -162,7 +169,17 @@ The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of
 - **Brake / spinback** is a deliberate, theatrical hard exit, best used sparingly; about one beat long ([We Are Crossfader](https://wearecrossfader.co.uk/blog/five-ways-djs-mix-songs-together/), [Thomann](https://www.thomann.de/blog/en/the-5-most-important-dj-transitions)).
 - **Never every time, never stacked:** effects stop working when they're on every transition, and a filter, echo and loop together is too much. Hence the "once every 4 mixes" limit and one effect per mix.
 
-**Shown:** the status line names the style, e.g. "Loop roll build on the old song: … lands on the 1".
+**Shown:** the status line names the style, e.g. "Echo-out on the old song".
+
+**No abrupt transitions (STRICT):** a song may change abruptly **only where the old song itself pauses** (a gap cut into its own silence). Everywhere else every transition overlaps for at least 4 s (`SMOOTH_MIN_SECONDS`), whoever asked for it: the AI DJ's "cut", the vocal-clash cut (now a 2-bar blend), Mix now, a disliked-song skip, a length picked by hand. So:
+- Loop roll and brake are no longer used (both end in a hard landing).
+- Tempos that can't be beatmatched and no low part at the mix point: a 5 s bass-swapped fade with an echo tail (`SMOOTH_FALLBACK_SECONDS`), not a quick cut.
+- Anything that overlaps stays beatmatched (natural tempo only for gap cuts), so the beats don't flam.
+Code: `smoothOnly` in `startTransition`, `executePendingMix`, `chooseExitFx`, `lowFadeSeconds`.
+
+**Never in a high part:** every song has high parts (choruses, drops: bars at least 85% as loud as its loud level, the 90th percentile of its bars) and low parts (verses, breakdowns, intro, outro). The old song never starts leaving in the middle of a high part, or just as one begins (in the first half of the mix): the crowd is waiting for that chorus. The best exit is right where a high part ends and a low part starts (*"current song's high part just ended"*, worth 1 more point). When Mix is pressed in a long high part, the exit is looked for up to 90 s ahead instead of 45 s, so the mix waits for the low part rather than cutting the chorus off (`loudLevel`, `inHighPart` in `planMix`). Cuts with no overlap (natural pitch) never change the new song's speed.
+
+**Never into the fade-out:** some songs fade or go quiet for several seconds before the file ends. The exit starts at most a bar after the song's music ends (the last bar at least half its average level, `lastLoudTime`), so a cut never leaves seconds of near-silence. If the song is already fading when the mix is planned, it mixes at the next bar.
 
 **Every hook is protected:** an exit never fades the old song out over any of its hooks (each chorus and a drop), not only the first one.
 
@@ -170,6 +187,22 @@ The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of
 
 ---
 
+
+# Mistakes Great DJs Don't Make (Research)
+
+| Mistake | What the app does |
+|---|---|
+| Mixing out mid-phrase or mid-chorus | Exits on phrase starts, never in a high part; the best exit is where a high part ends |
+| Chorus over chorus | The incoming song enters in its intro / build-up; two singers at once get a quick cut |
+| Big changes in a chorus instead of a break | Tempo glides and blends happen over low parts |
+| An abrupt stop between songs that don't match | A low-part fade instead of a 2 s cut; the brake and quick cuts only when no low part is near |
+| Two basslines at once | Bass swap in every blend and fade |
+| Mixing out too early (playing mostly intros) | The Mix button waits for the end of the high part; Best Parts leaves after the hook |
+| Cutting to silence (dead air) | No exits into fade-outs; the cut into a silence is timed to where the music would come back |
+
+Sources: [DJ.Studio: bad mixing mistakes](https://dj.studio/blog/bad-dj-mixing-mistakes), [DJ.Studio: phrasing](https://dj.studio/blog/phrasing-dj-mixing), [ZipDJ: phrasing](https://zipdj.com/?p=33273), [Violet Recording: common DJ mistakes](https://violetrecording.com/common-dj-mistakes-to-avoid/), [DJ Courses Online: 3 common mixing mistakes](https://djcoursesonline.com/dj-blog/2021/8/2/3-common-mixing-mistakes), [We Are Crossfader: 3 transitions for any genre](https://wearecrossfader.co.uk/blog/3-easy-transitions-to-mix-any-genre/), [DJ TechTools forum: 140 to 88 BPM](https://forum.djtechtools.com/t/how-do-i-transition-from-a-higher-bpm-140-to-a-much-slower-bpm-88/52941).
+
+---
 
 # The 15 Golden Rules (and How the App Follows Each)
 
@@ -365,9 +398,9 @@ These apply always, with or without Best Parts. Both are decided from the audio 
 
 # Best Parts Mode (Dance Floor) Rules
 
-When people are dancing they want the energy of each song, not its full length. **Best Parts** mode plays every song from its build-up through its hook, then mixes into the next song's build-up. Each song is on air for about **1–1.5 minutes** (≈ 40 bars at 120 BPM) instead of 3–4.
+When people are dancing they want the energy of each song, not its full length. **Best Parts** mode plays every song from its build-up through its hook, then mixes into the next song's build-up. Each song is on air for **at most 1:30 by default** (a hard limit, adjustable 1:00–2:30) instead of 3–4 minutes.
 
-Switch: **"Best parts only"** under the transport controls (Party console), **"Best Parts"** in the Master Mixer header, and **"Best Parts"** on the phone remote. It is off by default and remembered on this browser (`ai_dj_best_parts`). Moods don't change it. Code: `bestPartExitWindow`, `bestPartEntryRange` and `mixOutWindow` in `src/audio/AudioEngine.ts`; `earliestExit` and `entryRange` in `planMix` (`src/audio/MixPointPlanner.ts`).
+Switch: **"Best parts only"** under the transport controls (Party console), **"Best Parts"** in the Master Mixer header, and **"Best Parts"** on the phone remote. It is off by default and remembered on this browser (`ai_dj_best_parts`). Next to the Party console switch, a picker sets the limit (max 1:00 / 1:15 / 1:30 / 2:00 / 2:30; `ai_dj_best_parts_max_seconds`). Moods don't change it. Code: `bestPartExitWindow`, `bestPartEntryRange` and `mixOutWindow` in `src/audio/AudioEngine.ts`; `earliestExit` and `entryRange` in `planMix` (`src/audio/MixPointPlanner.ts`).
 
 ## 1. What "the best part" is
 - The song's **hook** is its `highlightTime` (`HighlightDetector`): the loudest sustained 6-second stretch between 18 % and 75 % of the song, which is where the chorus or drop sits.
@@ -387,17 +420,24 @@ Switch: **"Best parts only"** under the transport controls (Party console), **"B
 - The auto-mix treats the end of the exit window as the song's end: it plans the mix (and asks the AI DJ ahead of time) 45 s before it, exactly as it would before a real outro.
 - **Never cut a phrase short to hit a time:** the exit is always a bar start chosen for musical reasons inside the window.
 
-## 4. When a song plays whole
+## 4. The hard limit (`bestPartsMaxSeconds`, default 90 s)
+- Counted from where the song came in (its entry point, or where the listener jumped to with a seek / Best part), mix included: the old song is **half faded by the limit** (`latestExit` in `planMix`).
+- Everything else works **inside** the limit: the exit window, the phrase search, the "never in a high part" wait and gap cuts. If a high part runs past the limit, the best bar before the limit is used.
+- An exit window running past the limit ends at it; one starting after the limit is dropped and the exit is chosen in the 45 s before the limit.
+- If the limit passes with no next song ready, the song keeps playing and mixes out within ~8 s of a song being ready.
+- Not limited: songs under 2 minutes, strict-start songs, and the Manual Mix / Next buttons.
+
+## 5. When a song plays whole
 - **Short songs:** under 2 minutes (`BEST_PART_MIN_SONG_SECONDS = 120`) play whole.
-- **Late hook:** if the exit window would run into the song's last 22 seconds, the song plays out to its outro and mixes normally.
-- **Not analysed yet:** a song that is still streaming, before its analysis has found the hook, plays normally until the hook is known.
+- **Late hook:** if the exit window would run into the song's last 22 seconds, the exit isn't tied to the hook; the hard limit still applies.
+- **Not analysed yet:** before its analysis has found the hook, the exit isn't tied to the hook; the hard limit still applies.
 - **First song of the set:** it still starts from the music start (never from the hook). Its exit follows the Best Parts rule.
 
-## 5. When the next song isn't ready
+## 6. When the next song isn't ready
 - The song keeps playing; nothing is cut into silence.
 - Once a song is ready after the exit window has passed, the mix happens at the best bar in the **next 16 bars**.
 
-## 6. What doesn't change
+## 7. What doesn't change
 - **Manual Mix / Next:** these keep their 45-second lookahead and "Mix now" (see *Manual Mix* rules). In Best Parts mode the incoming song still enters at its build-up.
 - **All other mixing rules still apply:** BPM matching and limits, beat alignment, key compatibility, bass swap, blend length per mood, vocal-clash avoidance, loudness, and the AI DJ's choice between rule-abiding exit/entry points.
 - **Queue rules:** a song played as a best part counts as played (Previously Played, Most Played, the no-repeat window).
@@ -457,6 +497,16 @@ Adjust song tempo to create energetic, dance-friendly mixes while preserving mus
 - Treat this as an exceptional range, not the default.
 - Check for distorted transients, unnatural vocals, rhythmic artifacts, and loss of groove.
 - If the result sounds poor, use a different transition technique instead of forcing the tempo match.
+
+## Tempo Detection (Which Songs Can Be Beatmatched)
+
+Two songs are beatmatched only when both tempos have a confidence of at least 0.6; otherwise the mix is a quick cut (`BpmDetector.ts`).
+
+- **Kick and bass first:** the tempo comes from the low band (under 150 Hz) when its pulse is clear (0.6 or more). This is unchanged from before, so songs that were confident keep their tempo.
+- **Otherwise all three bands:** low (at half weight), mid (150 Hz – 2 kHz: snare, claps, dholak) and high (over 2 kHz: hats, shakers, dhol crack). Many pop and desi songs carry their pulse there, not in the kick.
+- **Beat position from the kick and bass:** the grid and the "1" still come from the low band, because hats would pull the beat toward the off-beat.
+- **Stability:** the tempo is measured again on four separate 40 s stretches; if most don't confirm it (3 of 4, 2 of 3; half / double time counts), the confidence is capped at 0.55, so the song is never beatmatched on a tempo that drifts.
+- **Measured on 200 cached songs:** a confident tempo for **62 %** of songs (was 34 %). Every song that was confident before kept its tempo. Known tempos that are now right: We Don't Talk Anymore (100), Closer (95), As It Was (174), Drop It Like It's Hot (92), 295 (90). Tempos that were confidently wrong are now flagged as unsure (e.g. This Is What You Came For: 141.7, really 124). Shape of You is still wrong (127.7, really 96) but stays unsure (0.27), so it is cut, not beatmatched.
 
 ## Technical Rules
 
@@ -593,7 +643,8 @@ A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's o
 6. **No energy drop on a dance floor:** in Party or Bhangra mood, a song more than 3 dB quieter than the one on air loses 1.
 7. **Breathers:** on a dance floor, after 5 songs in a row with no step down in energy (no song at least 1.5 dB quieter than the one before it), a song 1.5–6 dB quieter than the one on air **gains** 0.8 instead of losing points, so people get a breather. A song more than 6 dB quieter still loses 1: a breather, not an empty floor.
 8. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
-9. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
+9. **The AI DJ is told the tempo step:** when it picks the next song, each ready song is labelled *"tempo step 3% (can blend)"* or *"tempo jump 25% (forces a cut)"* (8% or less blends; half and double time count), and it is asked to prefer songs that can blend.
+10. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
 
 **Why:** the craft sources agree that a set is shaped as waves of energy rather than a random order or a flat line. Big tempo jumps need planning, and abrupt changes of genre or energy lose the floor. See [DJ.Studio: anatomy of a great mix](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic), [ZipDJ: how to structure a set](https://zipdj.com/blog/how-to-structure-a-dj-set) and [DJ Will Gill: setlist flow](https://djwillgill.com/pro-tactics-for-flawless-song-selection-for-dj-setlist-flow/).
 
@@ -757,3 +808,13 @@ The listener should know most of what plays. Up Next is built so that about 70 %
      - The browser sends 4 seeds per request, at most 3 requests per fill.
      - If the AI times out, it's skipped for 5 minutes.
    - **Limit:** the related lists don't know the party mood, so a calm song can come in during Party mood. Only the AI's ideas follow the mood.
+
+# Following the Listener's Mood
+
+When the listener chooses songs themselves (searched and played, or added), the **type** of those songs is followed, not just the one song: Shararat (Dhurandhar) then Aaj Ki Raat → item songs.
+
+- **The run:** the last 3 songs they chose within 45 minutes of each other (`MOOD_RUN_SONGS`, `MOOD_RUN_MS`), newest first.
+- **Where the songs come from:** `/api/similar` reads each song's "people who play this also play" list. A song on the lists of several of the chosen songs is that type for sure and ranks first; the newest song's list counts most. The songs most surely of the type are then asked about too (second step), so the picks are many songs of that type rather than one list's mix. Only if that finds too few, the AI's ideas (its fixed fallback lists only when nothing else came).
+- **How many and where:** at least 6 (`MOOD_PICKS`), at the top of Up Next right after the songs the listener queued themselves. They stay there together when Up Next is reshuffled (`moodPick`, `isPinned` in `queueRules.ts`). A new choice replaces the previous picks that haven't started loading.
+- **Staying with the type:** when one of those picks plays (mixed in, or chosen from Up Next), the listener is staying with that type, so 3 more of it (`MOOD_MORE`) join the end of the picks, keeping at least 6 and at most 10 waiting (`MOOD_MAX_WAITING`). It's researched from the pick that's playing together with the songs the listener chose themselves (the anchors), so one off-type pick doesn't drift the type away. Picks don't become anchors; after 45 minutes without a choice of their own, the playing pick alone sets the type.
+- **Same rules as any automatic pick:** at most 6 minutes, no 8D or mashups, nothing played in the last 3 hours, nothing on "Don't Play Again Ever", and the AI chat's filter. Each shows why it's there ("Like your picks: played with both …").

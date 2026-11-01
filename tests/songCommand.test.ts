@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseSongCommand } from '../src/ai/DJAgent';
+import { describedSongs } from '../shared/songFilter';
 
 describe('parseSongCommand', () => {
   it('"only <artist>" in its usual phrasings', () => {
@@ -53,5 +54,24 @@ describe('parseSongCommand: kinds of songs', () => {
   });
   it('leaves song titles with those words alone', () => {
     expect(q('play Love Dose')).toEqual({ play_song: 'Love Dose' });
+  });
+  it('reads a long request in plain words ("all time", "favourite", the "19s" typo for 90s)', () => {
+    expect(q('Play all the classic hindi dance songs of all time or 19s favourite')).toEqual({ focus_artists: undefined, only: true, vibe: 'dance', language: 'hindi', era: '90s' });
+    expect(q("play 90's bollywood party hits")).toEqual({ focus_artists: undefined, only: false, vibe: 'dance', language: 'hindi', era: '90s' });
+  });
+  it('still reads several artists joined by "or"', () => {
+    expect(q('only Diljit Dosanjh or Karan Aujla')).toEqual({ focus_artists: ['Diljit Dosanjh', 'Karan Aujla'], only: true });
+  });
+});
+
+describe('describedSongs (the search box)', () => {
+  it('a description of songs becomes a filter', () => {
+    expect(describedSongs('classic hindi dance songs of all time or 19s favourite')).toEqual({ artists: [], only: true, vibe: 'dance', language: 'hindi', era: '90s' });
+    expect(describedSongs('best evergreen bollywood songs')).toEqual({ artists: [], only: true, language: 'hindi', era: 'old' });
+  });
+  it('a title or an artist is searched as typed', () => {
+    expect(describedSongs('Diljit Dosanjh party songs')).toBeNull();
+    expect(describedSongs('Lover')).toBeNull();
+    expect(describedSongs('Love Dose')).toBeNull();
   });
 });
