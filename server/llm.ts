@@ -92,6 +92,24 @@ export async function checkGemini(cfg: GeminiConfig): Promise<{ online: boolean;
   return geminiCheck;
 }
 
+// Real requests that failed for a reason that won't pass in seconds (quota used up, key rejected):
+// Gemini counts as unavailable until then. The models.get check above uses no tokens, so it kept
+// saying "online" (green light) while every real request failed with HTTP 429.
+export let geminiBlock: { until: number; error: string } | null = null;
+const GEMINI_QUOTA_COOLDOWN_MS = 15 * 60_000;
+const GEMINI_KEY_COOLDOWN_MS = 60 * 60_000;
+
+/** The wait Google asks for in a 429 answer ("retryDelay": "37s"), in ms. */
+function retryDelayMs(errorText: string): number | null {
+  const m = errorText.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return m ? Math.ceil(parseFloat(m[1]) * 1000) : null;
+}
+
+/** Whether Gemini is held back after such a failure (and why). */
+export function geminiBlocked(now = Date.now()): { until: number; error: string } | null {
+  return geminiBlock && now < geminiBlock.until ? geminiBlock : null;
+}
+
 /** One JSON-mode completion from Google Gemini API (cloud backup, ~300ms latency). */
 export async function geminiGenerate(prompt: string, maxTokens: number, timeoutMs: number): Promise<string> {
   const cfg = getGeminiConfig();
@@ -101,7 +119,11 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
     (m, i, arr) => arr.indexOf(m) === i
   );
 
+  const blocked = geminiBlocked();
+  if (blocked) throw new Error(`Gemini held back until ${new Date(blocked.until).toLocaleTimeString()}: ${blocked.error}`);
+
   let lastError: Error | null = null;
+  let quotaWait: number | null = null; // every model so far said "quota exceeded"
   for (const model of modelsToTry) {
     try {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
@@ -124,6 +146,15 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
         if (resp.status === 404 && model !== modelsToTry[modelsToTry.length - 1]) {
           continue;
         }
+        if (resp.status === 429) {
+          // Each model has its own quota: the next one may still answer
+          quotaWait = Math.max(quotaWait ?? 0, retryDelayMs(errorText) ?? GEMINI_QUOTA_COOLDOWN_MS);
+          lastError = new Error(`Gemini (${model}) HTTP 429: quota exceeded`);
+          continue;
+        }
+        if (resp.status === 401 || resp.status === 403) {
+          geminiBlock = { until: Date.now() + GEMINI_KEY_COOLDOWN_MS, error: 'API key rejected (HTTP ' + resp.status + ')' };
+        }
         throw new Error(`Gemini (${model}) HTTP ${resp.status}: ${errorText.slice(0, 200)}`);
       }
 
@@ -132,6 +163,7 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
       if (!text) {
         throw new Error('Gemini returned empty response candidate');
       }
+      geminiBlock = null; // it answers again
       return text;
     } catch (err: unknown) {
       lastError = err as Error;
@@ -139,12 +171,15 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
     }
   }
 
+  if (quotaWait !== null && lastError?.message.includes('429')) {
+    geminiBlock = { until: Date.now() + quotaWait, error: 'quota used up (HTTP 429): free tier limit reached' };
+  }
   throw lastError || new Error('Gemini generation failed');
 }
 
 // 3b. AI Brain Proxy: Local Ollama (1st preference) with Google Gemini Cloud (2nd preference backup).
 // Going through the server avoids browser CORS limits, keeps secrets server-side, and works from any device.
-export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+export async function handleLlmHealth(_req: IncomingMessage, res: ServerResponse, _url: URL): Promise<void> {
   res.setHeader('Content-Type', 'application/json');
   const geminiCfg = getGeminiConfig();
   let ollamaOnline = false;
@@ -184,7 +219,9 @@ export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse,
   }
 
   const gemini = geminiCfg ? await checkGemini(geminiCfg) : null;
-  const geminiOnline = Boolean(gemini?.online);
+  // Reachable isn't enough: a real request that just failed on quota or the key counts too
+  const held = geminiBlocked();
+  const geminiOnline = Boolean(gemini?.online) && !held;
   const hasAny = ollamaOnline || geminiOnline;
   // 1st preference: Local Ollama. 2nd preference: Google Gemini cloud backup.
   const activeProvider = ollamaOnline ? 'ollama' : geminiOnline ? 'gemini' : 'none';
@@ -203,7 +240,7 @@ export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse,
         configured: Boolean(geminiCfg),
         online: geminiOnline,
         model: geminiCfg?.model || null,
-        error: gemini?.error ?? null,
+        error: held ? `${held.error}; tried again after ${new Date(held.until).toLocaleTimeString()}` : (gemini?.error ?? null),
       },
       ollama: {
         online: ollamaOnline,
@@ -214,7 +251,7 @@ export async function handleLlmHealth(req: IncomingMessage, res: ServerResponse,
   return;
 }
 
-export async function handleLlm(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+export async function handleLlm(req: IncomingMessage, res: ServerResponse, _url: URL): Promise<void> {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = await parseJsonBody(req);

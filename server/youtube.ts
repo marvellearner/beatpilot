@@ -10,7 +10,13 @@ import { ROOT_DIR } from './paths';
 import { sendFile } from './sendFile';
 import { resolveAudio, searchVideos, type VideoHit } from './audioSource';
 import { describedSongs, filterQueries } from '../shared/songFilter';
+import { searchVariants } from './searchVariants';
 import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, scoreHit } from '../shared/taste';
+import { getDownload, sendFromDownload } from './audioDownload';
+import { logError } from './logger';
+import { isLocalUrl, localById, savedCopyFor, searchLocal, serveLocalFile, toSearchResult } from './localLibrary';
+
+const FEW_RESULTS = 3; // fewer songs than this: other spellings and word orders are tried too
 
 /**
  * A search box query. One that describes a kind of songs instead of naming one ("Play all the
@@ -20,7 +26,26 @@ import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, scoreHit } from '../shared/taste';
  */
 async function searchFor(query: string, page: number): Promise<VideoHit[]> {
   const described = describedSongs(query);
-  if (!described) return searchVideos(query, page);
+  if (!described) {
+    const hits = await searchVideos(query, page);
+    if (hits.length >= FEW_RESULTS || page > 1) return hits;
+    // Next to nothing: the front-ends match words literally (no "did you mean", word order
+    // matters), so other spellings and orders are tried too ("goliya honey singh" found 0,
+    // "honey singh goliyan" found the song)
+    const merged = [...hits];
+    const seen = new Set(hits.map((h) => h.videoId));
+    const variants = searchVariants(query);
+    for (let i = 0; i < variants.length && merged.length < 10; i += 3) {
+      const lists = await Promise.all(variants.slice(i, i + 3).map((v) => searchVideos(v, 1).catch(() => [] as VideoHit[])));
+      for (const h of lists.flat()) {
+        if (!seen.has(h.videoId)) {
+          seen.add(h.videoId);
+          merged.push(h);
+        }
+      }
+    }
+    return merged;
+  }
   // "… songs" mostly finds jukeboxes; "… song full video" finds the songs themselves
   const base = filterQueries(described, [])[0];
   const single = base.replace(/\bsongs$/, 'song');
@@ -41,9 +66,6 @@ async function searchFor(query: string, page: number): Promise<VideoHit[]> {
   }
   return out.length || page > 1 ? out : searchVideos(query, page); // nothing found that way: as typed
 }
-import { getDownload, sendFromDownload } from './audioDownload';
-import { logError } from './logger';
-import { isLocalUrl, localById, savedCopyFor, searchLocal, serveLocalFile, toSearchResult } from './localLibrary';
 
 // Downloaded song audio (compressed, as YouTube sends it; ~4 MB per song), one file per video id
 export const AUDIO_CACHE_DIR = path.join(ROOT_DIR, 'cache', 'audio');

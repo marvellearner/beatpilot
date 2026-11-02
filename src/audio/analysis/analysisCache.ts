@@ -6,7 +6,7 @@
 
 import { ANALYSIS_FIELDS, AnalysisFields } from './trackAnalysis';
 
-const ANALYSIS_VERSION = 3; // 2: peakTime; 3: three-band tempo with a stability check
+const ANALYSIS_VERSION = 4; // 2: peakTime; 3: three-band tempo with a stability check; 4: tempo vote over stretches
 const STORAGE_KEY = `ai_dj_analysis_v${ANALYSIS_VERSION}`;
 const MAX_SONGS = 800; // ~0.5 KB each
 const SAVE_DELAY_MS = 2000;

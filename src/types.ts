@@ -32,6 +32,9 @@ export interface TrackMetadata {
   peakTime?: number;               // The most-loved moment (YouTube most-replayed, else the loudest stretch): Best Parts plays past it
   outroReason?: string;            // Why (shown in the mix status)
   energyProfile?: EnergyProfile;   // Loudness / vocal-band envelopes used to plan mix points
+  aiDanceBpm?: number;             // Real dance tempo decided by AI (e.g. 76 vs 152)
+  aiPerceivedMeter?: 'standard_4_4' | 'half_time_folk' | 'triplet_compound';
+  aiBpmReason?: string;
   // Key-locked tempo: the song as downloaded, and the tempo multiple its current audio is stretched to
   originalBuffer?: AudioBuffer;
   original?: OriginalTiming;
@@ -49,6 +52,9 @@ export interface OriginalTiming {
   musicEndTime?: number;
   hooks?: SongHook[];
   peakTime?: number;
+  aiDanceBpm?: number;
+  aiPerceivedMeter?: 'standard_4_4' | 'half_time_folk' | 'triplet_compound';
+  aiBpmReason?: string;
 }
 
 /** A hook found in the audio: where a chorus (or a drop, or the loudest stretch) starts. */
@@ -96,6 +102,7 @@ export interface TransitionConfig {
   showcase?: 'eq_blend' | 'wash'; // a showcase transition (see AudioEngine SHOWCASE_BARS / WASH_FADE_SECONDS)
   lowFade?: boolean; // tempos can't be beatmatched: fade over a low part for durationSeconds instead of a quick cut
   naturalTempo?: boolean; // a cut with no overlap: start the new song at its own speed, not beatmatched
+  instant?: boolean; // the listener asked for this song now (Previous): a direct switch, exempt from the no-abrupt rule
   xfadeSeconds?: number; // linear cross-fade length for the smooth_crossfade style (default: the whole mix)
 }
 
@@ -155,6 +162,9 @@ export interface QueuedTrack {
   hooks?: SongHook[];
   peakTime?: number;
   energyProfile?: EnergyProfile;
+  aiDanceBpm?: number;
+  aiPerceivedMeter?: 'standard_4_4' | 'half_time_folk' | 'triplet_compound';
+  aiBpmReason?: string;
   // Key-locked tempo lock (Party mood): the song as downloaded, and the tempo it was stretched to
   originalBuffer?: AudioBuffer;
   original?: OriginalTiming;
@@ -194,6 +204,11 @@ export interface HostSyncState {
   laptopMuted?: boolean;
   aiProvider?: 'gemini' | 'ollama' | 'none';
   aiModelName?: string | null;
+  // Each AI backend's availability (the header lights; the phone shows them too)
+  aiBackends?: {
+    ollama: { online: boolean; model: string | null };
+    gemini: { configured: boolean; online: boolean; model: string | null; error: string | null };
+  } | null;
   isAiThinking?: boolean;
   aiResult?: { explanation: string; source: string; latencyMs: number } | null;
 }

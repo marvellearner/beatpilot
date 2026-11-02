@@ -60,6 +60,7 @@ export function buildLiveSyncState(engine: AudioEngine): LiveSyncState {
     masterVolume: engine.masterVolume,
     aiProvider: engine.aiProvider,
     aiModelName: engine.aiModelName,
+    aiBackends: engine.aiBackends,
     isAiThinking: engine.isAiThinking,
     aiResult: engine.lastAiResult,
   };

@@ -35,32 +35,100 @@ const LOW_ONLY = [1, 0, 0];
 const CLEAR_LOW_CONFIDENCE = 0.6; // the low band's own tempo is used from here up
 const STABILITY_STARTS = [20, 60, 100, 140]; // song seconds
 const STABILITY_SECONDS = 40;
-const STABILITY_TOLERANCE = 0.01;
 const UNSTABLE_MAX_CONFIDENCE = 0.55; // just below the beatmatch threshold (0.6)
 
 const NO_BEAT: BpmAnalysisResult = { bpm: 128, confidence: 0.1, isRegularBeat: false, firstDownbeatTime: 0 };
 
 export function detectBpmFromBuffer(buffer: AudioBuffer, window?: { start: number; length: number }): BpmAnalysisResult {
   const low = analyse(buffer, window, LOW_ONLY);
-  const weights = low.confidence >= CLEAR_LOW_CONFIDENCE ? LOW_ONLY : BAND_WEIGHTS;
-  let result = low;
-  if (weights !== LOW_ONLY) {
-    const all = analyse(buffer, window, BAND_WEIGHTS);
-    if (all.confidence > low.confidence) result = all;
-  }
-  if (window) return result;
+  const all = low.confidence >= CLEAR_LOW_CONFIDENCE && window ? low : analyse(buffer, window, BAND_WEIGHTS);
+  const single = low.confidence >= CLEAR_LOW_CONFIDENCE || low.confidence >= all.confidence ? low : all;
+  if (window) return single;
 
-  // 6. Stability: most separate 40 s stretches must confirm the tempo (half or double time counts)
-  const checks: number[] = [];
-  for (const start of STABILITY_STARTS) {
-    if (start + STABILITY_SECONDS < buffer.duration - 10) checks.push(analyse(buffer, { start, length: STABILITY_SECONDS }, result === low ? LOW_ONLY : BAND_WEIGHTS).bpm);
+  // 6. Tempo vote over the whole song and separate 40 s stretches (MIXING_RULES.md "Tempo Detection")
+  const windows = STABILITY_STARTS.filter((s) => s + STABILITY_SECONDS < buffer.duration - 10).map((start) => [
+    analyse(buffer, { start, length: STABILITY_SECONDS }, LOW_ONLY),
+    analyse(buffer, { start, length: STABILITY_SECONDS }, BAND_WEIGHTS),
+  ]);
+  return voteTempo([low, all], windows) ?? single;
+}
+
+const VOTE_MIN_CONFIDENCE = 0.4; // an estimate weaker than this doesn't vote
+const VOTE_TOLERANCE = 0.012; // estimates within 1.2% (or at half / double) are the same tempo
+const PRECISE_TOLERANCE = 0.003; // ...and those within 0.3% of the strongest are averaged for the BPM
+const LOW_BAND_PREFERENCE = 1.1; // kick and bass are the most reliable pulse (3:2 hat readings)
+const STABLE_MIN_CONFIDENCE = 0.7; // a tempo most stretches confirm is steady enough to beatmatch
+
+/**
+ * The tempo most of the song agrees on. Every estimate (whole song and each 40 s stretch, low
+ * band and all bands) votes for its tempo family (half and double time count as the same); a
+ * stretch counts once, by its stronger estimate. The family with the most support wins, its BPM
+ * the median of its estimates at the octave of its most confident one. A tempo confirmed by most
+ * stretches is trusted (STABLE_MIN_CONFIDENCE) even if no single estimate was very sure; one most
+ * stretches don't confirm isn't (UNSTABLE_MAX_CONFIDENCE). Null without stretches (short songs).
+ *
+ * On 30 cached songs this fixed three failures of trusting one estimate: a low band confident at
+ * the wrong tempo (141.7 vs 124 everywhere else), a weak whole-song pass with certain stretches
+ * (158.6 at 0.26 vs 81.0 at 1.0 three times), and a steady 118 that no single estimate was sure of.
+ */
+export function voteTempo(whole: BpmAnalysisResult[], windows: BpmAnalysisResult[][]): BpmAnalysisResult | null {
+  if (windows.length < 2) return null;
+  const same = (a: number, b: number) => [0.5, 1, 2].some((m) => Math.abs((a * m) / b - 1) <= VOTE_TOLERANCE);
+  const weight = (e: BpmAnalysisResult, i: number) => e.confidence * (i === 0 ? LOW_BAND_PREFERENCE : 1); // [low, all]
+  const voters = [...whole, ...windows.flat()].filter((e) => e.confidence >= VOTE_MIN_CONFIDENCE);
+  if (!voters.length) return null;
+
+  let best: { family: BpmAnalysisResult; score: number; stretches: number } | null = null;
+  for (const candidate of voters) {
+    let score = 0;
+    whole.forEach((e, i) => {
+      if (e.confidence >= VOTE_MIN_CONFIDENCE && same(e.bpm, candidate.bpm)) score += weight(e, i);
+    });
+    let stretches = 0;
+    for (const w of windows) {
+      const support = Math.max(0, ...w.map((e, i) => (e.confidence >= VOTE_MIN_CONFIDENCE && same(e.bpm, candidate.bpm) ? weight(e, i) : 0)));
+      if (support > 0) stretches++;
+      score += support;
+    }
+    if (!best || score > best.score + 1e-9) best = { family: candidate, score, stretches };
   }
-  const agrees = (b: number) => [0.5, 1, 2].some((m) => Math.abs((b * m) / result.bpm - 1) <= STABILITY_TOLERANCE);
-  const needed = Math.ceil(checks.length / 2) + (checks.length >= 4 ? 1 : 0); // 3 of 4, 2 of 3, 1 of 2
-  if (checks.length >= 2 && checks.filter(agrees).length < needed && result.confidence > UNSTABLE_MAX_CONFIDENCE) {
-    return { ...result, confidence: UNSTABLE_MAX_CONFIDENCE, isRegularBeat: false };
-  }
-  return result;
+  if (!best) return null;
+
+  // The family's estimates; its most confident one gives the octave, phase and downbeat
+  const members = voters.filter((e) => same(e.bpm, best!.family.bpm));
+  const lead = members.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+  const atOctave = members
+    .map((e) => [0.5, 1, 2].map((m) => e.bpm * m).reduce((a, b) => (Math.abs(b / lead.bpm - 1) < Math.abs(a / lead.bpm - 1) ? b : a)))
+    // Only estimates that agree closely are averaged: 124.3 and 125.06 are two readings, not
+    // one tempo, and their middle (124.7) would drift a 16-bar blend by a fifth of a beat
+    .filter((b) => Math.abs(b / lead.bpm - 1) <= PRECISE_TOLERANCE)
+    .sort((a, b) => a - b);
+  // The beat grid from the whole-song pass when it agrees (it covers the song's start), else the lead
+  const wholeMember = whole.filter((e) => e.confidence >= VOTE_MIN_CONFIDENCE && same(e.bpm, best!.family.bpm)).sort((a, b) => b.confidence - a.confidence)[0];
+  const mid = atOctave.length >> 1;
+  const bpm = atOctave.length % 2 ? atOctave[mid] : (atOctave[mid - 1] + atOctave[mid]) / 2;
+
+  const needed = Math.ceil(windows.length / 2) + (windows.length >= 4 ? 1 : 0); // 3 of 4, 2 of 3, 1 of 2
+  const steady = best.stretches >= needed;
+  const confidence = steady ? Math.max(lead.confidence, STABLE_MIN_CONFIDENCE) : Math.min(lead.confidence, UNSTABLE_MAX_CONFIDENCE);
+  return {
+    bpm: Math.round(bpm * 100) / 100,
+    confidence: Number(confidence.toFixed(2)),
+    isRegularBeat: steady && confidence >= 0.65,
+    firstDownbeatTime: (wholeMember ?? lead).firstDownbeatTime,
+  };
+}
+
+/** Every stage of detectBpmFromBuffer, for QA and tuning (qa/bpmDiagnostics.mjs). */
+export function bpmDiagnostics(buffer: AudioBuffer) {
+  const low = analyse(buffer, undefined, LOW_ONLY);
+  const all = analyse(buffer, undefined, BAND_WEIGHTS);
+  const windows = STABILITY_STARTS.filter((s) => s + STABILITY_SECONDS < buffer.duration - 10).map((start) => ({
+    start,
+    low: analyse(buffer, { start, length: STABILITY_SECONDS }, LOW_ONLY),
+    all: analyse(buffer, { start, length: STABILITY_SECONDS }, BAND_WEIGHTS),
+  }));
+  return { final: detectBpmFromBuffer(buffer), low, all, windows };
 }
 
 function analyse(buffer: AudioBuffer, window: { start: number; length: number } | undefined, weights: number[]): BpmAnalysisResult {

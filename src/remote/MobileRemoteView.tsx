@@ -203,6 +203,8 @@ const VolumeCard: React.FC<{
 
 export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, connected, onSendAction }) => {
   const [query, setQuery] = useState('');
+  // Favourites / Most Played card: the tab picked (until then, Favourites if there are any)
+  const [libraryTab, setLibraryTab] = useState<'favorites' | 'most_played' | null>(null);
   const [aiPrompt, setAiPrompt] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -1041,57 +1043,85 @@ syncState.queue.length === 0 ? (
         onMix={mixPreviouslyPlayed}
       />
 
-      {/* Most Played */}
-      {syncState.mostPlayedSongs && syncState.mostPlayedSongs.length > 0 && (
-        <div id="remote-most-played" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#141824] to-[#0a0d16]">
-          <div id="remote-most-played-header" className="flex items-center justify-between">
-            <div id="remote-most-played-title-group" className="flex items-center gap-1.5">
-              <Star className="w-4 h-4 text-amber-400 fill-current" />
-              <span className="font-extrabold text-xs text-white uppercase tracking-wider">
-                MOST PLAYED
-              </span>
+      {/* Favourites & Most Played: one card, two tabs */}
+      {((syncState.favorites?.length ?? 0) > 0 || (syncState.mostPlayedSongs?.length ?? 0) > 0) && (() => {
+        const favorites = syncState.favorites ?? [];
+        const mostPlayed = syncState.mostPlayedSongs ?? [];
+        // The tab picked, else Favourites when there are any
+        const tab = libraryTab ?? (favorites.length ? 'favorites' : 'most_played');
+        const songs: Array<{ id: string; title: string; artist: string; url?: string; thumbnail?: string; note?: string }> =
+          tab === 'favorites'
+            ? favorites.map((f) => ({ id: f.id, title: f.title, artist: f.artist, url: f.url, thumbnail: f.thumbnail }))
+            : mostPlayed.map((m) => ({ id: m.id, title: m.title, artist: m.artist, url: m.url, thumbnail: m.thumbnail, note: `${m.playCount} plays` }));
+        const tabButton = (id: 'favorites' | 'most_played', label: string, count: number, Icon: typeof Star, accent: string) => (
+          <button
+            id={`remote-library-tab-${id}`}
+            onClick={() => setLibraryTab(id)}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider transition-all ${
+              tab === id ? `bg-white/10 ${accent} border border-white/15` : 'text-slate-400 border border-transparent'
+            }`}
+            aria-pressed={tab === id}
+          >
+            <Icon className="w-3.5 h-3.5 fill-current" />
+            <span>{label}</span>
+            <span className="text-[10px] font-mono opacity-70">{count}</span>
+          </button>
+        );
+        return (
+          <div id="remote-library" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#141824] to-[#0a0d16]">
+            <div id="remote-library-tabs" className="flex items-center gap-1.5 p-1 rounded-xl bg-black/40 border border-white/5">
+              {tabButton('favorites', 'Favourites', favorites.length, Heart, 'text-pink-300')}
+              {tabButton('most_played', 'Most Played', mostPlayed.length, Star, 'text-amber-300')}
+            </div>
+
+            <div id="remote-library-list" className="flex flex-col gap-2 max-h-72 overflow-y-auto">
+              {songs.length === 0 ? (
+                <div className="text-center py-5 text-[11px] text-slate-500">
+                  {tab === 'favorites' ? 'No favourites yet: tap ♥ on a song to save it.' : 'Nothing played often enough yet.'}
+                </div>
+              ) : (
+                songs.slice(0, 30).map((song) => (
+                  <div id={`remote-library-item-${song.id}`}
+                    key={song.id}
+                    className="flex items-center justify-between p-2.5 bg-black/40 rounded-xl border border-white/5 text-xs transition-all"
+                  >
+                    <div className="flex items-center gap-2.5 truncate">
+                      <div className="w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10">
+                        {song.thumbnail ? (
+                          <img src={song.thumbnail} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-slate-800">
+                            <Disc3 className={`w-4 h-4 ${tab === 'favorites' ? 'text-pink-400' : 'text-amber-400'}`} />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col truncate">
+                        <span className="font-bold text-white truncate max-w-[170px]" title={song.title}>{song.title}</span>
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                          <span className="truncate max-w-[110px]">{song.artist}</span>
+                          {song.note && <span className="text-amber-400 font-mono font-bold">• {song.note}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() =>
+                        tab === 'most_played'
+                          ? onSendAction({ type: 'CMD_PLAY_STARTER_SONG', songId: song.id })
+                          : mixPreviouslyPlayed({ url: song.url, artist: song.artist, title: song.title })
+                      }
+                      className={`px-2.5 py-1 rounded-lg text-black font-extrabold text-[10px] transition-colors shrink-0 shadow-sm ${
+                        tab === 'favorites' ? 'bg-pink-400 hover:bg-pink-300' : 'bg-amber-500 hover:bg-amber-400'
+                      }`}
+                    >
+                      PLAY
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
-
-          <div id="remote-most-played-list" className="flex flex-col gap-2 max-h-56 overflow-y-auto">
-            {syncState.mostPlayedSongs.slice(0, 5).map((song) => (
-              <div id={`remote-most-played-item-${song.id}`}
-                key={song.id}
-                className="flex items-center justify-between p-2.5 bg-black/40 rounded-xl border border-white/5 hover:border-amber-400/30 text-xs transition-all"
-              >
-                <div id={`remote-most-played-info-${song.id}`} className="flex items-center gap-2.5 truncate">
-                  <div id={`remote-most-played-thumb-${song.id}`} className="w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-slate-800 border border-white/10 relative">
-                    {song.thumbnail ? (
-                      <img src={song.thumbnail} alt={song.title} className="w-full h-full object-cover" />
-                    ) : (
-                      <div id={`remote-most-played-placeholder-${song.id}`} className="w-full h-full flex items-center justify-center bg-slate-800">
-                        <Disc3 className="w-4 h-4 text-amber-400" />
-                      </div>
-                    )}
-                  </div>
-
-                  <div id={`remote-most-played-meta-${song.id}`} className="flex flex-col truncate">
-                    <span className="font-bold text-white truncate max-w-[170px]" title={song.title}>
-                      {song.title}
-                    </span>
-                    <div id={`remote-most-played-stats-${song.id}`} className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                      <span className="truncate max-w-[110px]">{song.artist}</span>
-                      <span className="text-amber-400 font-mono font-bold">• {song.playCount} plays</span>
-                    </div>
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => onSendAction({ type: 'CMD_PLAY_STARTER_SONG', songId: song.id })}
-                  className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-[10px] transition-colors shrink-0 shadow-sm"
-                >
-                  PLAY
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Autonomous 50-Song Upcoming Queue */}
       {(() => {
@@ -1167,6 +1197,31 @@ syncState.queue.length === 0 ? (
           <div className="flex items-center gap-1.5 text-xs font-extrabold text-white">
             <Sparkles className={`w-3.5 h-3.5 ${syncState.isAiThinking ? 'animate-spin text-purple-400' : 'text-purple-400 animate-pulse'}`} />
             <span>AI DJ COMMAND</span>
+          </div>
+
+          {/* One light per AI backend, as on the laptop: green = answering, red = not available, grey = not set up */}
+          <div id="remote-ai-backends" className="flex items-center gap-2 text-[10px] font-mono text-slate-300">
+            {(() => {
+              const b = syncState.aiBackends;
+              const lights = [
+                { id: 'ollama', label: 'Ollama', state: !b ? 'checking' : b.ollama.online ? 'on' : 'off' },
+                { id: 'gemini', label: 'Gemini', state: !b ? 'checking' : !b.gemini.configured ? 'unset' : b.gemini.online ? 'on' : 'off' },
+              ];
+              const color: Record<string, string> = {
+                on: 'bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/80',
+                off: 'bg-red-500 shadow-[0_0_6px] shadow-red-500/70',
+                unset: 'bg-slate-500',
+                checking: 'bg-slate-500 animate-pulse',
+              };
+              const words: Record<string, string> = { on: 'available', off: 'not available', unset: 'not set up', checking: 'checking' };
+              return lights.map((l) => (
+                <span key={l.id} id={`remote-ai-backend-${l.id}`} className="flex items-center gap-1" title={`${l.label}: ${words[l.state]}`}>
+                  <span className={`w-2 h-2 rounded-full ${color[l.state]}`} aria-hidden="true" />
+                  <span>{l.label}</span>
+                  <span className="sr-only">{words[l.state]}</span>
+                </span>
+              ));
+            })()}
           </div>
 
           <span

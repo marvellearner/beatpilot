@@ -40,17 +40,19 @@ import {
   UNHEARD_MAX,
   mainArtistKey,
   mixFamiliarAndNew,
+  moveWesternDown,
   sameSongAs,
   spreadArtists,
   staleSongs,
   type SongLike,
 } from './engine/queueRules';
-import { DJAgent } from '../ai/DJAgent';
+import { DJAgent, type DanceBpmDecision } from '../ai/DJAgent';
+import { PHASE_TOLERANCE_SECONDS, PhaseLock } from './engine/PhaseLock';
 import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
 import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter } from '../../shared/songFilter';
 import type { IntroAnalysisResult } from './IntroSkitDetector';
 import { chooseNext, tempoStep } from './engine/setFlow';
-import { guessLanguage } from '../../shared/songLanguage';
+import { DESI_RUN, guessLanguage, languageFamily } from '../../shared/songLanguage';
 import { runAnalysis, analysisComplete, ANALYSIS_FIELDS, AnalysisFields } from './analysis/trackAnalysis';
 import { analyzeInWorker } from './analysis/analyzeInWorker';
 import { analysisKey, getSavedAnalysis, saveAnalysis } from './analysis/analysisCache';
@@ -88,6 +90,16 @@ const MAX_DECODED_IN_MEMORY = 3;
 const MAX_INCOMING_SHIFT = 0.04; // sudden speed change applied to the incoming song
 const MAX_OUTGOING_RAMP = 0.08; // gradual ramp of the outgoing song before an auto-mix
 const MIN_BEATMATCH_CONFIDENCE = 0.6;
+// Live phase lock: blends this long or longer are listened to and their beats lined up
+// Previous: presses within BACK_NAV_IDLE_MS keep stepping back; the song they end on is loaded
+// after BACK_NAV_SETTLE_MS without a press, then switched to directly (BACK_NAV_FADE_SECONDS)
+const BACK_NAV_IDLE_MS = 20_000;
+const BACK_NAV_SETTLE_MS = 450;
+const BACK_NAV_FADE_SECONDS = 0.2; // a direct switch: just enough fade to avoid a click
+const PHASE_LOCK_MIN_BLEND = 6;
+const PHASE_LOCK_LISTEN_SECONDS = 2.5; // listened to for at least this long (and 6 beats) before a nudge
+const PHASE_LOCK_LISTEN_BEATS = 6;
+const BLEND_MAX_SHIFT = 0.08; // a blend stretches the new song at most ±8% (DJAgent BLENDABLE_STEP agrees)
 const UNMATCHED_TRANSITION_SECONDS = 2; // tempos too far apart: short cut on the beat, no long flam
 const GAP_CUT_SECONDS = 0.08; // a gap exit: the old song is silent there, so the swap is near instant
 // STRICT: never an abrupt change unless the old song itself pauses there (a gap cut). Every other
@@ -163,7 +175,7 @@ export const BPM_LIMITS = {
   PREFERRED_PCT: 0.03, // 0–3%: routine DJ mixing, preserves natural groove
   DEFAULT_PCT: 0.05,   // 3–5%: moderate adjustments, dance energy matching
   EXTENDED_PCT: 0.08,  // 5–8%: strong adjustments, energetic feel / close match
-  MAX_PERMITTED_PCT: 0.16, // ±16%: absolute hard limit from original BPM
+  MAX_PERMITTED_PCT: 0.16, // ±16%: absolute hard limit from original BPM (a locked set tempo; blends: BLEND_MAX_SHIFT)
   MIN_RATIO: 0.84,     // 1 - 0.16 = 0.84 (-16% minimum BPM)
   MAX_RATIO: 1.16,     // 1 + 0.16 = 1.16 (+16% maximum BPM)
 } as const;
@@ -342,6 +354,7 @@ export class AudioEngine {
 
   // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
   public djAgent = new DJAgent();
+  private aiDanceBpmDecisions = new Map<string, DanceBpmDecision>();
   public aiStatus: 'checking' | 'online' | 'offline' = 'checking';
   public aiProvider: 'gemini' | 'ollama' | 'none' = 'none';
   public aiModelName: string = '';
@@ -400,6 +413,14 @@ export class AudioEngine {
 
   // Auto-Transition State
   private transitionTimer: number | null = null;
+  // Live phase lock: lines the new song's beats up with the old one's during a blend (PhaseLock.ts)
+  private phaseLock!: PhaseLock;
+  private phaseLockTimers: number[] = [];
+  // Previous: stepping back through Previously Played (prevTrack). The list is taken at the first
+  // press and walked one song per press; songs played this way don't end the walk.
+  private backNav: { songs: PlayLogEntry[]; index: number; at: number } | null = null;
+  private backNavTimer: number | null = null;
+  private backNavIds = new Set<string>();
   public isTransitioning: boolean = false;
   public transitionProgress: number = 0; // 0 to 1
 
@@ -471,6 +492,7 @@ export class AudioEngine {
     // Each deck's echo FX goes straight to the master bus, so it rings on after a crossfader cut
     this.deckA = new VirtualDeck('A', this.ctx, this.crossfaderGainA, this.masterBus);
     this.deckB = new VirtualDeck('B', this.ctx, this.crossfaderGainB, this.masterBus);
+    this.phaseLock = new PhaseLock(this.ctx, this.deckA.inputNode, this.deckB.inputNode);
 
     // The rhythm layer joins the master bus directly (independent of the crossfader) and
     // follows whichever song is on air
@@ -589,7 +611,10 @@ export class AudioEngine {
     if (mood.autoDrums) this.rhythm.setEnabled(true);
     // Rhythm plans are per mood: decide again for the song on air first, then the ready songs
     const onAir = this.onAirDeck().getTrack();
-    if (onAir) this.rhythmPlans.planFor(onAir, true);
+    if (onAir) {
+      this.rhythmPlans.planFor(onAir, true);
+      void this.evaluateAiDanceBpm(onAir);
+    }
     for (const q of this.queue) if (q.status === 'ready' && q.audioBuffer) this.rhythmPlans.planFor(this.queuedItemToTrack(q));
     this.sessionBpm = this.pickSessionBpm();
 
@@ -851,9 +876,12 @@ export class AudioEngine {
     if (!this.sessionBpm) return null;
     const natural = track.original?.bpm ?? track.bpm;
     if ((track.bpmConfidence ?? 0) >= MIN_BEATMATCH_CONFIDENCE) {
-      const ratio = this.closestTempoRatio(natural, this.sessionBpm);
-      // In Party mood: NEVER decrease BPM of original song!
-      if (this.mood === 'party' && ratio < 1.0) {
+      // If AI identified a half-time/folk meter exception (e.g. 76 BPM perceived vs 152 raw), base ratio on the effective dance pulse
+      const isFolkHalf = track.aiPerceivedMeter === 'half_time_folk' || (track.aiDanceBpm && track.aiDanceBpm < natural * 0.7);
+      const effectiveBpm = isFolkHalf ? (track.aiDanceBpm ?? natural / 2) : natural;
+      const ratio = this.closestTempoRatio(effectiveBpm, this.sessionBpm);
+      // In Party mood: NEVER decrease BPM of original song unless it is a half-time/folk exception!
+      if (this.mood === 'party' && ratio < 1.0 && !isFolkHalf) {
         return 1.0;
       }
       if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return ratio;
@@ -959,12 +987,15 @@ export class AudioEngine {
     if (this.playOriginal || !this.sessionBpm) return null;
     const naturalBpm = item.original?.bpm ?? item.bpm ?? 128;
     if ((item.bpmConfidence ?? 0) >= MIN_BEATMATCH_CONFIDENCE) {
-      const ratio = this.closestTempoRatio(naturalBpm, this.sessionBpm);
-      // In Party mood: NEVER decrease BPM of original song!
-      if (this.mood === 'party' && naturalBpm >= this.sessionBpm) {
+      const isFolkHalf = item.aiPerceivedMeter === 'half_time_folk' || (item.aiDanceBpm && item.aiDanceBpm < naturalBpm * 0.7);
+      const effectiveBpm = isFolkHalf ? (item.aiDanceBpm ?? naturalBpm / 2) : naturalBpm;
+      const ratio = this.closestTempoRatio(effectiveBpm, this.sessionBpm);
+      // In Party mood: high-energy songs with genuine 4/4 meter faster than session BPM are kept at natural tempo,
+      // but half-time folk exceptions (e.g. Chappa Chappa at 76 BPM pulse) are locked to the party tempo!
+      if (this.mood === 'party' && naturalBpm >= this.sessionBpm && !isFolkHalf) {
         return naturalBpm;
       }
-      // Hard limit: never adjust beyond ±16% from original BPM per MIXING_RULES.md
+      // Hard limit: never adjust beyond ±16% from effective BPM per MIXING_RULES.md
       if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return this.sessionBpm;
     }
     // Too slow to reach the party tempo, or an unsure reading: Party lifts it partway
@@ -974,10 +1005,11 @@ export class AudioEngine {
   private needsTempoWork(item: QueuedTrack): boolean {
     const target = this.tempoLockTarget(item) ?? undefined;
     if (target !== item.tempoLockedTo) return true;
-    // In Party mood: high-energy songs faster than session BPM are kept at natural tempo (never discarded or slowed down)
+    // In Party mood: genuine high-energy songs faster than session BPM are kept at natural tempo (never discarded or slowed down)
     if (this.mood === 'party') {
       const naturalBpm = item.original?.bpm ?? item.bpm ?? 128;
-      if (naturalBpm >= (this.sessionBpm ?? 124)) {
+      const isFolkHalf = item.aiPerceivedMeter === 'half_time_folk' || (item.aiDanceBpm && item.aiDanceBpm < naturalBpm * 0.7);
+      if (!isFolkHalf && naturalBpm >= (this.sessionBpm ?? 124)) {
         return false;
       }
     }
@@ -1609,18 +1641,50 @@ export class AudioEngine {
       bpm: q.bpm,
       loudnessDb: q.loudnessDb,
       language: language(q),
+      family: this.languageFamilyOf(q),
       requested: isChosen(q),
       keyFit: this.keyFit(current, rate, this.queuedItemToTrack(q)),
     }));
     const { pick, reason } = chooseNext(candidates, {
-      current: { title: current.title, artist: current.artist, bpm: current.bpm, loudnessDb: current.loudnessDb, language: currentLanguage },
+      current: { title: current.title, artist: current.artist, bpm: current.bpm, loudnessDb: current.loudnessDb, language: currentLanguage, family: this.languageFamilyOf(current) },
       recentArtists: log.slice(1, 3).map((e) => e.artist),
       languageRun: Math.max(1, languageRun),
+      desiRun: this.desiRun(),
       danceFloor: this.mood === 'party' || this.mood === 'bhangra',
       peakRun: this.peakRun(current),
     });
     if (reason) this.lastAiDecision = `Next: "${pick.title}" — ${reason}`;
     return pick.item;
+  }
+
+  /** Desi (Hindi / Punjabi) or western, with the AI DJ's answer for songs the built-in guess isn't sure about. */
+  private languageFamilyOf(song: { title: string; artist?: string; url?: string }) {
+    const artist = song.artist ?? '';
+    return languageFamily(song.title, artist, this.rhythmPlans.knownLanguage({ title: song.title, artist, url: song.url }));
+  }
+
+  /** Hindi / Punjabi songs on air in a row (Previously Played, newest first, starts with the song on air). */
+  private desiRun(): number {
+    let run = 0;
+    for (const e of this.playLog) {
+      if (this.languageFamilyOf(e) !== 'desi') break;
+      run++;
+    }
+    return run;
+  }
+
+  /**
+   * After DESI_RUN Hindi / Punjabi songs in a row, English songs leave the top of Up Next (to its
+   * end). Songs someone chose and the song being mixed in stay. True when the order changed.
+   * MIXING_RULES.md "Language at the Top of Up Next".
+   */
+  private keepDesiOnTop(): boolean {
+    if (this.desiRun() < DESI_RUN) return false;
+    const mixing = this.pendingMix?.item;
+    const next = moveWesternDown(this.queue, (q) => this.languageFamilyOf(q) === 'western', (q) => q === mixing);
+    if (next === this.queue) return false;
+    this.queue = next;
+    return true;
   }
 
   /**
@@ -1972,6 +2036,7 @@ export class AudioEngine {
             }
           }
           this.deduplicateQueue();
+          this.keepDesiOnTop();
           this.saveQueueToStorage();
           this.notify();
         }
@@ -2481,7 +2546,10 @@ export class AudioEngine {
       ]);
       if (token !== this.moodToken) return; // a newer choice is being read
 
+      // The listener chose only Hindi / Punjabi songs: English songs aren't that type
+      const desiChoices = run.every((s) => this.languageFamilyOf(s) === 'desi');
       const usable = (s: { title: string; artist?: string; url?: string; duration?: number }) =>
+        !(desiChoices && this.languageFamilyOf(s) === 'western') &&
         !this.autoBlocked(s) &&
         !this.isDontPlayAgain(s) &&
         !this.playedRecently(s) &&
@@ -2542,6 +2610,7 @@ export class AudioEngine {
       }
       this.queue.splice(at, 0, ...items);
       this.deduplicateQueue();
+      this.keepDesiOnTop();
       if (this.queue.length > MAX_QUEUE_TARGET) this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
       this.saveQueueToStorage();
       void this.ensureTrackBuffer(items[0]);
@@ -3016,6 +3085,7 @@ export class AudioEngine {
       this.queue = mixFamiliarAndNew(this.queue);
       // One artist doesn't flood Up Next (not under "play only <artist>", where every song is theirs)
       if (!this.artistFocus?.only || !this.artistFocus.artists.length) this.queue = spreadArtists(this.queue);
+      this.keepDesiOnTop();
       if (this.queue.length > MAX_QUEUE_TARGET) {
         this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
       }
@@ -3248,6 +3318,7 @@ export class AudioEngine {
     }
 
     this.rhythmPlans.planFor(track);
+    void this.evaluateAiDanceBpm(track);
   }
 
   /**
@@ -3336,6 +3407,9 @@ export class AudioEngine {
     item.key = track.key;
     item.keyConfidence = track.keyConfidence;
     item.loudnessDb = track.loudnessDb;
+    item.aiDanceBpm = track.aiDanceBpm;
+    item.aiPerceivedMeter = track.aiPerceivedMeter;
+    item.aiBpmReason = track.aiBpmReason;
   }
 
   /**
@@ -3354,6 +3428,7 @@ export class AudioEngine {
       : otherTrack && this.canBeatmatch(track, otherTrack)
         ? 'blend'
         : 'cut';
+    const forceFullTime = this.mood === 'party' || track.aiPerceivedMeter === 'half_time_folk';
     return {
       trackId: track.id,
       isPlaying: anchor !== null,
@@ -3368,7 +3443,62 @@ export class AudioEngine {
       hookTime: track.highlightTime,
       transition,
       plan: this.rhythmPlans.planFor(track, true),
+      forceFullTime,
     };
+  }
+
+  /**
+   * Real-time AI evaluation of danceability and true foot-tapping BPM.
+   * Catches deceptive folk/Dadra 6/8 meters (e.g. Chappa Chappa Charkha Chale) that detect high BPM
+   * but feel slow in half-time, locking them to driving party dance tempos.
+   */
+  private async evaluateAiDanceBpm(track: TrackMetadata): Promise<DanceBpmDecision | null> {
+    if (!track.title || !track.bpm) return null;
+    const cacheKey = `${track.title}|${track.artist}|${Math.round(track.bpm)}`;
+    if (this.aiDanceBpmDecisions.has(cacheKey)) {
+      const cached = this.aiDanceBpmDecisions.get(cacheKey)!;
+      this.applyAiDanceBpmToTrack(track, cached);
+      return cached;
+    }
+
+    try {
+      const decision = await this.djAgent.decideDanceBpm({
+        title: track.title,
+        artist: track.artist,
+        rawBpm: track.bpm,
+        mood: this.mood,
+        sessionBpm: this.sessionBpm,
+      });
+
+      if (decision) {
+        this.aiDanceBpmDecisions.set(cacheKey, decision);
+        this.applyAiDanceBpmToTrack(track, decision);
+        return decision;
+      }
+    } catch (err) {
+      console.warn('[AudioEngine] evaluateAiDanceBpm failed:', err);
+    }
+    return null;
+  }
+
+  private applyAiDanceBpmToTrack(track: TrackMetadata, decision: DanceBpmDecision) {
+    track.aiDanceBpm = decision.effectiveDanceBpm;
+    track.aiPerceivedMeter = decision.perceivedMeter;
+    track.aiBpmReason = decision.reason;
+
+    // Propagate to queue
+    for (const q of this.queue) {
+      if (q.id === track.id || (q.title === track.title && q.artist === track.artist)) {
+        q.aiDanceBpm = decision.effectiveDanceBpm;
+        q.aiPerceivedMeter = decision.perceivedMeter;
+        q.aiBpmReason = decision.reason;
+      }
+    }
+
+    if (decision.perceivedMeter === 'half_time_folk' && this.mood === 'party') {
+      this.acquisitionStatus = `AI Party BPM: "${track.title}" (~${decision.effectiveDanceBpm} BPM folk feel) tuned for dancefloor.`;
+      this.notify();
+    }
   }
 
   // --- Hot cues & beat loops (Pro decks, see engine/DeckCues.ts) ---
@@ -3560,22 +3690,78 @@ export class AudioEngine {
     this.notify();
   }
 
+  /**
+   * Previous: steps back through Previously Played, one song further back per press (10 presses
+   * = 10 songs back, back to back), each switched to directly from its music start (never its
+   * hook): Previous is pressed when someone asks for a song, so no blend is wanted.
+   * Fast presses are counted and only the song they end on is loaded. A DJ app doesn't restart the
+   * song on air (a hard jump to its start). It used to cross-fade to whatever the other deck still
+   * held, so pressing again only bounced between the last two songs.
+   */
   public prevTrack() {
-    const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
-    const startPoint = cur.getTrack()?.musicStartTime ?? 0;
-    if (cur.getCurrentTime() > startPoint + 3) {
-      cur.seek(startPoint);
-      this.afterSeek();
-    } else {
-      const otherDeck = this.activeDeck === 'A' ? 'B' : 'A';
-      this.startTransition({
-        sourceDeck: this.activeDeck,
-        targetDeck: otherDeck,
-        durationSeconds: 4,
-        style: 'smooth_crossfade',
-      });
+    const track = this.onAirDeck().getTrack();
+    const stepping = !!this.backNav && Date.now() - this.backNav.at < BACK_NAV_IDLE_MS;
+    if (!stepping) {
+      // Previously Played as it is now, newest first, each song once, without the one on air
+      const isOnAir = track ? sameSongAs(track) : () => false;
+      const songs: PlayLogEntry[] = [];
+      for (const e of this.playLog) {
+        if (isOnAir(e) || songs.some((s) => sameSongAs(s)(e))) continue;
+        songs.push(e);
+      }
+      this.backNav = { songs, index: -1, at: Date.now() };
     }
-    this.saveCurrentTrackToStorage();
+    const nav = this.backNav!;
+    nav.at = Date.now();
+    if (nav.index + 1 >= nav.songs.length) {
+      this.acquisitionStatus = nav.songs.length ? `⏮ That's the first song in Previously Played.` : '⏮ No previous song yet.';
+      this.notify();
+      return;
+    }
+    nav.index++;
+    const target = nav.songs[nav.index];
+    this.acquisitionStatus = `⏮ Back ${nav.index + 1}: "${target.title}"…`;
+    this.notify();
+    // Fast presses: only the song they end on is loaded
+    if (this.backNavTimer !== null) window.clearTimeout(this.backNavTimer);
+    this.backNavTimer = window.setTimeout(() => {
+      this.backNavTimer = null;
+      void this.playBackNav(target);
+    }, BACK_NAV_SETTLE_MS);
+  }
+
+  /** Loads a song from Previously Played and mixes it in now (after any mix already running). */
+  private async playBackNav(song: PlayLogEntry) {
+    const item: QueuedTrack = {
+      id: `back_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      title: song.title,
+      artist: song.artist,
+      duration: 180,
+      url: song.url || song.title,
+      thumbnail: song.thumbnail,
+      status: 'downloading',
+      isAiRecommended: false,
+      source: 'playlist', // not a new choice: Up Next isn't re-read for its type
+      queuedAt: Date.now(),
+    };
+    const stillWanted = () => this.backNav?.songs[this.backNav.index] === song;
+    const buffer = await this.ensureTrackBuffer(item);
+    if (!stillWanted()) return; // a later press moved on
+    if (!buffer) {
+      this.acquisitionStatus = `⏮ Couldn't load "${song.title}". Press Previous to go further back.`;
+      this.notify();
+      return;
+    }
+    item.status = 'ready';
+    // Asked for now: a mix running is cut short and a planned one makes way
+    if (this.isTransitioning) this.cancelTransition();
+    if (this.pendingMix) this.cancelPendingMix(`Back to "${song.title}".`);
+    this.backNavIds.add(item.id);
+    this.analyzeTrack(this.queuedItemToTrack(item));
+    // A direct switch at the song's own tempo (someone asked for it): no blend
+    this.startQueuedMixNow(item, BACK_NAV_FADE_SECONDS, 'drop_cut', { instant: true, naturalTempo: true });
+    if (this.backNav) this.backNav.at = Date.now();
+    this.acquisitionStatus = `⏮ Back ${this.backNav ? this.backNav.index + 1 : 1}: "${song.title}". Press Previous again to go further back.`;
     this.notify();
   }
 
@@ -3742,7 +3928,7 @@ export class AudioEngine {
   }
 
   /** Puts a queued song on air right away: straight start if nothing plays, else a mix on the next beat. */
-  public startQueuedMixNow(item: QueuedTrack, durationSeconds?: number, style: TransitionConfig['style'] = 'bass_swap'): boolean {
+  public startQueuedMixNow(item: QueuedTrack, durationSeconds?: number, style: TransitionConfig['style'] = 'bass_swap', extra: Partial<TransitionConfig> = {}): boolean {
     if (!item.audioBuffer) {
       if (!this.isAnyDeckPlaying() && !this.isTransitioning && this.canStream(item)) return this.startStreaming(item);
       void this.ensureTrackBuffer(item).then((buf) => {
@@ -3797,6 +3983,7 @@ export class AudioEngine {
       targetDeck: targetDeckId,
       durationSeconds,
       style,
+      ...extra,
     });
 
     if (item.source === 'request') {
@@ -4282,12 +4469,39 @@ export class AudioEngine {
         bestRate = rate;
       }
     }
-    // In Party mood: never decrease BPM of incoming song below its original natural tempo!
-    if (this.mood === 'party' && bestRate < 1.0) {
+    // In Party mood: never decrease BPM of incoming song below its original natural tempo unless it is an AI dance/folk exception
+    const isAiException = (target as TrackMetadata).aiPerceivedMeter === 'half_time_folk' || !!(target as TrackMetadata).aiDanceBpm;
+    if (this.mood === 'party' && bestRate < 1.0 && !isAiException) {
       return { rate: 1, matched: false };
     }
-    // Hard limit: never adjust beyond ±16% per MIXING_RULES.md
-    return bestShift <= BPM_LIMITS.MAX_PERMITTED_PCT ? { rate: bestRate, matched: true } : { rate: 1, matched: false };
+    // A blend stretches the new song at most ±8% (BLEND_MAX_SHIFT): beyond that its pitch and feel
+    // change audibly (-15% is over a semitone flat). The ±16% hard limit is for a locked set tempo.
+    return bestShift <= BLEND_MAX_SHIFT ? { rate: bestRate, matched: true } : { rate: 1, matched: false };
+  }
+
+  /**
+   * During a beatmatched blend: after a few bars, measure how far the new song's beats are from
+   * the old one's (both decks' kick and bass) and nudge the new song onto them; once more a few
+   * seconds later for what's left. Only while that blend is still running.
+   */
+  private schedulePhaseLock(startTime: number, durationSeconds: number, beatSec: number, incoming: DeckId, trackId: string) {
+    for (const t of this.phaseLockTimers) window.clearTimeout(t);
+    this.phaseLockTimers = [];
+    const listen = Math.max(PHASE_LOCK_LISTEN_SECONDS, PHASE_LOCK_LISTEN_BEATS * beatSec);
+    const checks = [startTime + listen, startTime + 2 * listen + 1].filter((t) => t < startTime + durationSeconds * 0.8);
+    checks.forEach((at, i) => {
+      const timer = window.setTimeout(() => {
+        const deck = incoming === 'A' ? this.deckA : this.deckB;
+        if (!this.isTransitioning || deck.getTrack()?.id !== trackId) return;
+        const now = this.ctx.currentTime;
+        const m = this.phaseLock.measure(Math.max(startTime + 0.3, now - listen), now, beatSec, incoming);
+        if (!m || Math.abs(m.offsetSec) < PHASE_TOLERANCE_SECONDS) return;
+        deck.nudge(m.offsetSec); // late beats: played a touch faster for a moment, early: slower
+        if (i === 0) this.acquisitionStatus += ` Beats locked by ear (nudged ${Math.round(m.offsetSec * 1000)} ms).`;
+        this.notify();
+      }, Math.max(0, (at - this.ctx.currentTime) * 1000));
+      this.phaseLockTimers.push(timer);
+    });
   }
 
   public getCrossfader(): number {
@@ -4347,7 +4561,8 @@ export class AudioEngine {
       return `The beat isn't clear enough on ${oldUnsure && newUnsure ? 'either song' : oldUnsure ? 'the old song' : 'the new song'} to beatmatch`;
     }
     const step = tempoStep(sourceBpm, target.bpm) ?? 1;
-    if (step <= BPM_LIMITS.MAX_PERMITTED_PCT && this.mood === 'party') {
+    const isAiException = target.aiPerceivedMeter === 'half_time_folk' || !!target.aiDanceBpm;
+    if (step <= BLEND_MAX_SHIFT && this.mood === 'party' && !isAiException) {
       return `Party mood never slows a song down (${sourceBpm} → ${target.bpm} BPM)`;
     }
     return `Tempos too far apart (${sourceBpm} → ${target.bpm} BPM)`;
@@ -4370,9 +4585,11 @@ export class AudioEngine {
     // Set the incoming rate BEFORE it starts so it never plays a moment at the wrong speed
     this.analyzeTrack(targetTrack);
     const sourceConfidence = sourceState.isPlaying ? sourceState.track?.bpmConfidence ?? 0 : 0;
-    const matched = this.computeBeatmatchRate(sourceBpm, sourceConfidence, targetTrack);
+    // The exact tempo, not effectiveBpm (rounded to 0.1 BPM: ~10 ms of drift over a 20 s blend)
+    const exactSourceBpm = sourceState.track ? sourceState.track.bpm * sourceState.playbackRate : sourceBpm;
+    const matched = this.computeBeatmatchRate(exactSourceBpm, sourceConfidence, targetTrack);
     // STRICT: only a gap cut (the old song is silent there) may be abrupt
-    const smoothOnly = sourceState.isPlaying && !!sourceState.track && !config.gapCut;
+    const smoothOnly = sourceState.isPlaying && !!sourceState.track && !config.gapCut && !config.instant;
     // A cut (no overlap) needs no beatmatch: the new song starts at its natural speed and pitch.
     // Anything that overlaps keeps the beatmatch, so the two songs' beats don't flam.
     const match = config.naturalTempo && matched.matched && !smoothOnly ? { rate: 1, matched: true } : matched;
@@ -4419,14 +4636,18 @@ export class AudioEngine {
             : (targetTrack.firstDownbeatTime ?? 0));
       const cuePoint = isStrict ? 0 : (config.targetEntryTime ?? defaultEntry);
       if (isSourcePlaying && config.style !== 'drop_cut') {
+        // Where the old song is NOW: reading it before analysing the new song (above) put the new
+        // song's first beat late by however long that took (QA: kicks 100+ ms apart)
+        const live = sourceDeck.getPlaybackState();
+        const now = this.ctx.currentTime;
         const toPlannedExit =
           config.sourceExitTime !== undefined
-            ? (config.sourceExitTime - sourceState.currentTime) / sourceState.playbackRate
+            ? (config.sourceExitTime - live.currentTime) / live.playbackRate
             : -1;
         if (toPlannedExit >= 0.05) {
-          startTime = this.ctx.currentTime + toPlannedExit;
+          startTime = now + toPlannedExit;
         } else if (sourceConfidence >= MIN_BEATMATCH_CONFIDENCE) {
-          startTime = this.ctx.currentTime + this.secondsToNextBeat(sourceState);
+          startTime = now + this.secondsToNextBeat(live);
         }
       }
       // A loop roll or brake ends in a hard landing: only where the old song pauses anyway
@@ -4490,7 +4711,7 @@ export class AudioEngine {
 
     // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
     // echoes out on its own beat instead of stopping dead
-    const isCut = isSourcePlaying && !config.lowFade && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
+    const isCut = isSourcePlaying && !config.lowFade && !config.instant && (!match.matched || durationSeconds <= UNMATCHED_TRANSITION_SECONDS + 0.01 || config.style === 'drop_cut');
     if (config.gapCut && isSourcePlaying) {
       this.acquisitionStatus = `Cut into the silence after the old song's high point: "${targetTrack.title}" comes in on the beat.`;
     } else if (appliedFx === 'roll') {
@@ -4529,6 +4750,11 @@ export class AudioEngine {
       sourceDeck.scheduleFilterSweepOut(startTime, at(0.9));
       sourceDeck.scheduleReverbWash(at(0.75), 60 / Math.max(60, sourceBpm));
       this.acquisitionStatus = `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — slow wash fade (${Math.round(durationSeconds)} s): the old song thins out and dissolves into reverb as the new one rises.`;
+    }
+
+    // A beatmatched blend long enough to hear it: lock the beats together by ear (PhaseLock.ts)
+    if (isSourcePlaying && match.matched && !config.gapCut && !config.naturalTempo && durationSeconds >= PHASE_LOCK_MIN_BLEND) {
+      this.schedulePhaseLock(startTime, durationSeconds, 60 / exactSourceBpm, config.targetDeck, targetTrack.id);
     }
 
     this.transitionTimer = window.setInterval(() => {
@@ -4710,6 +4936,8 @@ export class AudioEngine {
     this.lastRecordedTrackId = track.id;
 
     this.library.logPlay(track);
+    // Any other song starting ends a walk back through Previously Played
+    if (!this.backNavIds.has(track.id)) this.backNav = null;
     // One of the songs picked to follow the listener's type is playing: more of that type
     if (track.url && this.moodPickUrls.has(track.url.toLowerCase())) {
       this.moodPickUrls.delete(track.url.toLowerCase());
@@ -4719,7 +4947,9 @@ export class AudioEngine {
     const playedKeys = this.songKeys(track);
     const before = this.queue.length;
     this.queue = this.queue.filter((q) => q.status === 'downloading' || !this.isSameSong(playedKeys, this.songKeys(q)));
-    if (this.queue.length !== before) this.saveQueueToStorage();
+    // Hindi / Punjabi back to back now: English songs leave the top of Up Next
+    const reordered = this.keepDesiOnTop();
+    if (this.queue.length !== before || reordered) this.saveQueueToStorage();
     this.notify();
 
     await this.library.postPlay(track);

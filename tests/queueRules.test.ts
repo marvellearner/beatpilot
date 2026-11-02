@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QueuedTrack } from '../src/types';
-import { MAX_QUEUE_TARGET, activeCount, dedupeQueue, isQueueFull, mixFamiliarAndNew, sameSongAs, spreadArtists, staleSongs } from '../src/audio/engine/queueRules';
+import { MAX_QUEUE_TARGET, activeCount, dedupeQueue, isQueueFull, mixFamiliarAndNew, moveWesternDown, sameSongAs, spreadArtists, staleSongs } from '../src/audio/engine/queueRules';
 
 const track = (id: string, title: string, extra: Partial<QueuedTrack> = {}): QueuedTrack =>
   ({ id, title, artist: 'Artist', duration: 200, url: `search:${id}`, status: 'queued', ...extra }) as QueuedTrack;
@@ -115,5 +115,27 @@ describe('mood picks stay together at the top', () => {
       expect(out.slice(0, 4).map((t) => t.id)).toEqual(['top', 'm1', 'm2', 'm3']);
       expect(out).toHaveLength(q.length);
     }
+  });
+});
+
+describe('moveWesternDown', () => {
+  const western = new Set(['e1', 'e2']);
+  const isWestern = (q: QueuedTrack) => western.has(q.id);
+
+  it('moves English songs to the end, keeping both groups in order', () => {
+    const queue = [track('e1', 'Shape of You'), track('h1', 'Kesariya'), track('e2', 'Perfect'), track('h2', 'Lover')];
+    expect(moveWesternDown(queue, isWestern).map((q) => q.id)).toEqual(['h1', 'h2', 'e1', 'e2']);
+  });
+
+  it('leaves songs someone chose and the kept song where they are', () => {
+    const queue = [track('e1', 'Shape of You', { source: 'request' }), track('h1', 'Kesariya'), track('e2', 'Perfect')];
+    expect(moveWesternDown(queue, isWestern).map((q) => q.id)).toEqual(['e1', 'h1', 'e2']);
+    const mixing = track('e2', 'Perfect');
+    expect(moveWesternDown([mixing, track('h1', 'Kesariya')], isWestern, (q) => q === mixing).map((q) => q.id)).toEqual(['e2', 'h1']);
+  });
+
+  it('returns the same array when nothing moves', () => {
+    const queue = [track('h1', 'Kesariya')];
+    expect(moveWesternDown(queue, isWestern)).toBe(queue);
   });
 });

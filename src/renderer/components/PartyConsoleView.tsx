@@ -1285,7 +1285,17 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                     value: currentTrack ? playbackState.effectiveBpm.toFixed(1) : '—',
                     accent: originalBpm !== undefined && Math.abs(playbackState.effectiveBpm - originalBpm) > 0.5,
                   },
-                  { id: 'original', label: 'Original', value: originalBpm !== undefined ? originalBpm.toFixed(1) : '—', accent: false },
+                  {
+                    id: 'original',
+                    label: currentTrack?.aiPerceivedMeter === 'half_time_folk' ? 'Folk Pulse' : 'Original',
+                    value:
+                      currentTrack?.aiPerceivedMeter === 'half_time_folk' && currentTrack?.aiDanceBpm
+                        ? `${currentTrack.aiDanceBpm.toFixed(0)} BPM`
+                        : originalBpm !== undefined
+                          ? originalBpm.toFixed(1)
+                          : '—',
+                    accent: currentTrack?.aiPerceivedMeter === 'half_time_folk',
+                  },
                   {
                     id: 'hook',
                     label: 'Hook',

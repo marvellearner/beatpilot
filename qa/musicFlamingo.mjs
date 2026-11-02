@@ -24,7 +24,7 @@ const TIMEOUT_MS = 6 * 60_000; // a busy Space queues requests
 
 let clientPromise = null;
 function client() {
-  clientPromise ??= Client.connect(SPACE, process.env.HF_TOKEN ? { hf_token: process.env.HF_TOKEN } : {}).catch((err) => {
+  clientPromise ??= Client.connect(SPACE, process.env.HF_TOKEN ? { token: process.env.HF_TOKEN } : {}).catch((err) => {
     clientPromise = null; // a failed connection isn't kept: the next call connects again
     throw err;
   });
@@ -87,7 +87,9 @@ export function parseReview(text) {
   const end = text.lastIndexOf('}');
   if (start < 0 || end <= start) return null;
   const body = text.slice(start, end + 1);
-  for (const attempt of [body, pythonToJson(body)]) {
+  // ...and sometimes leaves a word unquoted ('energy': Jump)
+  const bareWords = (s) => s.replace(/:\s*([A-Za-z][A-Za-z ]*?)\s*(?=[,}\]])/g, (m, w) => (/^(true|false|null)$/.test(w) ? m : `: ${JSON.stringify(w)}`));
+  for (const attempt of [body, pythonToJson(body), bareWords(pythonToJson(body))]) {
     try {
       const j = JSON.parse(attempt);
       if (typeof j === 'object' && j) return Object.fromEntries(Object.entries(j).map(([k, v]) => [camel(k), v]));

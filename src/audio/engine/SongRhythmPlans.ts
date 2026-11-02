@@ -113,6 +113,11 @@ export class SongRhythmPlans {
     }
   }
 
+  /** The AI DJ's answer for this song's language, when it was asked before. */
+  public knownLanguage(song: { title: string; artist: string; url?: string }): SongLanguage | undefined {
+    return this.languageFromAi(songStorageKey(song));
+  }
+
   private languageFromAi(song: string): SongLanguage | undefined {
     if (!this.languagesLoaded) {
       this.languagesLoaded = true;

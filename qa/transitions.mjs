@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reviewTransition } from './musicFlamingo.mjs';
+import { beatOffset } from './beatPhase.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -24,7 +25,7 @@ const URL_ = opt('url', 'http://127.0.0.1:5173/');
 const FLAMINGO = !args.includes('--no-flamingo');
 const BEFORE = Number(opt('before', 10)); // seconds of the old song in each clip, before the mix starts
 const AFTER = Number(opt('after', 20)); // seconds after the mix starts (at least 6 s after it ends)
-const MAX_CLIP = 45;
+const MAX_CLIP = 60; // a 16-bar showcase blend at 96 BPM lasts 40 s
 
 // --review qa/out/<run>: Music Flamingo listens again to a saved run's clips (no app needed)
 const REVIEW_DIR = opt('review', null);
@@ -136,7 +137,7 @@ for (let i = 1; i <= MIXES; i++) {
     save();
     continue;
   }
-  const done = await waitFor((x) => !x.transitioning, 90_000, 100);
+  const done = await waitFor((x) => !x.transitioning && x.closedMixes > mixesBefore, 90_000, 100);
   if (!done) {
     mix.problem = 'transition stuck (90 s)';
     save();
@@ -159,10 +160,16 @@ for (let i = 1; i <= MIXES; i++) {
   fs.writeFileSync(file, Buffer.from(clip.wav, 'base64'));
   mix.clip = { file: path.basename(file), seconds: Math.round(clip.seconds * 10) / 10, mixAt: Math.round((info.start - clip.from) * 10) / 10 };
   mix.audio = measure(Buffer.from(clip.wav, 'base64'), mix.clip.mixAt, mix.transitionSeconds);
+  // Where the two songs' beats really fall against each other, over the middle of the blend
+  if (info.end - info.start >= 4) {
+    const d = info.end - info.start;
+    const env = await page.evaluate(([a, b]) => window.__qa.deckEnvelopes(a, b), [info.start + 0.25 * d, info.start + 0.75 * d]);
+    if (env && info.bpm) mix.beat = beatOffset(env.a, env.b, env.hopSec, 60 / info.bpm);
+  }
   mix.flags = flags(mix);
   console.log(
     `#${i} ${mix.path}: ${(mix.from.title || '').slice(0, 28)} → ${(mix.to.title || '').slice(0, 28)} | ${mix.transitionSeconds}s ${mix.style} | ` +
-      `dropout ${mix.audio.longestDropoutMs} ms, jump ${mix.audio.maxJumpDb} dB${mix.flags.length ? ` | ⚠ ${mix.flags.join('; ')}` : ''}`
+      `dropout ${mix.audio.longestDropoutMs} ms, jump ${mix.audio.maxJumpDb} dB${mix.beat ? `, beats ${mix.beat.offsetMs} ms (${mix.beat.clarity})` : ''}${mix.flags.length ? ` | ⚠ ${mix.flags.join('; ')}` : ''}`
   );
   save();
   if (FLAMINGO) review(mix, file);
@@ -178,7 +185,7 @@ console.log(`\n${report.summary.text}\nReport: ${path.join(root, 'report.md')}`)
 // ---------------------------------------------------------------------------------------------
 
 /** Runs in the page: finds the engine, records the master output into a 60 s ring, logs mixes. */
-function installProbe() {
+async function installProbe() {
   const root = document.getElementById('root');
   const key = Object.keys(root).find((k) => k.startsWith('__reactContainer$'));
   const stack = [root[key]];
@@ -196,21 +203,76 @@ function installProbe() {
   if (!e) throw new Error('audio engine not found on the page');
   const ctx = e.ctx;
   const sr = ctx.sampleRate;
-  const RING = sr * 60;
+  const RING = sr * 90;
   const ring = new Float32Array(RING);
   let written = 0;
   let firstTime = null;
-  // Taps the master output (after the limiter and clipper); outputs silence itself
-  const tap = ctx.createScriptProcessor(4096, 2, 1);
+  // Taps the master output (after the limiter and clipper) on the audio thread: a main-thread
+  // ScriptProcessor stalled while the app decoded songs and lost seconds of audio. Every block
+  // carries its audio-clock time, so samples land at the right place even when messages queue.
+  const code = `class QaTap extends AudioWorkletProcessor {
+    constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; this.t = 0; }
+    process(inputs) {
+      const inp = inputs[0];
+      if (inp && inp.length) {
+        const L = inp[0], R = inp[1] || inp[0];
+        if (this.n === 0) this.t = currentTime;
+        for (let i = 0; i < L.length; i++) this.buf[this.n++] = (L[i] + R[i]) / 2;
+        if (this.n >= 4096) { this.port.postMessage({ t: this.t, d: this.buf.slice(0, this.n) }); this.n = 0; }
+      }
+      return true;
+    }
+  }
+  registerProcessor('qa-tap', QaTap);
+  // Each deck on its own (after its EQ, before the crossfader), at a quarter of the sample rate:
+  // where the two songs' beats really fall during a blend
+  class QaDecks extends AudioWorkletProcessor {
+    constructor() { super(); this.a = new Float32Array(2048); this.b = new Float32Array(2048); this.n = 0; this.t = 0; this.k = 0; }
+    process(inputs) {
+      const mono = (inp, i) => (inp && inp.length ? (inp[0][i] + (inp[1] || inp[0])[i]) / 2 : 0);
+      const len = inputs[0] && inputs[0].length ? inputs[0][0].length : inputs[1] && inputs[1].length ? inputs[1][0].length : 128;
+      for (let i = 0; i < len; i++) {
+        if (this.k++ % 4) continue;
+        if (this.n === 0) this.t = currentTime + i / sampleRate;
+        this.a[this.n] = mono(inputs[0], i);
+        this.b[this.n++] = mono(inputs[1], i);
+        if (this.n >= 2048) { this.port.postMessage({ t: this.t, a: this.a.slice(), b: this.b.slice() }); this.n = 0; }
+      }
+      return true;
+    }
+  }
+  registerProcessor('qa-decks', QaDecks);`;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+  const dsr = sr / 4;
+  const DRING = Math.round(dsr * 90);
+  const ringA = new Float32Array(DRING);
+  const ringB = new Float32Array(DRING);
+  let deckFirst = null;
+  const decks = new AudioWorkletNode(ctx, 'qa-decks', { numberOfInputs: 2, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit' });
+  // Before the EQ (both kicks heard even while one's bass is cut), as the app's phase lock hears them
+  (e.deckA.inputNode ?? e.deckA.analyserNode).connect(decks, 0, 0);
+  (e.deckB.inputNode ?? e.deckB.analyserNode).connect(decks, 0, 1);
+  const deckMute = ctx.createGain();
+  deckMute.gain.value = 0;
+  decks.connect(deckMute).connect(ctx.destination);
+  decks.port.onmessage = ({ data }) => {
+    if (deckFirst === null) deckFirst = data.t;
+    const at = Math.round((data.t - deckFirst) * dsr);
+    for (let i = 0; i < data.a.length; i++) {
+      ringA[(at + i) % DRING] = data.a[i];
+      ringB[(at + i) % DRING] = data.b[i];
+    }
+  };
+  const tap = new AudioWorkletNode(ctx, 'qa-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit' });
+  const mute = ctx.createGain();
+  mute.gain.value = 0; // keeps the tap pulled by the graph without adding sound
   e.masterAnalyser.connect(tap);
-  tap.connect(ctx.destination);
-  tap.onaudioprocess = (ev) => {
-    const ib = ev.inputBuffer;
-    const L = ib.getChannelData(0);
-    const R = ib.numberOfChannels > 1 ? ib.getChannelData(1) : L;
-    if (firstTime === null) firstTime = ev.playbackTime ?? ctx.currentTime;
-    for (let i = 0; i < L.length; i++) ring[(written + i) % RING] = (L[i] + R[i]) / 2;
-    written += L.length;
+  tap.connect(mute).connect(ctx.destination);
+  tap.port.onmessage = ({ data }) => {
+    if (firstTime === null) firstTime = data.t;
+    const at = Math.round((data.t - firstTime) * sr);
+    for (let i = 0; i < data.d.length; i++) ring[(at + i) % RING] = data.d[i];
+    written = Math.max(written, at + data.d.length);
   };
 
   const deckOf = () => (e.activeDeck === 'A' ? e.deckA : e.deckB);
@@ -221,7 +283,7 @@ function installProbe() {
     const now = ctx.currentTime;
     const title = deckOf().getTrack()?.title;
     if (!inMix && e.isTransitioning && e.transitionProgress > 0) {
-      inMix = { start: now, status: e.acquisitionStatus };
+      inMix = { start: now, status: e.acquisitionStatus, bpm: deckOf().getPlaybackState().effectiveBpm };
     } else if (!inMix && title && lastTitle && title !== lastTitle) {
       inMix = { start: now, status: e.acquisitionStatus }; // a near-instant cut seen only as a new song
     }
@@ -237,9 +299,35 @@ function installProbe() {
   const styleOf = (status) =>
     (status.match(/Showcase blend|slow wash fade|Beatmatched mix|fading over the low part|smooth \d+ s fade|Fading out|Cut into the silence|Quick cut|quick cut|Echo-out|Reverb wash|filter sweep/i) || ['blend'])[0];
 
+  /** Each deck's loudness (RMS) in 5 ms frames from ctx time a to b, for qa/beatPhase.mjs. */
+  const deckEnvelopes = (a, b) => {
+    if (deckFirst === null) return null;
+    const hop = Math.max(1, Math.round(dsr * 0.005));
+    const i0 = Math.round((a - deckFirst) * dsr);
+    const frames = Math.floor((Math.round((b - deckFirst) * dsr) - i0) / hop);
+    if (frames < 200) return null;
+    // Kick and bass only (a one-pole low-pass at 150 Hz), like the app's phase lock
+    const k = 1 - Math.exp((-2 * Math.PI * 150) / dsr);
+    const env = (ring) => {
+      const out = new Array(frames);
+      let lp = 0;
+      for (let f = 0; f < frames; f++) {
+        let s = 0;
+        for (let i = 0; i < hop; i++) {
+          lp += k * (ring[(i0 + f * hop + i) % DRING] - lp);
+          s += lp * lp;
+        }
+        out[f] = Math.sqrt(s / hop);
+      }
+      return out;
+    };
+    return { a: env(ringA), b: env(ringB), hopSec: hop / dsr };
+  };
+
   window.__qa = {
     engine: e,
     now: () => ctx.currentTime,
+    deckEnvelopes,
     state: () => {
       const s = deckOf().getPlaybackState();
       const t = s.track;
@@ -251,6 +339,7 @@ function installProbe() {
         transitioning: e.isTransitioning,
         ready: e.queue.filter((q) => q.status === 'ready' && q.audioBuffer).length,
         mixCount: mixes.length + (inMix ? 1 : 0),
+        closedMixes: mixes.length,
       };
     },
     seekNearEnd: (seconds) => {
@@ -357,6 +446,8 @@ function flags(mix) {
   if (a.maxJumpDb >= 8) out.push(`loudness jump ${a.maxJumpDb} dB`);
   if (a.duringDb - Math.max(a.oldSongDb, a.newSongDb) >= 3) out.push(`overlap ${Math.round(a.duringDb - Math.max(a.oldSongDb, a.newSongDb))} dB louder`);
   if (a.peak >= 0.999) out.push('clipping');
+  // Beatmatched blends: kicks more than 25 ms apart are heard as two (a flam)
+  if (/Beatmatched|Showcase/i.test(mix.style ?? '') && mix.beat && mix.beat.clarity >= 2 && Math.abs(mix.beat.offsetMs) > 25) out.push(`beats ${mix.beat.offsetMs} ms apart`);
   return out;
 }
 
@@ -377,15 +468,15 @@ function markdown(r) {
   const rows = r.mixes.map((m) => {
     const f = m.flamingo;
     const fl = !f ? '' : f.error ? `error: ${f.error}` : typeof f.score === 'number' ? `${f.score}/10${f.abrupt ? ' **abrupt**' : ''}${f.beatsAligned === false ? ', beats off' : ''}${f.keyClash && f.keyClash !== 'none' ? `, key clash ${f.keyClash}` : ''} — ${f.verdict ?? ''}` : (f.raw ?? '').slice(0, 160);
-    return `| ${m.n} | ${m.path} | ${(m.from?.title ?? '').slice(0, 30)} → ${(m.to?.title ?? '').slice(0, 30)} | ${m.style ?? m.problem ?? ''} | ${m.transitionSeconds ?? ''} | ${m.audio ? `${m.audio.longestDropoutMs} ms / ${m.audio.maxJumpDb} dB` : ''} | ${(m.flags ?? []).join('; ')} | ${fl.replace(/\|/g, '/')} | ${m.clip?.file ?? ''} |`;
+    return `| ${m.n} | ${m.path} | ${(m.from?.title ?? '').slice(0, 30)} → ${(m.to?.title ?? '').slice(0, 30)} | ${m.style ?? m.problem ?? ''} | ${m.transitionSeconds ?? ''} | ${m.audio ? `${m.audio.longestDropoutMs} ms / ${m.audio.maxJumpDb} dB` : ''} | ${m.beat ? `${m.beat.offsetMs} ms (${m.beat.clarity})` : ''} | ${(m.flags ?? []).join('; ')} | ${fl.replace(/\|/g, '/')} | ${m.clip?.file ?? ''} |`;
   });
   return [
     `# Transition QA — ${r.started}`,
     '',
     r.summary?.text ?? '(running)',
     '',
-    '| # | How | Songs | Style | Length (s) | Drop-out / jump | Our flags | Music Flamingo | Clip |',
-    '|---|---|---|---|---|---|---|---|---|',
+    '| # | How | Songs | Style | Length (s) | Drop-out / jump | Beat offset | Our flags | Music Flamingo | Clip |',
+    '|---|---|---|---|---|---|---|---|---|---|',
     ...rows,
     '',
     r.errors.length ? `Page errors: ${r.errors.length} (first: ${r.errors[0]})` : 'No page errors.',

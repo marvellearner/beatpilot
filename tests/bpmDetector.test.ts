@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectBpmFromBuffer } from '../src/audio/BpmDetector';
+import { detectBpmFromBuffer, voteTempo } from '../src/audio/BpmDetector';
 
 const RATE = 22050;
 
@@ -42,5 +42,38 @@ describe('detectBpmFromBuffer', () => {
     const r = detectBpmFromBuffer(song(100, 'clap'));
     expect(r.bpm).toBeCloseTo(100, 0);
     expect(r.confidence).toBeGreaterThanOrEqual(0.6);
+  });
+});
+
+describe('voteTempo (whole song + 40 s stretches)', () => {
+  const e = (bpm: number, confidence: number, firstDownbeatTime = 0.1) => ({ bpm, confidence, isRegularBeat: confidence >= 0.65, firstDownbeatTime });
+
+  it('a low band confident at the wrong tempo loses to what the stretches agree on', () => {
+    // real song: low 141.66 (0.97), all bands 124.03 (0.99), stretches 124 three times
+    const r = voteTempo([e(141.66, 0.97), e(124.03, 0.99)], [[e(165.59, 0.5), e(82.6, 0.75)], [e(155.69, 1), e(124.02, 1)], [e(123.92, 0.95), e(124, 1)], [e(155.7, 1), e(124.02, 1)]])!;
+    expect(r.bpm).toBeCloseTo(124.02, 1);
+    expect(r.confidence).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it('certain stretches outweigh a weak whole-song pass', () => {
+    const r = voteTempo([e(158.59, 0.26), e(81, 0.2)], [[e(121.18, 0.13), e(139.94, 0.13)], [e(81.02, 1), e(81.01, 1)], [e(81.01, 1), e(81, 1)], [e(81.02, 1), e(81.01, 1)]])!;
+    expect(r.bpm).toBeCloseTo(81.01, 1);
+    expect(r.confidence).toBe(1);
+  });
+
+  it('a tempo every stretch confirms is trusted even if no single reading is sure', () => {
+    const r = voteTempo([e(118.02, 0.35), e(118.01, 0.5)], [[e(118.02, 0.45), e(118.01, 0.52)], [e(118, 0.22), e(118, 0.58)], [e(117.92, 0.27), e(117.99, 0.58)], [e(117.98, 0.24), e(117.98, 0.5)]])!;
+    expect(r.bpm).toBeCloseTo(118, 1);
+    expect(r.confidence).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it('a tempo the stretches disagree on is not trusted', () => {
+    const r = voteTempo([e(116.38, 0.49), e(116.38, 0.49)], [[e(157.42, 0.29), e(116.9, 0.48)], [e(119.03, 0.28), e(119.02, 0.7)], [e(79.32, 0.34), e(115.85, 0.52)], [e(79.32, 0.34), e(118.42, 0.54)]])!;
+    expect(r.confidence).toBeLessThan(0.6);
+  });
+
+  it('averages only readings that agree closely (124.3 and 125.06 are two readings)', () => {
+    const r = voteTempo([e(124.32, 0.78), e(125.06, 1)], [[e(124.39, 0.88), e(125.07, 1)], [e(124.17, 0.92), e(125.03, 1)], [e(124.28, 0.72), e(125.04, 1)], [e(124.07, 0.53), e(125.01, 1)]])!;
+    expect(r.bpm).toBeCloseTo(125.04, 1);
   });
 });

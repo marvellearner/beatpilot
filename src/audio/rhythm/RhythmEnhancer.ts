@@ -38,6 +38,7 @@ export interface SongClock {
   hookTime?: number;
   transition: 'none' | 'blend' | 'cut'; // a mix in progress
   plan: RhythmPlan | null; // what the AI DJ (or the fallback rules) chose for this song
+  forceFullTime?: boolean; // in party mood or AI dance mode, keep driving 4/4 / dhol groove instead of dropping to half-time
 }
 
 export interface RhythmState {
@@ -264,7 +265,7 @@ export class RhythmEnhancer {
 
     if (this.mode === 'ai' && !this.followPlan(clock)) return;
 
-    const halfTime = clock.bpm > HALF_TIME_ABOVE_BPM;
+    const halfTime = !clock.forceFullTime && clock.bpm > HALF_TIME_ABOVE_BPM;
     const stepSeconds = (60 / clock.bpm / 4) * (halfTime ? 2 : 1); // song seconds per pattern step
     const barSeconds = stepSeconds * 16;
     const key = `${clock.trackId}|${clock.bpm}|${clock.downbeat}`;

@@ -14,6 +14,8 @@ const SWAP_FADE_SECONDS = 0.04;
 const REVERB_SECONDS = 3.5;
 const REVERB_LOW_CUT_HZ = 250;
 const REVERB_FEED_BEATS = 4; // the song is fed into the reverb over its last 4 beats...
+const NUDGE_MAX_RATE = 0.04; // a beat nudge speeds a song up or slows it down at most 4%
+const NUDGE_MIN_SECONDS = 0.5;
 const REVERB_SEND = 3; // ...this hard (the normalised room spreads it thinly over 3.5 s)
 // Loop roll: the bar at the exit point repeats in ever shorter slices (beats per slice × count),
 // 8 beats in all, under a rising filter and a white-noise riser, then the new song hits
@@ -44,6 +46,8 @@ export class VirtualDeck {
   private midFilter: BiquadFilterNode;
   private highFilter: BiquadFilterNode;
   public analyserNode: AnalyserNode;
+  // The song as it is, before the EQ: what the phase lock hears (both kicks, even while one's bass is cut)
+  public readonly inputNode: GainNode;
   // Echo-out FX (used on cuts): post-fader send -> delay (with feedback) -> high-pass -> master.
   // It goes to the master bus, not through the crossfader, so the echo tail rings on after the cut.
   private fxSend: GainNode;
@@ -82,6 +86,9 @@ export class VirtualDeck {
     this.id = id;
     this.ctx = ctx;
 
+    // Every source enters here, then the EQ chain
+    this.inputNode = this.ctx.createGain();
+
     // Build DSP Filter Chain
     // Low Isolator EQ: Lowshelf at 250 Hz
     this.lowFilter = this.ctx.createBiquadFilter();
@@ -117,7 +124,8 @@ export class VirtualDeck {
     this.analyserNode = this.ctx.createAnalyser();
     this.analyserNode.fftSize = 256;
 
-    // Chain: Filters -> Gain -> Analyser -> Output Bus
+    // Chain: Input -> Filters -> Gain -> Analyser -> Output Bus
+    this.inputNode.connect(this.lowFilter);
     this.lowFilter.connect(this.midFilter);
     this.midFilter.connect(this.highFilter);
     this.highFilter.connect(this.sweepFilter);
@@ -268,7 +276,7 @@ export class VirtualDeck {
     const source = this.ctx.createBufferSource();
     source.buffer = roll;
     source.playbackRate.value = rate;
-    source.connect(this.lowFilter);
+    source.connect(this.inputNode);
     this.sourceNode.stop(startTime);
     source.start(startTime);
     source.stop(startTime + seconds);
@@ -388,7 +396,7 @@ export class VirtualDeck {
       this.sourceGain.gain.linearRampToValueAtTime(1, startTime + SWAP_FADE_SECONDS);
     }
     this.sourceNode.connect(this.sourceGain);
-    this.sourceGain.connect(this.lowFilter);
+    this.sourceGain.connect(this.inputNode);
     this.sourceNode.start(startTime, offset);
   }
 
@@ -436,7 +444,7 @@ export class VirtualDeck {
     this.mediaSource = this.ctx.createMediaElementSource(el);
     this.mediaGain = this.ctx.createGain();
     this.mediaSource.connect(this.mediaGain);
-    this.mediaGain.connect(this.lowFilter);
+    this.mediaGain.connect(this.inputNode);
     const update = () => this.notifyUpdate();
     el.addEventListener('waiting', update);
     el.addEventListener('playing', update);
@@ -631,6 +639,24 @@ export class VirtualDeck {
     }
     if (this.mediaEl) this.mediaEl.playbackRate = this.playbackRate;
     this.notifyUpdate();
+  }
+
+  /**
+   * Shifts the playing song `seconds` of real time earlier (negative: later) without a jump: it
+   * plays a few percent faster (slower) for a moment, as a DJ nudges a jog wheel to line up two
+   * kicks. The change is at most NUDGE_MAX_RATE of the speed, so it isn't heard as a pitch bend.
+   */
+  public nudge(seconds: number) {
+    if (!this.sourceNode || !this.isPlaying || !seconds) return;
+    const rate = this.playbackRate;
+    const over = Math.max(NUDGE_MIN_SECONDS, Math.abs(seconds) / NUDGE_MAX_RATE);
+    const now = this.ctx.currentTime;
+    const param = this.sourceNode.playbackRate;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(rate * (1 + seconds / over), now);
+    param.setValueAtTime(rate, now + over);
+    // The clock: afterwards the song is `seconds` of playing time further along
+    this.startedAt -= seconds;
   }
 
   public isRateAutomatic(): boolean {

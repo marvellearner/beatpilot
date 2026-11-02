@@ -112,6 +112,22 @@ export interface MoodReadingResult {
   source: 'ai' | 'heuristic';
 }
 
+export interface DanceBpmDecision {
+  effectiveDanceBpm: number;
+  targetPartyBpm: number;
+  perceivedMeter: 'standard_4_4' | 'half_time_folk' | 'triplet_compound';
+  rhythmStyle?: RhythmStyleId;
+  reason: string;
+}
+
+const DanceBpmDecisionSchema = z.object({
+  effectiveDanceBpm: z.coerce.number().min(50).max(220),
+  targetPartyBpm: z.coerce.number().min(90).max(160),
+  perceivedMeter: z.enum(['standard_4_4', 'half_time_folk', 'triplet_compound']).default('standard_4_4'),
+  rhythmStyle: z.string().optional(),
+  reason: z.string().max(200).default('AI evaluated party dance tempo'),
+});
+
 const MoodReadingSchema = z.object({
   detectedMood: z.string().max(100),
   energyLevel: z.enum(['low', 'medium', 'high', 'peak']).default('high'),
@@ -230,6 +246,83 @@ Reply ONLY with JSON: {"language": "..."}`;
     if (!res) return null;
     const parsed = SongIdSchema.safeParse(res.data);
     return parsed.success ? parsed.data.language : null;
+  }
+
+  /**
+   * Evaluates a song's musical meter, true foot-tapping dance pulse, and party tempo.
+   * Specifically catches exceptions like 6/8 folk/Dadra songs (e.g. Chappa Chappa Charkha Chale)
+   * where raw autocorrelation detects 152+ BPM micro-subdivisions, but the human body feels
+   * a slow 76 BPM half-time pulse that needs a dancefloor lift.
+   */
+  public async decideDanceBpm(track: {
+    title: string;
+    artist: string;
+    rawBpm: number;
+    mood: string;
+    sessionBpm?: number | null;
+  }): Promise<DanceBpmDecision | null> {
+    const prompt = `You are an elite Bollywood, Punjabi, and EDM club DJ.
+A song is about to play on the dancefloor:
+TRACK: "${track.title}" by "${track.artist || 'Unknown'}"
+RAW DETECTED BPM: ${Math.round(track.rawBpm)}
+CURRENT MOOD: ${track.mood}${track.sessionBpm ? `, SESSION PARTY BPM: ${track.sessionBpm}` : ''}
+
+Analyze its musical meter (standard 4/4 vs 6/8 folk dadra / triplet swing / half-time pulse).
+Some songs (e.g. "Chappa Chappa Charkha Chale", acoustic folk, 6/8 dadra) detect high BPM (150+) because of rapid subdivisions/triplets, but the human foot-tapping dance pulse is actually slow half-time (75-80 BPM), which feels dragging on a dancefloor.
+1. What is its true perceived dancing pulse (effectiveDanceBpm)? If it has a half-time/compound folk feel, give the half-time pulse (e.g. 76 for 152).
+2. What exact playback BPM should this song be played at in ${track.mood} mode to keep people dancing (targetPartyBpm)? (Usually 122-130 for party dance, or 105-115 for mid-tempo groove).
+3. Suggested rhythm layer: "dhol_dhamaal", "club_drive", or "dholak_keherwa".
+Reply ONLY with JSON:
+{"effectiveDanceBpm": <number>, "targetPartyBpm": <number>, "perceivedMeter": "standard_4_4"|"half_time_folk"|"triplet_compound", "rhythmStyle": "dhol_dhamaal"|"club_drive"|"dholak_keherwa", "reason": "<max 15 words>"}`;
+
+    const res = await this.askJson(prompt, 100, 10_000);
+    if (!res) {
+      return this.heuristicDanceBpm(track);
+    }
+    const parsed = DanceBpmDecisionSchema.safeParse(res.data);
+    if (!parsed.success) {
+      return this.heuristicDanceBpm(track);
+    }
+    return {
+      effectiveDanceBpm: parsed.data.effectiveDanceBpm,
+      targetPartyBpm: parsed.data.targetPartyBpm,
+      perceivedMeter: parsed.data.perceivedMeter,
+      rhythmStyle: (parsed.data.rhythmStyle as RhythmStyleId) || undefined,
+      reason: parsed.data.reason,
+    };
+  }
+
+  /** Deterministic fallback for dance BPM if AI is offline. */
+  public heuristicDanceBpm(track: {
+    title: string;
+    artist: string;
+    rawBpm: number;
+    mood: string;
+    sessionBpm?: number | null;
+  }): DanceBpmDecision {
+    const raw = Math.round(track.rawBpm);
+    const text = `${track.title} ${track.artist}`.toLowerCase();
+    const isFolkOrDadra = /chappa|charkha|dadra|folk|sangeet|ghoomar|chogada|dholi|garba|bhangra|gidha|heer/.test(text);
+
+    // Songs above 140 BPM with folk/acoustic indicators are almost always perceived in half-time (70-80 BPM)
+    if (raw >= 140 && (isFolkOrDadra || raw >= 150)) {
+      const half = Math.round(raw / 2);
+      const target = track.sessionBpm ?? 126;
+      return {
+        effectiveDanceBpm: half,
+        targetPartyBpm: target,
+        perceivedMeter: 'half_time_folk',
+        rhythmStyle: 'dhol_dhamaal',
+        reason: `Half-time folk meter detected (~${half} BPM perceived pulse); tuned to ${target} BPM for danceability`,
+      };
+    }
+
+    return {
+      effectiveDanceBpm: raw,
+      targetPartyBpm: track.sessionBpm ?? Math.min(130, Math.max(120, raw)),
+      perceivedMeter: 'standard_4_4',
+      reason: 'Standard meter matched to party tempo',
+    };
   }
 
   /** Asks the AI DJ which ready song should play next for the best energy flow. */

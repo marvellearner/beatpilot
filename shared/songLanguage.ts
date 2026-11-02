@@ -24,3 +24,29 @@ export function guessLanguage(title: string, artist: string): { language: SongLa
   if (SPANISH_HINT.test(text)) return { language: 'spanish', sure: true };
   return { language: /^[\x20-\x7E]+$/.test(text) ? 'english' : 'other', sure: false };
 }
+
+/** Hindi and Punjabi songs mix freely at a desi party; English and Spanish are the switch away. */
+export type LanguageFamily = 'desi' | 'western';
+
+/** Hindi / Punjabi songs on air in a row before English songs leave the top of Up Next. */
+export const DESI_RUN = 2;
+
+// Common Hindi / Punjabi words in Latin-alphabet titles ("Tera Hone Laga Hoon", "Nachde Ne Saare")
+const ROMAN_DESI_WORDS =
+  /\b(dil|dilbar|pyaa?r|ishq|ishqa|mohabbat|tera|teri|tere|mera|meri|mere|tujhe|mujhe|sanam|sajna|sajni|saiyaan|yaara?|jaana?|kudiye?|nachde|naach|nach|raat|saath|zindagi|dhadkan|jhumka|ghungroo|chunari|mehndi|lehenga|gori|sohneya|sohni|maahi|mahi|ranjha|heer|chann|akhiyan|ankhiyan|aankhein|kabhi|kahin|nahi|hoon|wala|wali|chalo|gallan|kardi|munde|laung|tauba|balam|khwab|baarish|aaja|tujh)\b/i;
+
+const familyOfLanguage = (l: SongLanguage): LanguageFamily | undefined =>
+  l === 'hindi' || l === 'punjabi' ? 'desi' : l === 'english' || l === 'spanish' ? 'western' : undefined;
+
+/**
+ * Desi or western: the sure guess first, then the AI DJ's answer (`known`), then Hindi / Punjabi
+ * words in the title. Otherwise a plain Latin-alphabet title counts as English. Undefined for
+ * other scripts and languages.
+ */
+export function languageFamily(title: string, artist: string, known?: SongLanguage): LanguageFamily | undefined {
+  const guess = guessLanguage(title, artist);
+  if (guess.sure) return familyOfLanguage(guess.language);
+  if (known && known !== 'unknown') return familyOfLanguage(known);
+  if (ROMAN_DESI_WORDS.test(title)) return 'desi';
+  return familyOfLanguage(guess.language);
+}

@@ -226,17 +226,22 @@ export async function searchVideos(query: string, page = 1): Promise<VideoHit[]>
     ...instances.filter((i) => now - (failedAt.get(i.base) ?? 0) <= FAILED_SKIP_MS),
   ];
   const errors: string[] = [];
+  let answered = false;
   for (const inst of ordered) {
     try {
       const hits = inst.kind === 'invidious' ? await searchInvidious(inst, query, page) : await searchPiped(inst, query, page);
+      answered = true;
       // Live streams and premieres have no length and can't be mixed
-      return hits.filter((h) => /^[A-Za-z0-9_-]{11}$/.test(h.videoId) && h.lengthSeconds > 0);
+      const usable = hits.filter((h) => /^[A-Za-z0-9_-]{11}$/.test(h.videoId) && h.lengthSeconds > 0);
+      // Nothing from this one: the next may have it (instances index searches differently)
+      if (usable.length) return usable;
     } catch (err) {
       // An instance that just has no later page for this search isn't failing
       if (!/no next page/.test((err as Error).message)) failedAt.set(inst.base, Date.now());
       errors.push(`${new URL(inst.base).host}: ${(err as Error).message}`);
     }
   }
+  if (answered) return []; // answered, but nothing found anywhere
   throw new Error(`Search is unavailable (${errors.join('; ') || 'no sources set up'})`);
 }
 

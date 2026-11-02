@@ -63,6 +63,7 @@ const VOCAL_OVERLAP_PENALTY = 3;
 // Both sides at least ~0.7 vocal over the blend (0.7 × 0.7): two singers or two leads at once.
 // A blend would only muddy both, so the mixer cuts quickly instead (MIXING_RULES.md rule 8).
 const VOCAL_CLASH_LEVEL = 0.5;
+const ENTRY_MIN_LEVEL = 0.25; // an entry's first 2 bars are at least this share of the song's loud level (no silent fade-in)
 
 /**
  * Vocal activity over [from, to]: the 300 Hz–3 kHz band's share of the loudness there, relative
@@ -92,6 +93,7 @@ export interface MixPlan {
 const GAP_LEVEL = 0.15;
 const GAP_MIN_SECONDS = 0.3;
 const GAP_MAX_SECONDS = 4;
+const HEARD_GAP_SECONDS = 1.2; // a stop of a beat or two is kept (a DJ uses it); a longer pause in the old song isn't waited out: the new song drops in as it starts
 // A gap exit is worth more than an 8-bar phrase start (1) plus a drop into a calmer section:
 // a stop after a high point is the cleanest place there is to change songs
 const GAP_SCORE = 2.5;
@@ -256,10 +258,11 @@ export function planMix(params: {
   // The window may have closed (e.g. no song was ready in time): then the next good bar from here
   if (exits.length === 0 && params.earliestExit !== undefined) exits = barStarts(out, exitFrom, exitLatest);
 
-  // Never wait into the old song's fade-out: an exit starts at most a bar after its music ends
-  // (some endings fade or go quiet for several seconds before the file ends)
+  // Never wait into the old song's fade-out: the old song is still playing for at least the first
+  // half of the mix, so an exit starts a bar (or half the blend) before its music ends. One a bar
+  // after it left seconds of silence (QA: Despacito ended 1.5 s before a mix began)
   const musicEnd = lastLoudTime(out, outBar);
-  const beforeFade = exits.filter((c) => c.time <= musicEnd + outBar);
+  const beforeFade = exits.filter((c) => c.time <= musicEnd - Math.max(outBar, outBlend / 2));
   exits = beforeFade.length ? beforeFade : exits.slice(0, 1);
 
   const outHooks = out.hookTimes ?? (out.hookTime !== undefined ? [out.hookTime] : []);
@@ -276,7 +279,7 @@ export function planMix(params: {
   };
   let allowed = exits.filter((c) => !inHighPart(c.time));
   if (!allowed.length && exits.length) {
-    const further = barStarts(out, exits[0].time, Math.min(outPosition + HIGH_PART_EXTEND_SECONDS, out.duration - outBlend - 0.5, musicEnd + outBar, hardLimit));
+    const further = barStarts(out, exits[0].time, Math.min(outPosition + HIGH_PART_EXTEND_SECONDS, out.duration - outBlend - 0.5, musicEnd - Math.max(outBar, outBlend / 2), hardLimit));
     allowed = further.filter((c) => !inHighPart(c.time));
   }
   if (allowed.length) exits = allowed;
@@ -321,15 +324,22 @@ export function planMix(params: {
     exitOptions.push({ time: t, why, score, vocals: vocalActivity(out.profile, t, t + outBlend, outShare), low });
   }
 
-  // Gaps: the new song cuts in on the beat where the old one would come back
+  // Gaps: the new song cuts in on the beat where the old one would come back, or, when the old
+  // song's pause is long, on the first beat of it: more than HEARD_GAP_SECONDS of silence is dead
+  // air on a dance floor (QA: 1.75 s after Blinding Lights stopped)
   const beat = 60 / out.bpm;
   for (const gap of findGaps(out, Math.max(exitFrom, params.earliestExit ?? 0) - 0.5, Math.min(outPosition + params.lookAheadSeconds, out.duration - 1, hardLimit + outBar))) {
-    const t = out.downbeat + Math.round((gap.end - out.downbeat) / beat) * beat;
-    if (t <= gap.start || t < exitFrom || t > musicEnd + outBar || t > hardLimit) continue;
+    const long = gap.end - gap.start > HEARD_GAP_SECONDS;
+    const t = long
+      ? out.downbeat + Math.ceil((gap.start - out.downbeat) / beat - 0.05) * beat
+      : out.downbeat + Math.round((gap.end - out.downbeat) / beat) * beat;
+    if ((long ? t < gap.start - 0.05 : t <= gap.start) || t < exitFrom || t > musicEnd + outBar || t > hardLimit) continue;
     // A stop right before a chorus is a build-up to it: the crowd is waiting for that chorus
-    if (outHooks.some((h) => h >= gap.start && h < t + 2 * outBar)) continue;
+    if (outHooks.some((h) => h >= gap.start && h < Math.max(t, gap.end) + 2 * outBar)) continue;
     const score = GAP_SCORE - 0.01 * (t - outPosition);
-    const why = `current song stops after a high point (${(gap.end - gap.start).toFixed(1)} s of silence): the new song comes in where it would come back`;
+    const why = long
+      ? `current song stops after a high point: the new song drops in the moment it stops (no ${(gap.end - gap.start).toFixed(1)} s of silence)`
+      : `current song stops after a high point (${(gap.end - gap.start).toFixed(1)} s of silence): the new song comes in where it would come back`;
     exitOptions.push({ time: t, why, score, vocals: 0, gap: true, low: true });
   }
   if (exitOptions.length === 0) return null;
@@ -349,9 +359,13 @@ export function planMix(params: {
   const entryLatest = range ? Math.min(range.to, inc.duration - incBlend - 1) : Math.min(minEntry + 8 * incBar, maxIntroLimit, inc.duration * 0.25);
   const entries = barStarts(inc, entryFirst, Math.max(entryFirst, entryLatest));
   const incLoud = loudLevel(inc, incBar);
+  // Never on a near-silent fade-in: the new song is heard from its first bars (QA: Titanium came
+  // in at -70 dB while the old song had ended: 3 s of silence)
+  const audible = (t: number) => average(inc.profile.full, inc.profile.rate, t, t + 2 * incBar) >= ENTRY_MIN_LEVEL * incLoud;
   const entryOptions: MixOption[] = [];
   for (const candidate of entries) {
     const e = candidate.time;
+    if (!isStrict && !audible(e)) continue;
     // Don't start at or near the hook - the natural musical buildup must be preserved
     if (!range && inc.hookTime && e >= inc.hookTime - 8) continue;
     // Best Parts: the blend should be over when the hook hits, so it isn't heard under the old song
@@ -384,7 +398,10 @@ export function planMix(params: {
     entryOptions.length = 0;
     entryOptions.push({ time: 0, why: 'strictly from the beginning (0:00) as requested', score: 10 });
   } else if (entryOptions.length === 0) {
-    entryOptions.push({ time: entryFirst, why: range ? 'at the build-up to its hook (best part)' : 'from the music start (full build-up)', score: 0 });
+    // The whole window is a quiet fade-in: the first bar it can be heard from (before the hook)
+    const hookLimit = inc.hookTime !== undefined ? inc.hookTime - 4 * incBar : inc.duration * 0.4;
+    const firstAudible = barStarts(inc, entryFirst, Math.max(entryFirst, hookLimit)).find((c) => audible(c.time))?.time ?? entryFirst;
+    entryOptions.push({ time: firstAudible, why: range ? 'at the build-up to its hook (best part)' : 'from the music start (full build-up)', score: 0 });
   }
 
   // Best pair: each side's own score, minus the penalty when both sing during the blend

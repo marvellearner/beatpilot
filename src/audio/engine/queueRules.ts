@@ -108,6 +108,17 @@ export function mixFamiliarAndNew(queue: QueuedTrack[], keepTop = KEEP_AT_TOP): 
   return [...head, ...mixed];
 }
 
+/**
+ * While Hindi / Punjabi songs play back to back: English songs go to the end of Up Next, so they
+ * aren't next in line. Songs someone chose and `keep` (the song being mixed in) stay where they
+ * are; the rest keep their order. Returns the same array when nothing moves.
+ */
+export function moveWesternDown(queue: QueuedTrack[], isWestern: (q: QueuedTrack) => boolean, keep: (q: QueuedTrack) => boolean = () => false): QueuedTrack[] {
+  const moved = new Set(queue.filter((q) => !isChosen(q) && !keep(q) && isWestern(q)));
+  if (!moved.size) return queue;
+  return [...queue.filter((q) => !moved.has(q)), ...moved];
+}
+
 /** Unheard songs (by the listener's artists, never played here) in Up Next at once: about 1 in 4 new picks. */
 export const UNHEARD_MAX = 4;
 /** One artist at most ARTIST_MAX_IN_WINDOW times in any SPREAD_WINDOW songs of Up Next, never twice in a row. */

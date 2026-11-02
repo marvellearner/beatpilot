@@ -4,6 +4,7 @@
  * tempo steps, a few songs in one language before switching, no deflating energy drop on a
  * dance floor, and a breather after a long run of peak songs. Guest requests are never skipped. Rules: MIXING_RULES.md "Set Flow".
  */
+import { DESI_RUN, type LanguageFamily } from '../../../shared/songLanguage';
 
 export interface FlowSong {
   title: string;
@@ -11,6 +12,7 @@ export interface FlowSong {
   bpm?: number;
   loudnessDb?: number;
   language?: string; // from guessLanguage, only when it was sure
+  family?: LanguageFamily; // desi (Hindi / Punjabi) or western, from languageFamily
 }
 
 export interface FlowCandidate extends FlowSong {
@@ -22,6 +24,7 @@ export interface FlowContext {
   current: FlowSong;
   recentArtists: string[]; // artists of the songs before the current one, newest first
   languageRun: number; // how many songs in a row (incl. the current) were in the current one's language
+  desiRun?: number; // Hindi / Punjabi songs in a row, incl. the current
   danceFloor: boolean; // Party / Bhangra mood: keep the energy up
   peakRun?: number; // songs on air in a row (incl. the current) with no step down in energy
 }
@@ -82,6 +85,11 @@ export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext
   if (c.language && ctx.current.language && c.language !== ctx.current.language && ctx.languageRun < LANGUAGE_RUN) {
     score -= 0.7;
     bad.push('a language switch too soon');
+  }
+
+  if (c.family === 'western' && ctx.current.family === 'desi' && (ctx.desiRun ?? 0) >= DESI_RUN) {
+    score -= 3;
+    bad.push('an English song in a Hindi / Punjabi run');
   }
 
   if (ctx.danceFloor && c.loudnessDb !== undefined && ctx.current.loudnessDb !== undefined) {

@@ -179,7 +179,7 @@ Code: `smoothOnly` in `startTransition`, `executePendingMix`, `chooseExitFx`, `l
 
 **Never in a high part:** every song has high parts (choruses, drops: bars at least 85% as loud as its loud level, the 90th percentile of its bars) and low parts (verses, breakdowns, intro, outro). The old song never starts leaving in the middle of a high part, or just as one begins (in the first half of the mix): the crowd is waiting for that chorus. The best exit is right where a high part ends and a low part starts (*"current song's high part just ended"*, worth 1 more point). When Mix is pressed in a long high part, the exit is looked for up to 90 s ahead instead of 45 s, so the mix waits for the low part rather than cutting the chorus off (`loudLevel`, `inHighPart` in `planMix`). Cuts with no overlap (natural pitch) never change the new song's speed.
 
-**Never into the fade-out:** some songs fade or go quiet for several seconds before the file ends. The exit starts at most a bar after the song's music ends (the last bar at least half its average level, `lastLoudTime`), so a cut never leaves seconds of near-silence. If the song is already fading when the mix is planned, it mixes at the next bar.
+**Never into the fade-out:** some songs fade or go quiet for several seconds before the file ends. The exit starts at least a bar (or half the blend) **before** the song's music ends (the last bar at least half its average level, `lastLoudTime`), so the old song is still playing for the first half of the mix; a bar after it left 1–3 s of silence (QA: Despacito ended 1.5 s before the mix began). The new song never comes in on a near-silent fade-in either: an entry's first 2 bars reach at least a quarter of its loud level (`ENTRY_MIN_LEVEL`), else the first bar of its intro that does. If the song is already fading when the mix is planned, it mixes at the next bar.
 
 **Every hook is protected:** an exit never fades the old song out over any of its hooks (each chorus and a drop), not only the first one.
 
@@ -500,12 +500,14 @@ Adjust song tempo to create energetic, dance-friendly mixes while preserving mus
 
 ## Tempo Detection (Which Songs Can Be Beatmatched)
 
-Two songs are beatmatched only when both tempos have a confidence of at least 0.6; otherwise the mix is a quick cut (`BpmDetector.ts`).
+Two songs are beatmatched only when both tempos have a confidence of at least 0.6 and the new song needs at most **±8%** (`BLEND_MAX_SHIFT`: beyond that a blend sounds pitch-bent; -15% is over a semitone flat); otherwise the mix is a smooth fade (`BpmDetector.ts`). The ±16% limit below is for a set tempo you lock yourself.
 
 - **Kick and bass first:** the tempo comes from the low band (under 150 Hz) when its pulse is clear (0.6 or more). This is unchanged from before, so songs that were confident keep their tempo.
 - **Otherwise all three bands:** low (at half weight), mid (150 Hz – 2 kHz: snare, claps, dholak) and high (over 2 kHz: hats, shakers, dhol crack). Many pop and desi songs carry their pulse there, not in the kick.
 - **Beat position from the kick and bass:** the grid and the "1" still come from the low band, because hats would pull the beat toward the off-beat.
-- **Stability:** the tempo is measured again on four separate 40 s stretches; if most don't confirm it (3 of 4, 2 of 3; half / double time counts), the confidence is capped at 0.55, so the song is never beatmatched on a tempo that drifts.
+- **Tempo vote (`voteTempo`):** the tempo is measured on the whole song and again on four separate 40 s stretches, each with the low band and all bands. Every estimate of 0.4 or more votes for its tempo family (half / double time counts as the same; a stretch votes once, by its stronger estimate; the low band counts 10 % more). The family with the most support wins; its BPM is the median of the estimates within 0.3 % of its strongest one (wider readings, e.g. 124.3 vs 125.06, are two readings, not one tempo).
+- **Stability:** a tempo most stretches confirm (3 of 4, 2 of 3) is trusted (confidence at least 0.7) even when no single estimate was very sure; one most don't confirm is capped at 0.55, so the song is never beatmatched on a tempo that drifts.
+- **QA, 30 songs (Nov 2026):** trusted for beatmatching 17 → 25 (the 5 left have drifting or weak beats). Fixed: a low band confident at the wrong tempo (141.7 vs 124 everywhere else), a weak whole-song pass with certain stretches (158.6 at 0.26 vs 81.0 at 1.0), a steady 118 that no single estimate was sure of. `node qa/bpmDiagnostics.mjs` shows every stage for cached songs.
 - **Measured on 200 cached songs:** a confident tempo for **62 %** of songs (was 34 %). Every song that was confident before kept its tempo. Known tempos that are now right: We Don't Talk Anymore (100), Closer (95), As It Was (174), Drop It Like It's Hot (92), 295 (90). Tempos that were confidently wrong are now flagged as unsure (e.g. This Is What You Came For: 141.7, really 124). Shape of You is still wrong (127.7, really 96) but stays unsure (0.27), so it is cut, not beatmatched.
 
 ## Technical Rules
@@ -639,7 +641,7 @@ A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's o
    - a step of 4% or less gains 0.5;
    - a step over 8% loses 1;
    - a step over 16% loses 2.
-5. **Language runs:** a few songs (3) in one language before switching. An earlier switch loses 0.7. This only counts when the language is known for sure (script, artist or label).
+5. **Language runs:** a few songs (3) in one language before switching. An earlier switch loses 0.7. This only counts when the language is known for sure (script, artist or label). After 2 or more Hindi / Punjabi songs in a row, an English song loses 3 more (see "Language at the Top of Up Next").
 6. **No energy drop on a dance floor:** in Party or Bhangra mood, a song more than 3 dB quieter than the one on air loses 1.
 7. **Breathers:** on a dance floor, after 5 songs in a row with no step down in energy (no song at least 1.5 dB quieter than the one before it), a song 1.5–6 dB quieter than the one on air **gains** 0.8 instead of losing points, so people get a breather. A song more than 6 dB quieter still loses 1: a breather, not an empty floor.
 8. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
@@ -647,6 +649,19 @@ A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's o
 10. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
 
 **Why:** the craft sources agree that a set is shaped as waves of energy rather than a random order or a flat line. Big tempo jumps need planning, and abrupt changes of genre or energy lose the floor. See [DJ.Studio: anatomy of a great mix](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic), [ZipDJ: how to structure a set](https://zipdj.com/blog/how-to-structure-a-dj-set) and [DJ Will Gill: setlist flow](https://djwillgill.com/pro-tactics-for-flawless-song-selection-for-dj-setlist-flow/).
+
+---
+
+# Language at the Top of Up Next
+
+When Hindi / Punjabi songs play back to back, English songs don't sit at the top of Up Next (`keepDesiOnTop` in `AudioEngine.ts`, `moveWesternDown` in `engine/queueRules.ts`):
+
+1. **When:** the last **2** songs on air (incl. the one playing) were Hindi or Punjabi. Hindi and Punjabi count as one group (desi): they mix freely at a desi party.
+2. **What happens:** English (and Spanish) songs move to the **end** of Up Next, keeping their order. Done when a song starts and whenever songs are added to Up Next.
+3. **Never moved:** songs someone chose (search, request) and the song being mixed in right now.
+4. **Following your choice:** when you search and play only Hindi / Punjabi songs, the songs picked "like your picks" leave out English songs, even before the run of 2.
+5. **Which language a song is** (`languageFamily` in `shared/songLanguage.ts`): the script, artist or label first; then the AI DJ's earlier answer for that song; then common Hindi / Punjabi words in the title (*dil, tera, ishq, nachde…*). Any other plain Latin-alphabet title counts as English.
+6. **Play an English song yourself** and the run ends, so English songs are welcome again.
 
 ---
 
@@ -818,3 +833,20 @@ When the listener chooses songs themselves (searched and played, or added), the 
 - **How many and where:** at least 6 (`MOOD_PICKS`), at the top of Up Next right after the songs the listener queued themselves. They stay there together when Up Next is reshuffled (`moodPick`, `isPinned` in `queueRules.ts`). A new choice replaces the previous picks that haven't started loading.
 - **Staying with the type:** when one of those picks plays (mixed in, or chosen from Up Next), the listener is staying with that type, so 3 more of it (`MOOD_MORE`) join the end of the picks, keeping at least 6 and at most 10 waiting (`MOOD_MAX_WAITING`). It's researched from the pick that's playing together with the songs the listener chose themselves (the anchors), so one off-type pick doesn't drift the type away. Picks don't become anchors; after 45 minutes without a choice of their own, the playing pick alone sets the type.
 - **Same rules as any automatic pick:** at most 6 minutes, no 8D or mashups, nothing played in the last 3 hours, nothing on "Don't Play Again Ever", and the AI chat's filter. Each shows why it's there ("Like your picks: played with both …").
+
+# Live Phase Lock (Beatmatched Blends)
+
+Matching two songs' tempos isn't enough: each beat grid comes from analysis and can sit a fraction of a beat off. QA measured kicks 60–123 ms apart in beatmatched blends (a flam; Music Flamingo heard "beat clashes" in exactly those). So, like a DJ riding the jog wheel by ear (`PhaseLock.ts`, `schedulePhaseLock`):
+
+- During every beatmatched blend of 6 s or more, both decks' kick and bass (before the EQ, so both kicks are heard while one's bass is cut) are followed on the audio thread in 5 ms frames.
+- After 6 beats (at least 2.5 s), each song's beat phase is measured on its own (onsets folded over the beat, `beatPhase.ts`) and the distance between them taken. Both need a clear beat (clarity 2+).
+- More than 12 ms apart: the new song is nudged onto the old one's beat, played at most 4% faster or slower for about a second (`VirtualDeck.nudge`), not heard as a pitch bend. A second check a few seconds later fixes what's left. The status line says "Beats locked by ear (nudged … ms)".
+- QA (Nov 2026): beatmatched blends 29–32 ms apart after it (was 60–123 ms).
+
+Also from QA: the new song's start is computed from the old song's position at the moment it starts (it was read before the new song's analysis, putting its first beat late), and beatmatching uses the exact tempo, not the display value rounded to 0.1 BPM.
+
+**Long pauses aren't waited out:** a gap cut into a stop of a beat or two is kept (a DJ uses it), but when the old song's pause is longer than 1.2 s (`HEARD_GAP_SECONDS`), the new song drops in on its first beat instead of after it: 1.75 s of silence is dead air.
+
+# Previous
+
+Each press of Previous (console or phone) steps one song further back through Previously Played (`prevTrack`): 10 presses = 10 songs back, back to back, each switched to **directly** from its music start (never its hook): a 0.2 s fade against clicks, at the song's own tempo, no blend and no echo, because Previous is pressed when someone asks for a song (exempt from the no-abrupt rule; a mix running is cut short). Fast presses are counted and only the song they end on is loaded. The list is taken at the first press and walked from there; any other song starting ends the walk (and so does 20 s without a press). It never restarts the song on air (a hard jump), and no longer cross-fades to whatever the other deck still held (which only bounced between the last two songs). QA: `node qa/previous.mjs`.

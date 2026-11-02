@@ -127,3 +127,32 @@ describe('Best Parts play limit', () => {
     expect(result.exitTime).toBeLessThanOrEqual(132 + 1.5 + 2 + 0.01);
   });
 });
+
+describe('no silence around the mix (QA fixes)', () => {
+  it('leaves while the old song is still playing, not at its last bar', () => {
+    // The music stops dead at 180 s (digital silence after)
+    const endsAt180 = (t: number) => (t >= 180 ? 0 : undefined);
+    const result = planMix({ out: song(endsAt180), inc: song(), outPosition: 150, blendBeats: 8, lookAheadSeconds: 45, minLeadSeconds: 1.5, preferIncomingHook: false })!;
+    expect(result.exitTime).toBeLessThanOrEqual(180 - 2); // at least a bar (2 s) before the end
+  });
+
+  it("doesn't enter on a near-silent fade-in", () => {
+    // The new song fades in from silence over its first 10 s
+    const fadeIn = (t: number) => (t < 10 ? 0.02 * t : undefined);
+    const result = planMix({ out: song(), inc: song(fadeIn), outPosition: 100, blendBeats: 8, lookAheadSeconds: 45, minLeadSeconds: 1.5, preferIncomingHook: false })!;
+    const entryLevel = Math.min(1, 0.02 * result.entryTime); // its level where it comes in
+    expect(result.entryTime).toBeGreaterThanOrEqual(8); // not in the first, nearly silent bars
+    expect(entryLevel).toBeGreaterThan(0.1);
+  });
+});
+
+describe('long pauses are not waited out', () => {
+  it('drops the new song in as a 2 s stop starts, not when it ends', () => {
+    // A high point 140–150 s, then 2 s of silence, then the song comes back
+    const longStop = (t: number) => (t >= 150 && t < 152 ? 0 : t >= 140 && t < 150 ? 1.6 : undefined);
+    const result = plan(song(longStop))!;
+    expect(result.style).toBe('gap');
+    expect(result.exitTime).toBeGreaterThanOrEqual(149.9);
+    expect(result.exitTime).toBeLessThan(150.6); // within a beat of the stop, not at 152
+  });
+});

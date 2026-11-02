@@ -71,3 +71,17 @@ describe('set flow breathers', () => {
     expect(chooseNext(deep, ctx({ peakRun: 8 })).pick.title).toBe('Peak');
   });
 });
+
+describe('set flow: English songs in a Hindi / Punjabi run', () => {
+  it('skips an English song after 2 desi songs in a row', () => {
+    const ready = [song('Perfect', 'Ed Sheeran', { language: undefined, family: 'western' }), song('Softly', 'Karan Aujla', { family: 'desi' })];
+    const r = chooseNext(ready, ctx({ current: { ...ctx().current, family: 'desi' }, desiRun: 2 }));
+    expect(r.pick.title).toBe('Softly');
+    expect(r.reason).toContain('English song');
+  });
+
+  it('keeps the queue order before the run is long enough', () => {
+    const ready = [song('Perfect', 'Ed Sheeran', { language: undefined, family: 'western' }), song('Softly', 'Karan Aujla', { family: 'desi' })];
+    expect(chooseNext(ready, ctx({ current: { ...ctx().current, family: 'desi' }, desiRun: 1 })).pick.title).toBe('Perfect');
+  });
+});
