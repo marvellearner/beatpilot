@@ -3,6 +3,7 @@ import { detectBpmFromBuffer } from './BpmDetector';
 import { IntroSkitDetector } from './IntroSkitDetector';
 import { loudnessGainDb } from './Loudness';
 import { isStrictStartSong } from './songMatch';
+import { analyzeInWorker } from './analysis/analyzeInWorker';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
 // a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.5x).
@@ -291,25 +292,48 @@ export class VirtualDeck {
 
     // Compute waveform peaks for visual scrubbing
     const peaks = VirtualDeck.extractPeaks(audioBuffer, 200);
-    const bpmResult = detectBpmFromBuffer(audioBuffer);
-    const introAnalysis = IntroSkitDetector.detectMusicStart(
-      audioBuffer,
-      bpmResult.bpm,
-      bpmResult.firstDownbeatTime
-    );
+
+    let bpm = 128;
+    let bpmConfidence = 0.5;
+    let firstDownbeatTime = 0;
+    let musicStartTime = 0;
+    let introSkipReason: string | undefined;
+
+    try {
+      // Offload heavy DSP analysis (BPM, downbeat, intro skit) to worker
+      const { fields, intro } = await analyzeInWorker(audioBuffer, {}, false);
+      bpm = fields.bpm ?? 128;
+      bpmConfidence = fields.bpmConfidence ?? 0.5;
+      firstDownbeatTime = fields.firstDownbeatTime ?? 0;
+      musicStartTime = intro?.suggestedMusicStart ?? fields.musicStartTime ?? 0;
+      introSkipReason = intro?.reason ?? fields.introSkipReason;
+    } catch {
+      // Fallback to main thread DSP if Web Worker is unavailable
+      const bpmResult = detectBpmFromBuffer(audioBuffer);
+      const introAnalysis = IntroSkitDetector.detectMusicStart(
+        audioBuffer,
+        bpmResult.bpm,
+        bpmResult.firstDownbeatTime
+      );
+      bpm = bpmResult.bpm;
+      bpmConfidence = bpmResult.confidence;
+      firstDownbeatTime = bpmResult.firstDownbeatTime;
+      musicStartTime = introAnalysis.suggestedMusicStart;
+      introSkipReason = introAnalysis.reason;
+    }
 
     const metadata: TrackMetadata = {
       id: `local_${Date.now()}`,
       title: file.name.replace(/\.[^/.]+$/, ''),
       artist: 'Local Library',
       duration: audioBuffer.duration,
-      bpm: bpmResult.bpm,
-      bpmConfidence: bpmResult.confidence,
-      firstDownbeatTime: bpmResult.firstDownbeatTime,
+      bpm,
+      bpmConfidence,
+      firstDownbeatTime,
       audioBuffer,
       waveformPeaks: peaks,
-      musicStartTime: introAnalysis.suggestedMusicStart,
-      introSkipReason: introAnalysis.reason,
+      musicStartTime,
+      introSkipReason,
       sourceType: 'local',
     };
 

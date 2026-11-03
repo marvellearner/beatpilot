@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { VideoOff, Maximize2, Minimize2, Tv } from 'lucide-react';
+import { VideoOff, Maximize2, Minimize2 } from 'lucide-react';
 import { TrackMetadata } from '../../types';
 import { VJFillerTransition } from './VJFillerTransition';
 
@@ -27,7 +27,12 @@ export function calculateTransitionOpacities(
   hasIncomingVideo: boolean
 ): { activeOpacity: number; incomingOpacity: number; fillerOpacity: number } {
   if (!isTransitioning) {
-    return { activeOpacity: 1, incomingOpacity: 0, fillerOpacity: 0 };
+    // When not transitioning, if no active video exists, show filler at 1.0 (never a black screen!)
+    return {
+      activeOpacity: hasActiveVideo ? 1 : 0,
+      incomingOpacity: 0,
+      fillerOpacity: hasActiveVideo ? 0 : 1,
+    };
   }
 
   const p = Math.max(0, Math.min(1, transitionProgress));
@@ -35,18 +40,23 @@ export function calculateTransitionOpacities(
   if (!hasActiveVideo && !hasIncomingVideo) {
     fillerOpacity = 1;
   } else if (!hasActiveVideo) {
-    fillerOpacity = Math.max(0, 1 - p);
+    fillerOpacity = Math.max(0, 1 - p * 1.25);
   } else if (!hasIncomingVideo) {
-    fillerOpacity = Math.min(1, p);
+    fillerOpacity = Math.min(1, p * 1.25);
   } else {
     // Both videos exist: burst filler visuals at the mix point (sin curve peaks at 1.0 at 50% blend)
     fillerOpacity = Math.sin(p * Math.PI);
   }
 
-  const activeOpacity = Math.max(0, 1 - p * 1.3);
-  const incomingOpacity = Math.max(0, (p - 0.2) * 1.25);
+  const activeOpacity = hasActiveVideo ? Math.max(0, 1 - p * 1.3) : 0;
+  const incomingOpacity = hasIncomingVideo ? Math.max(0, (p - 0.2) * 1.25) : 0;
 
-  return { activeOpacity, incomingOpacity, fillerOpacity };
+  // Mathematical visual guarantee: Total visibility across active video, incoming video, and filler
+  // must never drop below 1.0 under any buffer, latency, or transition scenario.
+  const videoSum = activeOpacity + incomingOpacity;
+  const safeFiller = Math.max(fillerOpacity, Math.max(0, 1.0 - videoSum));
+
+  return { activeOpacity, incomingOpacity, fillerOpacity: safeFiller };
 }
 
 interface SyncedVideoPlayerProps {
@@ -84,6 +94,8 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [apiReady, setApiReady] = useState(false);
+  const [activePlayerReady, setActivePlayerReady] = useState(false);
+  const [incomingPlayerReady, setIncomingPlayerReady] = useState(false);
   const lastSeekSentRef = useRef<number>(0);
   const lastSeekTimeRef = useRef<number>(0);
   const isPlayingRef = useRef(isPlaying);
@@ -91,6 +103,14 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
 
   const activeVideoId = useMemo(() => extractYouTubeVideoId(track), [track?.id, track?.url, track?.thumbnail]);
   const incomingVideoId = useMemo(() => extractYouTubeVideoId(incomingTrack), [incomingTrack?.id, incomingTrack?.url, incomingTrack?.thumbnail]);
+
+  useEffect(() => {
+    setActivePlayerReady(false);
+  }, [activeVideoId]);
+
+  useEffect(() => {
+    setIncomingPlayerReady(false);
+  }, [incomingVideoId]);
 
   // Load YouTube IFrame API script once if not already present
   useEffect(() => {
@@ -187,6 +207,7 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
         events: {
           onReady: (event: any) => {
             if (destroyed) return;
+            setActivePlayerReady(true);
             try {
               event.target.mute();
               event.target.seekTo(currentTime, true);
@@ -267,6 +288,7 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
         },
         events: {
           onReady: (event: any) => {
+            setIncomingPlayerReady(true);
             try {
               event.target.mute();
               if (isPlayingRef.current) {
@@ -295,6 +317,7 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
     }
 
     return () => {
+      setIncomingPlayerReady(false);
       if (incomingYtPlayerRef.current) {
         try {
           incomingYtPlayerRef.current.destroy();
@@ -398,12 +421,15 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
     return null;
   }
 
+  const isVideoUsable = !!activeVideoId && activePlayerReady;
+  const isIncomingUsable = !!incomingVideoId && incomingPlayerReady;
+
   // Visual crossfade opacities and VJ transition filler curve
   const { activeOpacity, incomingOpacity, fillerOpacity } = calculateTransitionOpacities(
     isTransitioning,
     transitionProgress,
-    !!activeVideoId,
-    !!incomingVideoId
+    isVideoUsable,
+    isIncomingUsable
   );
 
   return (
@@ -414,20 +440,24 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
       title={isPlaying ? 'Click to Pause' : 'Click to Play'}
       className={`relative w-full rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl flex flex-col items-center justify-center aspect-video select-none group cursor-pointer ${className}`}
     >
+      {/* Dynamic VJ Filler Video / Visuals: Always active instead of black screen */}
+      <VJFillerTransition
+        isTransitioning={isTransitioning}
+        transitionProgress={transitionProgress}
+        isPlaying={isPlaying}
+        bpm={track?.bpm || incomingTrack?.bpm || 126}
+        opacity={fillerOpacity}
+        activeTrack={track}
+      />
+
       {/* Active Deck Video Stream (zero download: streamed via YouTube CDN) */}
-      {activeVideoId ? (
+      {activeVideoId && (
         <div
           ref={playerDivRef}
           id="yt-active-player-wrapper"
           className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300 pointer-events-none [&>iframe]:w-full [&>iframe]:h-full [&>iframe]:object-cover [&>iframe]:pointer-events-none"
-          style={{ opacity: activeOpacity }}
+          style={{ opacity: isVideoUsable ? activeOpacity : 0 }}
         />
-      ) : (
-        <div className="flex flex-col items-center justify-center p-6 text-center text-slate-500">
-          <Tv className="w-10 h-10 mb-2 opacity-50 text-slate-400" />
-          <p className="text-xs font-semibold text-slate-300">Audio Only Track</p>
-          <p className="text-[10px] text-slate-500 mt-0.5">No live video stream found for this song.</p>
-        </div>
       )}
 
       {/* Incoming Deck Video Stream (for smooth visual crossfade during DJ transition) */}
@@ -439,14 +469,6 @@ export const SyncedVideoPlayer: React.FC<SyncedVideoPlayerProps> = ({
           style={{ opacity: incomingOpacity }}
         />
       )}
-
-      {/* Dynamic VJ Filler Video / Visuals during DJ Transition */}
-      <VJFillerTransition
-        isTransitioning={isTransitioning}
-        transitionProgress={transitionProgress}
-        bpm={track?.bpm || incomingTrack?.bpm || 126}
-        opacity={fillerOpacity}
-      />
 
       {/* Subtle overlay gradient at top & bottom for controls */}
       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/50 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none" />

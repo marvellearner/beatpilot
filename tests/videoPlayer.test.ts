@@ -33,11 +33,18 @@ describe('extractYouTubeVideoId', () => {
 });
 
 describe('calculateTransitionOpacities', () => {
-  it('returns 1 active, 0 incoming and 0 filler when not transitioning', () => {
+  it('returns 1 active, 0 incoming and 0 filler when not transitioning with active video', () => {
     const res = calculateTransitionOpacities(false, 0.5, true, true);
     expect(res.activeOpacity).toBe(1);
     expect(res.incomingOpacity).toBe(0);
     expect(res.fillerOpacity).toBe(0);
+  });
+
+  it('always shows filler video (opacity 1) instead of black screen when no active video exists', () => {
+    const res = calculateTransitionOpacities(false, 0, false, false);
+    expect(res.activeOpacity).toBe(0);
+    expect(res.incomingOpacity).toBe(0);
+    expect(res.fillerOpacity).toBe(1); // 100% filler video!
   });
 
   it('peaks filler video in the middle of transition when both tracks have video', () => {

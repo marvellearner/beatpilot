@@ -29,3 +29,5 @@ data/local_library.json
 # Transition QA recordings and reports (qa/transitions.mjs)
 qa/out/
 data/banned_songs.json
+# Personal data (play history, favourites, bans, library, Gemini usage)
+data/

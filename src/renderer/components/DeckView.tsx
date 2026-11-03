@@ -5,6 +5,7 @@ import { shiftKey, getCamelotDetails, getHarmonicCompatibility } from '../../aud
 import { isStrictStartSong } from '../../audio/songMatch';
 import { DeckId } from '../../types';
 import { WaveformCanvas } from './WaveformCanvas';
+import { useEngineRefresh } from '../hooks/useEngineStore';
 import { Play, Pause, FolderPlus, Disc3, RotateCcw, Square } from 'lucide-react';
 
 interface DeckViewProps {
@@ -16,6 +17,8 @@ interface DeckViewProps {
 const LOOP_BARS = [1, 2, 4];
 
 export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
+  // The deck's time, play state and track live in the engine: redraw as they change
+  useEngineRefresh(engine);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const state = deck.getPlaybackState();
   const track = state.track;

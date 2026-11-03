@@ -26,7 +26,7 @@ import {
 import { loudnessGainDb } from './Loudness';
 import { DeckCues } from './engine/DeckCues';
 import { lowParts, planMix, vocalClash, MixPlan, MixSongInfo } from './MixPointPlanner';
-import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EqBandId, EqGains, MoodId, getMood } from './Moods';
+import { EQ_BANDS, EqBandId, EqGains, MoodId, getMood } from './Moods';
 import { stretchAudioBuffer } from './stretchInWorker';
 import { songKeys, isSameSong, cleanCoreTitle, isStrictStartSong, is8dSong, isMashupSong, type SongRef } from './songMatch';
 import {
@@ -48,6 +48,9 @@ import {
 } from './engine/queueRules';
 import { DJAgent, type DanceBpmDecision } from '../ai/DJAgent';
 import { PHASE_TOLERANCE_SECONDS, PhaseLock } from './engine/PhaseLock';
+import { AudioGraph } from './engine/AudioGraph';
+import { TrackQueueManager } from './engine/TrackQueueManager';
+import { MixCoordinator } from './engine/MixCoordinator';
 import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
 import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter } from '../../shared/songFilter';
 import type { IntroAnalysisResult } from './IntroSkitDetector';
@@ -119,8 +122,6 @@ const KEY_CLASH_MAX_BARS = 8; // blend length cap when the keys don't fit perfec
 const SHOW_FX_EVERY = 4;
 // Set flow breathers: a song this much quieter than the one before it gave the floor a rest
 const BREATHER_STEP_DB = 1.5;
-// Safety clipper on the output: unchanged up to the knee, never above the ceiling
-const SAFETY_KNEE = 0.9;
 // A low-part fade between songs that can't be beatmatched (see lowFadeSeconds)
 const LOW_FADE_MIN_SECONDS = 4;
 const LOW_FADE_MAX_SECONDS = 9;
@@ -128,7 +129,6 @@ const LOW_FADE_MAX_SECONDS = 9;
 // can be beatmatched, a slow wash fade over two low parts for songs that can't
 const SHOWCASE_BARS = 16;
 const WASH_FADE_SECONDS = 12;
-const SAFETY_CEILING = 0.99;
 const ON_AIR_LOUDNESS_MAX = 12;
 const MANUAL_MIX_LOOKAHEAD_SECONDS = 45; // Mix / Next: find the best blend point within the next 45 s per MIXING_RULES.md
 const OUTRO_PLAN_SECONDS = 45; // auto-mix: plan the blend point within the last 45 s
@@ -201,7 +201,11 @@ const MIN_QUEUE_TARGET = 45; // Maintain ~50 songs in queue at all times
 export const MAX_AUTO_QUEUE_SONG_DURATION = MAX_AUTO_SONG_SECONDS;
 
 export class AudioEngine {
-  public ctx: AudioContext;
+  // Web Audio graph: the only owner of the context, master chain, EQ, volume and fader position
+  public readonly graph: AudioGraph;
+  public get ctx(): AudioContext {
+    return this.graph.ctx;
+  }
 
   // Decks
   public deckA: VirtualDeck;
@@ -209,30 +213,49 @@ export class AudioEngine {
   // Live Rhythm Enhancer (Deck P): sample-based dhol/percussion locked to the on-air song
   public rhythm: RhythmEnhancer;
 
-  // Master Nodes: decks + drums -> masterBus -> EQ bands -> eqHeadroom -> limiter -> masterGain
-  private masterBus: GainNode;
-  private eqFilters = new Map<EqBandId, BiquadFilterNode>();
-  private eqHeadroom: GainNode;
-  public eqGains: EqGains = { ...getMood('normal').eq };
   public mood: MoodId = 'normal';
-  private limiter: DynamicsCompressorNode;
-  private masterGain: GainNode;
-  public masterVolume: number = 0.9;
-  public masterAnalyser: AnalyserNode;
-  public masterAnalyserL: AnalyserNode;
-  public masterAnalyserR: AnalyserNode;
-  private channelSplitter: ChannelSplitterNode;
 
-  // Crossfader Nodes
-  private crossfaderGainA: GainNode;
-  private crossfaderGainB: GainNode;
-  private crossfaderPosition: number = -1; // Default to Deck A playing
+  // Read-only views of AudioGraph state (change them through setEqBand / setMasterVolume / setCrossfader)
+  public get masterBus(): GainNode {
+    return this.graph.masterBus;
+  }
+  public get eqGains(): EqGains {
+    return this.graph.eqGains;
+  }
+  public get masterVolume(): number {
+    return this.graph.masterVolume;
+  }
+  public get masterAnalyser(): AnalyserNode {
+    return this.graph.masterAnalyser;
+  }
+  public get masterAnalyserL(): AnalyserNode {
+    return this.graph.masterAnalyserL;
+  }
+  public get masterAnalyserR(): AnalyserNode {
+    return this.graph.masterAnalyserR;
+  }
+  public get crossfaderGainA(): GainNode {
+    return this.graph.crossfaderGainA;
+  }
+  public get crossfaderGainB(): GainNode {
+    return this.graph.crossfaderGainB;
+  }
+  /** -1 = Deck A only, +1 = Deck B only. Follows a running mix. */
+  public get crossfaderPosition(): number {
+    return this.graph.crossfaderPosition;
+  }
 
   // Active On-Air Deck
   public activeDeck: DeckId = 'A';
 
   // Queue & Auto-Curation
-  public queue: QueuedTrack[] = [];
+  public queueManager = new TrackQueueManager(() => this.notify());
+  public get queue(): QueuedTrack[] {
+    return this.queueManager.items;
+  }
+  public set queue(items: QueuedTrack[]) {
+    this.queueManager.items = items;
+  }
   public acquisitionStatus: string = '';
   // What a Mix click did, for a toast (the UI shows it whenever `at` changes)
   public mixNotice: { text: string; at: number } | null = null;
@@ -362,6 +385,9 @@ export class AudioEngine {
     harmonicShift?: string;
     showcase?: boolean; // planned as a showcase blend (16 bars, band-by-band handover)
   } | null = null;
+  private cachedPendingMixInfo: PendingMixInfo | null = null;
+  private lastPendingMixStartsInCeil: number | null = null;
+  private lastPendingMixItemId: string | null = null;
 
   // AI DJ brain: local Ollama first, Gemini cloud as backup, built-in rules if both fail (see server/apiPlugin.ts)
   public djAgent = new DJAgent();
@@ -422,88 +448,46 @@ export class AudioEngine {
   private lastSetTempoAttempt = '';
   public playOriginal = false; // "Original" toggle: songs play at their own BPM
 
-  // Auto-Transition State
-  private transitionTimer: number | null = null;
+  // A running mix (MixCoordinator owns its state, timers, completion and cancel)
+  public readonly mixCoordinator: MixCoordinator;
+  public get isTransitioning(): boolean {
+    return this.mixCoordinator.isTransitioning;
+  }
+  public get transitionProgress(): number {
+    return this.mixCoordinator.transitionProgress;
+  }
   // Live phase lock: lines the new song's beats up with the old one's during a blend (PhaseLock.ts)
   private phaseLock!: PhaseLock;
-  private phaseLockTimers: number[] = [];
   // Previous: stepping back through Previously Played (prevTrack). The list is taken at the first
   // press and walked one song per press; songs played this way don't end the walk.
   private backNav: { songs: PlayLogEntry[]; index: number; at: number } | null = null;
   private backNavTimer: number | null = null;
   private backNavIds = new Set<string>();
-  public isTransitioning: boolean = false;
-  public transitionProgress: number = 0; // 0 to 1
 
   public onEngineUpdate?: () => void;
+  private storeListeners = new Set<() => void>();
+  public storeVersion = 0;
+
+  /**
+   * Subscribe to engine changes (targeted React store subscriptions).
+   */
+  public subscribe(listener: () => void): () => void {
+    this.storeListeners.add(listener);
+    return () => {
+      this.storeListeners.delete(listener);
+    };
+  }
 
   constructor() {
-    const AudioContextClass =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    this.ctx = new AudioContextClass();
-
-    // Limiter to prevent clipping during multi-deck summing
-    this.limiter = this.ctx.createDynamicsCompressor();
-    this.limiter.threshold.value = -1.5;
-    this.limiter.knee.value = 6;
-    this.limiter.ratio.value = 12;
-    this.limiter.attack.value = 0.003;
-    this.limiter.release.value = 0.15;
-
-    // Master Gain
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.9;
-
-    // Master Analyser & Stereo Channel Splitter for Live VU Meters
-    this.masterAnalyser = this.ctx.createAnalyser();
-    this.masterAnalyser.fftSize = 512;
-
-    this.channelSplitter = this.ctx.createChannelSplitter(2);
-    this.masterAnalyserL = this.ctx.createAnalyser();
-    this.masterAnalyserR = this.ctx.createAnalyser();
-    this.masterAnalyserL.fftSize = 256;
-    this.masterAnalyserR.fftSize = 256;
-
-    // Chain: Limiter -> Master Gain -> Safety Clipper -> Master Analyser -> Output
-    this.limiter.connect(this.masterGain);
-    const [clipIn, clipOut] = this.createSafetyClipper();
-    this.masterGain.connect(clipIn);
-    clipOut.connect(this.masterAnalyser);
-    this.masterAnalyser.connect(this.channelSplitter);
-    this.channelSplitter.connect(this.masterAnalyserL, 0);
-    this.channelSplitter.connect(this.masterAnalyserR, 1);
-    this.masterAnalyser.connect(this.ctx.destination);
-
-    // Master equalizer on the whole mix (songs + drums), before the limiter
-    this.masterBus = this.ctx.createGain();
-    this.eqHeadroom = this.ctx.createGain();
-    let eqChainEnd: AudioNode = this.masterBus;
-    for (const band of EQ_BANDS) {
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = band.type;
-      filter.frequency.value = band.frequency;
-      if (band.q) filter.Q.value = band.q;
-      filter.gain.value = 0;
-      eqChainEnd.connect(filter);
-      eqChainEnd = filter;
-      this.eqFilters.set(band.id, filter);
-    }
-    eqChainEnd.connect(this.eqHeadroom);
-    this.eqHeadroom.connect(this.limiter);
-
-    // Crossfader Gains for Deck A & Deck B
-    this.crossfaderGainA = this.ctx.createGain();
-    this.crossfaderGainB = this.ctx.createGain();
-
-    this.crossfaderGainA.connect(this.masterBus);
-    this.crossfaderGainB.connect(this.masterBus);
+    // Encapsulate all Web Audio hardware, master bus, EQs, limiter, clipper & crossfader gains in AudioGraph
+    this.graph = new AudioGraph();
 
     // Initialize Decks
     // Each deck's echo FX goes straight to the master bus, so it rings on after a crossfader cut
     this.deckA = new VirtualDeck('A', this.ctx, this.crossfaderGainA, this.masterBus);
     this.deckB = new VirtualDeck('B', this.ctx, this.crossfaderGainB, this.masterBus);
     this.phaseLock = new PhaseLock(this.ctx, this.deckA.inputNode, this.deckB.inputNode);
+    this.mixCoordinator = new MixCoordinator(this.graph, (id) => (id === 'A' ? this.deckA : this.deckB));
 
     // The rhythm layer joins the master bus directly (independent of the crossfader) and
     // follows whichever song is on air
@@ -587,16 +571,7 @@ export class AudioEngine {
 
   /** Sets one EQ band (dB). Boosts are offset by lowering the input so the mix stays out of the red. */
   public setEqBand(band: EqBandId, gainDb: number, save: boolean = true) {
-    const value = Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, gainDb));
-    this.eqGains = { ...this.eqGains, [band]: value };
-    this.eqFilters.get(band)?.gain.setTargetAtTime(value, this.ctx.currentTime, 0.03);
-
-    // Headroom: pull the level down by ~60% of the biggest boost, so boosting bass
-    // makes it fuller rather than just louder and clipping the limiter
-    const maxBoost = Math.max(0, ...Object.values(this.eqGains));
-    const headroom = Math.pow(10, (-0.6 * maxBoost) / 20);
-    this.eqHeadroom.gain.setTargetAtTime(headroom, this.ctx.currentTime, 0.03);
-
+    this.graph.setEqBand(band, gainDb);
     if (save) this.saveSoundSettings();
     this.notify();
   }
@@ -607,7 +582,7 @@ export class AudioEngine {
   }
 
   private applyEq(gains: EqGains) {
-    for (const band of EQ_BANDS) this.setEqBand(band.id, gains[band.id], false);
+    this.graph.applyEq(gains);
     this.saveSoundSettings();
   }
 
@@ -2832,8 +2807,7 @@ export class AudioEngine {
       this.topSongAvoidCount = 0;
       this.saveTopSongAvoid();
     }
-    this.queue = this.queue.filter((q) => q.id !== itemId);
-    this.saveQueueToStorage();
+    this.queueManager.removeItem(itemId);
     this.notify();
   }
 
@@ -2841,20 +2815,7 @@ export class AudioEngine {
    * Reorder a track in the upcoming queue (e.g. prioritize to top/play-next or nudge up/down).
    */
   public moveQueueItem(itemId: string, direction: 'up' | 'down' | 'top') {
-    const idx = this.queue.findIndex((q) => q.id === itemId);
-    if (idx === -1) return;
-    const item = this.queue[idx];
-    const newQueue = [...this.queue];
-    newQueue.splice(idx, 1);
-    if (direction === 'top') {
-      newQueue.unshift(item);
-    } else if (direction === 'up') {
-      newQueue.splice(Math.max(0, idx - 1), 0, item);
-    } else if (direction === 'down') {
-      newQueue.splice(Math.min(newQueue.length, idx + 1), 0, item);
-    }
-    this.queue = newQueue;
-    this.saveQueueToStorage();
+    this.queueManager.moveItem(itemId, direction);
     this.notify();
   }
 
@@ -2986,73 +2947,24 @@ export class AudioEngine {
   }
 
   public saveQueueToStorage() {
-    try {
-      this.deduplicateQueue();
-      if (this.queue.length === 0) {
-        this.topSongAvoidKey = null;
-        this.topSongAvoidCount = 0;
-        this.saveTopSongAvoid();
-      }
-      if (typeof window === 'undefined' || !window.localStorage) return;
-      const serializable = this.queue.map((q) => ({
-        id: q.id,
-        title: q.title,
-        artist: q.artist,
-        duration: q.duration,
-        url: q.url,
-        thumbnail: q.thumbnail,
-        highlightTime: q.highlightTime,
-        cueInTime: q.cueInTime,
-        musicStartTime: q.musicStartTime,
-        introSkipReason: q.introSkipReason,
-        musicEndTime: q.musicEndTime,
-        hooks: q.hooks,
-        peakTime: q.peakTime,
-        outroReason: q.outroReason,
-        status: (q.status === 'ready' || q.status === 'queued') ? 'queued' : q.status,
-        isAiRecommended: q.isAiRecommended,
-        source: q.source,
-        lastPlayedAt: q.lastPlayedAt,
-        queuedAt: q.queuedAt,
-        unheard: q.unheard,
-        pickReason: q.pickReason,
-        moodPick: q.moodPick,
-      }));
-      window.localStorage.setItem('ai_dj_up_next_queue', JSON.stringify(serializable));
-    } catch {
-      // ignore in restricted environments
+    this.deduplicateQueue();
+    if (this.queue.length === 0) {
+      this.topSongAvoidKey = null;
+      this.topSongAvoidCount = 0;
+      this.saveTopSongAvoid();
     }
+    this.queueManager.saveToStorage();
   }
 
   public async restoreOrSeedQueue() {
-    // 1. Try to restore from localStorage first so page refresh immediately retains queue
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        const saved = window.localStorage.getItem('ai_dj_up_next_queue');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            this.queue = parsed.map((item: QueuedTrack) => ({
-              ...item,
-              status: 'queued',
-              audioBuffer: undefined,
-            }));
-            // Songs picked to follow the listener's type: when one plays, more of the type follow
-            for (const q of this.queue) if (q.moodPick && q.url) this.moodPickUrls.add(q.url.toLowerCase());
-            this.deduplicateQueue();
-            const onAirTrack = this.onAirDeck().getTrack();
-            if (onAirTrack) {
-              this.queue = this.queue.filter(
-                (q) => q.id !== onAirTrack.id && q.url !== onAirTrack.url && q.title.toLowerCase() !== onAirTrack.title.toLowerCase() && cleanCoreTitle(q.title) !== cleanCoreTitle(onAirTrack.title)
-              );
-            }
-            this.dropRecentlyPlayedFromQueue();
-            this.notify();
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('Could not restore queue from localStorage:', err);
+    // 1. Restore the saved queue first so a page refresh keeps it (without the song on air)
+    const restored = this.queueManager.restoreFromStorage(this.onAirDeck().getTrack());
+    if (restored) {
+      // Songs picked to follow the listener's type: when one plays, more of the type follow
+      for (const q of this.queue) if (q.moodPick && q.url) this.moodPickUrls.add(q.url.toLowerCase());
+      this.deduplicateQueue();
+      this.dropRecentlyPlayedFromQueue();
+      this.notify();
     }
 
     // 2. Proactively populate queue to 50 songs based on favorites, past played, and recommendations
@@ -4577,20 +4489,8 @@ export class AudioEngine {
   }
 
   private applyCrossfader(pos: number) {
-    this.crossfaderPosition = Math.max(-1, Math.min(1, pos));
+    this.graph.applyCrossfader(pos);
     this.activeDeck = this.crossfaderPosition < 0 ? 'A' : 'B';
-
-    const [gainA, gainB] = this.equalPowerGains(this.crossfaderPosition);
-    const now = this.ctx.currentTime;
-    this.crossfaderGainA.gain.cancelScheduledValues(now);
-    this.crossfaderGainB.gain.cancelScheduledValues(now);
-    this.crossfaderGainA.gain.setTargetAtTime(gainA, now, 0.02);
-    this.crossfaderGainB.gain.setTargetAtTime(gainB, now, 0.02);
-  }
-
-  private equalPowerGains(pos: number): [number, number] {
-    const x = (pos + 1) / 2;
-    return [Math.cos((x * Math.PI) / 2), Math.sin((x * Math.PI) / 2)];
   }
 
   /** Real seconds until the deck's next beat (at least 50 ms ahead so it can be scheduled). */
@@ -4637,22 +4537,20 @@ export class AudioEngine {
    * seconds later for what's left. Only while that blend is still running.
    */
   private schedulePhaseLock(startTime: number, durationSeconds: number, beatSec: number, incoming: DeckId, trackId: string) {
-    for (const t of this.phaseLockTimers) window.clearTimeout(t);
-    this.phaseLockTimers = [];
     const listen = Math.max(PHASE_LOCK_LISTEN_SECONDS, PHASE_LOCK_LISTEN_BEATS * beatSec);
     const checks = [startTime + listen, startTime + 2 * listen + 1].filter((t) => t < startTime + durationSeconds * 0.8);
     checks.forEach((at, i) => {
-      const timer = window.setTimeout(() => {
+      // Mix timers are dropped when the mix completes or is cancelled
+      this.mixCoordinator.addMixTimer((at - this.ctx.currentTime) * 1000, () => {
         const deck = incoming === 'A' ? this.deckA : this.deckB;
-        if (!this.isTransitioning || deck.getTrack()?.id !== trackId) return;
+        if (deck.getTrack()?.id !== trackId) return;
         const now = this.ctx.currentTime;
         const m = this.phaseLock.measure(Math.max(startTime + 0.3, now - listen), now, beatSec, incoming);
         if (!m || Math.abs(m.offsetSec) < PHASE_TOLERANCE_SECONDS) return;
         deck.nudge(m.offsetSec); // late beats: played a touch faster for a moment, early: slower
         if (i === 0) this.acquisitionStatus += ` Beats locked by ear (nudged ${Math.round(m.offsetSec * 1000)} ms).`;
         this.notify();
-      }, Math.max(0, (at - this.ctx.currentTime) * 1000));
-      this.phaseLockTimers.push(timer);
+      });
     });
   }
 
@@ -4661,35 +4559,8 @@ export class AudioEngine {
   }
 
   public setMasterVolume(vol: number) {
-    const clamped = Math.max(0, Math.min(1, vol));
-    this.masterVolume = clamped;
-    this.masterGain.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.02);
+    this.graph.setMasterVolume(vol);
     this.notify();
-  }
-
-  /**
-   * The last stage before the speakers. The limiter (a DynamicsCompressor) lets fast peaks through
-   * and adds its own make-up gain: in a 15-mix test, echo-out cuts peaked at 1.01–1.08 (clipping).
-   * This passes everything up to SAFETY_KNEE unchanged and rounds anything louder off smoothly
-   * so the output never exceeds SAFETY_CEILING. Inputs up to 2.0 are shaped (halved going in,
-   * since a WaveShaper's curve covers -1..1).
-   */
-  private createSafetyClipper(): [AudioNode, AudioNode] {
-    const pre = this.ctx.createGain();
-    pre.gain.value = 0.5;
-    const shaper = this.ctx.createWaveShaper();
-    const points = 4096;
-    const curve = new Float32Array(points);
-    const room = SAFETY_CEILING - SAFETY_KNEE;
-    for (let i = 0; i < points; i++) {
-      const x = 2 * ((2 * i) / (points - 1) - 1); // -2 … 2
-      const a = Math.abs(x);
-      curve[i] = Math.sign(x) * (a <= SAFETY_KNEE ? a : SAFETY_KNEE + room * Math.tanh((a - SAFETY_KNEE) / room));
-    }
-    shaper.curve = curve;
-    shaper.oversample = '2x';
-    pre.connect(shaper);
-    return [pre, shaper];
   }
 
   /**
@@ -4840,46 +4711,34 @@ export class AudioEngine {
       }
     }
 
-    this.isTransitioning = true;
-    this.transitionProgress = 0;
-
-    // Schedule the whole mix on the audio clock. requestAnimationFrame stops when the
-    // browser tab is hidden, which used to freeze mixes halfway with both songs playing.
-    const startCrossfader = this.crossfaderPosition;
-    const targetCrossfader = targetCrossfaderEnd;
-    const crossfaderAt = (progress: number) => {
-      const smooth = progress * progress * (3 - 2 * progress);
-      return startCrossfader + (targetCrossfader - startCrossfader) * smooth;
-    };
-
-    // Apply crossfader scheduling based on transition style
-    if (config.style === 'smooth_crossfade') {
-      // Over the whole mix unless a shorter fade is asked for (a 50 ms default stopped one song dead)
-      const xfadeSec = Math.min(config.xfadeSeconds ?? durationSeconds, durationSeconds);
-      // Cancel any previous schedules
-      this.crossfaderGainA.gain.cancelScheduledValues(this.ctx.currentTime);
-      this.crossfaderGainB.gain.cancelScheduledValues(this.ctx.currentTime);
-      // Start with fully A, fully B off
-      this.crossfaderGainA.gain.setValueAtTime(1, startTime);
-      this.crossfaderGainB.gain.setValueAtTime(0, startTime);
-      // Linear crossfade over xfadeSec
-      this.crossfaderGainA.gain.linearRampToValueAtTime(0, startTime + xfadeSec);
-      this.crossfaderGainB.gain.linearRampToValueAtTime(1, startTime + xfadeSec);
-      // Hold target gains for remainder of transition
-      this.crossfaderGainA.gain.setTargetAtTime(0, startTime + xfadeSec, 0.001);
-      this.crossfaderGainB.gain.setTargetAtTime(1, startTime + xfadeSec, 0.001);
-    } else {
-      const curvePoints = 64;
-      const curveA = new Float32Array(curvePoints);
-      const curveB = new Float32Array(curvePoints);
-      for (let i = 0; i < curvePoints; i++) {
-        [curveA[i], curveB[i]] = this.equalPowerGains(crossfaderAt(i / (curvePoints - 1)));
+    // The fade runs on the audio clock (MixCoordinator + AudioGraph). requestAnimationFrame stops
+    // when the browser tab is hidden, which used to freeze mixes halfway with both songs playing.
+    // smooth_crossfade: a straight fade over the whole mix unless a shorter one is asked for (a 50 ms
+    // default stopped one song dead). Everything else: the smooth equal-power curve.
+    this.mixCoordinator.begin(
+      {
+        sourceDeckId: config.sourceDeck,
+        targetDeckId: config.targetDeck,
+        targetTrack,
+        startTime,
+        durationSeconds,
+        linearFadeSeconds:
+          config.style === 'smooth_crossfade' ? Math.min(config.xfadeSeconds ?? durationSeconds, durationSeconds) : undefined,
+      },
+      {
+        onTick: (_progress, onAirDeck) => {
+          this.activeDeck = onAirDeck;
+          this.notify();
+        },
+        onComplete: (track, deckId) => {
+          this.activeDeck = deckId;
+          this.analyzeTrack(track);
+          this.recordSongPlay(track);
+          this.saveCurrentTrackToStorage();
+          this.notify();
+        },
       }
-      this.crossfaderGainA.gain.cancelScheduledValues(this.ctx.currentTime);
-      this.crossfaderGainB.gain.cancelScheduledValues(this.ctx.currentTime);
-      this.crossfaderGainA.gain.setValueCurveAtTime(curveA, startTime, durationSeconds);
-      this.crossfaderGainB.gain.setValueCurveAtTime(curveB, startTime, durationSeconds);
-    }
+    );
 
     // A cut between songs that can't be beatmatched (or the AI's chosen cut): the outgoing song
     // echoes out on its own beat instead of stopping dead
@@ -4929,66 +4788,57 @@ export class AudioEngine {
       this.schedulePhaseLock(startTime, durationSeconds, 60 / exactSourceBpm, config.targetDeck, targetTrack.id);
     }
 
-    this.transitionTimer = window.setInterval(() => {
-      const progress = Math.max(0, Math.min(1, (this.ctx.currentTime - startTime) / durationSeconds));
-      this.transitionProgress = progress;
-      this.crossfaderPosition = crossfaderAt(progress);
-      this.activeDeck = this.crossfaderPosition < 0 ? 'A' : 'B';
-      if (progress < 1) return;
-
-      window.clearInterval(this.transitionTimer!);
-      this.transitionTimer = null;
-      this.isTransitioning = false;
-      this.activeDeck = config.targetDeck;
-      this.applyCrossfader(targetCrossfader);
-      sourceDeck.pause();
-      sourceDeck.setEQ(0, 0, 0);
-      sourceDeck.resetFilterSweep();
-      targetDeck.setEQ(0, 0, 0);
-
-      // The new song is on air (the rhythm layer follows it by itself via rhythmClock)
-      this.analyzeTrack(targetTrack);
-      this.recordSongPlay(targetTrack);
-      this.saveCurrentTrackToStorage();
-      this.notify();
-    }, 100);
     this.notify();
   }
 
+  /** Stops a running mix where it is (manual fader grab, Previous, a new song forced on air). */
   public cancelTransition() {
-    if (this.transitionTimer !== null) {
-      window.clearInterval(this.transitionTimer);
-      this.transitionTimer = null;
-    }
-    if (this.isTransitioning) {
-      // Freeze the mix where it is instead of letting the scheduled automation finish
-      this.isTransitioning = false;
-      this.applyCrossfader(this.crossfaderPosition);
-      this.deckA.setEQ(0, 0, 0);
-      this.deckB.setEQ(0, 0, 0);
-      this.deckA.resetFilterSweep();
-      this.deckB.resetFilterSweep();
-    }
-    this.transitionProgress = 0;
+    this.mixCoordinator.cancel();
     this.notify();
   }
 
   /** The mix waiting for its blend point, for the UI (cheap: no queue or history copying). */
   public getPendingMixInfo(): PendingMixInfo | null {
     const startsIn = this.pendingMixStartsIn();
-    if (!this.pendingMix || startsIn === null) return null;
-    return {
+    if (!this.pendingMix || startsIn === null) {
+      this.cachedPendingMixInfo = null;
+      this.lastPendingMixStartsInCeil = null;
+      this.lastPendingMixItemId = null;
+      return null;
+    }
+
+    const startsInCeil = Math.ceil(Math.max(0, startsIn));
+    const itemId = this.pendingMix.item.id;
+
+    // Cache the PendingMixInfo object reference as long as the second and song haven't changed.
+    // This prevents React useSyncExternalStore from detecting a false mutation and entering an infinite render loop.
+    if (
+      this.cachedPendingMixInfo &&
+      this.lastPendingMixItemId === itemId &&
+      this.lastPendingMixStartsInCeil === startsInCeil &&
+      this.cachedPendingMixInfo.harmonicShift === this.pendingMix.harmonicShift &&
+      this.cachedPendingMixInfo.keyFit === this.pendingMix.keyFit
+    ) {
+      return this.cachedPendingMixInfo;
+    }
+
+    const info: PendingMixInfo = {
       id: this.pendingMix.item.id,
       title: this.pendingMix.item.title,
       artist: this.pendingMix.item.artist,
       thumbnail: this.pendingMix.item.thumbnail,
-      startsInSeconds: Math.max(0, startsIn),
+      startsInSeconds: startsInCeil,
       entryTime: this.pendingMix.plan.entryTime,
       reason: this.pendingMix.plan.reason,
       targetKey: this.pendingMix.item.key,
       keyFit: this.pendingMix.keyFit,
       harmonicShift: this.pendingMix.harmonicShift,
     };
+
+    this.cachedPendingMixInfo = info;
+    this.lastPendingMixItemId = itemId;
+    this.lastPendingMixStartsInCeil = startsInCeil;
+    return info;
   }
 
   /**
@@ -5381,8 +5231,16 @@ export class AudioEngine {
   }
 
   public notify() {
+    this.storeVersion++;
     if (this.onEngineUpdate) {
       this.onEngineUpdate();
+    }
+    for (const listener of this.storeListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error('Error in AudioEngine subscriber:', err);
+      }
     }
   }
 }

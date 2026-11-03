@@ -49,7 +49,18 @@ export function rowSignature(engine: AudioEngine, item: QueuedTrack, idx: number
   ].join('|');
 }
 
-export const UpNextQueueItem = React.memo(UpNextQueueItemRow);
+// sig covers what the song shows; its rank (#n), the key-match badge (curKey) and PLANNED ✓
+// (pendingMixId) come from the other props, so those must be compared too
+export const UpNextQueueItem = React.memo(
+  UpNextQueueItemRow,
+  (prev, next) =>
+    prev.sig === next.sig &&
+    prev.engine === next.engine &&
+    prev.item === next.item &&
+    prev.idx === next.idx &&
+    prev.curKey === next.curKey &&
+    prev.pendingMixId === next.pendingMixId
+);
 
 function UpNextQueueItemRow({ engine, item, idx, curKey, pendingMixId }: UpNextQueueItemProps) {
   // Mix works on any song that hasn't failed: a ready one mixes, others stream or load first

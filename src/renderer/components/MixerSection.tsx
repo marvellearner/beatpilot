@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AudioEngine } from '../../audio/AudioEngine';
+import { useEngineRefresh } from '../hooks/useEngineStore';
 import { Sliders, Zap, ArrowRightLeft, Volume2, Sparkles } from 'lucide-react';
 import { VuMeter } from './VuMeter';
 
@@ -8,6 +9,8 @@ interface MixerSectionProps {
 }
 
 export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
+  // Crossfader, mix progress and buttons read the engine: redraw as it changes
+  useEngineRefresh(engine);
   const [transitionDuration, setTransitionDuration] = useState<number>(8);
   const [transitionStyle, setTransitionStyle] = useState<'bass_swap' | 'smooth_crossfade'>('bass_swap');
 

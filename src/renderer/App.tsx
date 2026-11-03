@@ -11,6 +11,7 @@ import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
 import QRCode from 'qrcode';
 import { getCamelotDetails, getHarmonicCompatibility, shiftKey } from '../audio/KeyDetector';
+import { useEngineSystem, useEngineQueue } from './hooks/useEngineStore';
 import {
   Disc,
   Send,
@@ -33,9 +34,6 @@ import {
 
 // Phone updates: at most this often (the engine can change many times per frame during a mix)
 const SYNC_THROTTLE_MS = 150;
-// The page redraws at most 5 times a second (clock, progress, statuses); right after a click or key
-// press it redraws on the next frame. The meters and waveforms animate on their own.
-const RENDER_MIN_MS = 200;
 // The full state is resent at least this often, in case a change slipped past the signature
 const FULL_SYNC_EVERY_MS = 5000;
 
@@ -49,14 +47,26 @@ const formatAiModelDisplay = (name: string | null | undefined): string => {
 
 export const App: React.FC = () => {
   const engineRef = useRef<AudioEngine | null>(null);
+  if (!engineRef.current) {
+    engineRef.current = new AudioEngine();
+  }
+  const engine = engineRef.current;
+
   const agentRef = useRef<DJAgent | null>(null);
+  if (!agentRef.current) {
+    agentRef.current = engine.djAgent;
+  }
+  const agent = agentRef.current;
+
+  const system = useEngineSystem(engine);
+  const queueState = useEngineQueue(engine);
+
   const wsRef = useRef<WebSocket | null>(null);
   const isHostRef = useRef(false);
   const [hostRole, setHostRole] = useState<'host' | 'standby' | null>(null);
   const [remoteUrls, setRemoteUrls] = useState<string[]>([]);
   const [remoteQr, setRemoteQr] = useState<string | null>(null);
 
-  const [, setTick] = useState<number>(0);
   const [nlCommand, setNlCommand] = useState<string>('');
   const [isAiThinking, setIsAiThinking] = useState<boolean>(false);
   const [aiResult, setAiResult] = useState<AIResponseResult | null>(null);
@@ -68,17 +78,6 @@ export const App: React.FC = () => {
   const [consoleMode, setConsoleMode] = useState<'party' | 'pro'>('party');
   // The top bar's slot for the Party console's my_songs.txt buttons (set once it's on screen)
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
-
-  // Initialize AudioEngine & DJAgent
-  if (!engineRef.current) {
-    engineRef.current = new AudioEngine();
-  }
-  if (!agentRef.current) {
-    agentRef.current = engineRef.current.djAgent;
-  }
-
-  const engine = engineRef.current;
-  const agent = agentRef.current;
 
   // Execute Mobile Action on Host
   const handleMobileAction = useCallback(
@@ -289,32 +288,9 @@ export const App: React.FC = () => {
   }, [engine, sendFullSync]);
 
   useEffect(() => {
-    // Engine changes come in bursts (many per frame during a mix): re-render at most once per
-    // animation frame and at most every RENDER_MIN_MS, and update the phone at most every
-    // SYNC_THROTTLE_MS. While songs load the engine changes constantly, and the
-    // whole page redrawing 60 times a second kept the laptop busy. The first change after a quiet
-    // spell (a click) still shows on the next frame.
-    let frame = 0;
-    let renderTimer: number | undefined;
-    let lastRenderAt = 0;
+    // Phone sync: throttled broadcast without forcing React root re-renders.
+    // UI components subscribe independently to store slices via useSyncExternalStore.
     let syncTimer: number | undefined;
-    const render = () => {
-      if (frame || renderTimer !== undefined) return;
-      const draw = () => {
-        frame = requestAnimationFrame(() => {
-          frame = 0;
-          lastRenderAt = performance.now();
-          setTick((t) => t + 1);
-        });
-      };
-      const wait = RENDER_MIN_MS - (performance.now() - lastRenderAt);
-      if (wait <= 0) draw();
-      else
-        renderTimer = window.setTimeout(() => {
-          renderTimer = undefined;
-          draw();
-        }, wait);
-    };
     const sync = () => {
       if (syncTimer === undefined) {
         syncTimer = window.setTimeout(() => {
@@ -323,34 +299,22 @@ export const App: React.FC = () => {
         }, SYNC_THROTTLE_MS);
       }
     };
-    engine.onEngineUpdate = () => {
-      render();
-      sync();
-    };
-    // Whatever a click or key press changes shows on the next frame, not after the throttle
-    const userActed = () => {
-      lastRenderAt = 0;
-      if (renderTimer !== undefined) {
-        window.clearTimeout(renderTimer);
-        renderTimer = undefined;
-      }
-    };
-    window.addEventListener('pointerup', userActed, true);
-    window.addEventListener('keydown', userActed, true);
-    // Keeps the clock, progress bar and phone moving between engine changes
+
+    const unsubscribe = engine.subscribe(sync);
+
+    // Keep phone state synchronized during active playback
     const interval = setInterval(() => {
-      render();
-      sync();
+      if (engine.isAnyDeckPlaying()) {
+        sync();
+      }
     }, 250);
 
     return () => {
-      window.removeEventListener('pointerup', userActed, true);
-      window.removeEventListener('keydown', userActed, true);
+      unsubscribe();
       clearInterval(interval);
-      cancelAnimationFrame(frame);
-      window.clearTimeout(renderTimer);
-      window.clearTimeout(syncTimer);
-      engine.onEngineUpdate = undefined;
+      if (syncTimer !== undefined) {
+        window.clearTimeout(syncTimer);
+      }
     };
   }, [engine, broadcastSyncState]);
 
@@ -437,13 +401,13 @@ export const App: React.FC = () => {
         {/* Telemetry and Controls */}
         <div id="app-header-controls" className="flex flex-wrap items-center gap-2 min-[1800px]:gap-3">
           {/* What the AI chat was told to keep doing (remembered across reloads), and a way to drop it */}
-          {engine.hasAiInstructions && (
+          {system.hasAiInstructions && (
             <div
               id="app-ai-instructions"
               className="flex items-center gap-2 bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-xl pl-3 pr-1 py-1 text-xs"
             >
               <span className="text-fuchsia-100 truncate max-w-[140px] min-[1800px]:max-w-[220px]" title="Remembered from the AI chat, also after a reload">
-                🤖 {engine.describeAiInstructions().join(' · ')}
+                🤖 {system.aiInstructionsText}
               </span>
               <button
                 id="app-clear-ai-instructions"
@@ -504,21 +468,21 @@ export const App: React.FC = () => {
           {/* AI DJ (Ollama) status: real health check, refreshed every minute */}
           <div id="app-ai-status"
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono border ${
-              engine.aiStatus === 'online'
+              system.aiStatus === 'online'
                 ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
                 : 'bg-white/5 text-slate-400 border-white/10'
             }`}
             title={
-              engine.aiStatus === 'online'
-                ? `AI DJ chooses mix points and song order.${engine.lastAiDecision ? ` Last: ${engine.lastAiDecision}` : ''}`
+              system.aiStatus === 'online'
+                ? `AI DJ chooses mix points and song order.${system.lastAiDecision ? ` Last: ${system.lastAiDecision}` : ''}`
                 : 'Ollama is not running: mixing uses the built-in rules. Start Ollama to enable AI DJ decisions.'
             }
           >
-            <Cpu className={`w-3.5 h-3.5 ${engine.aiStatus === 'online' ? 'text-purple-400' : 'text-slate-500'}`} />
+            <Cpu className={`w-3.5 h-3.5 ${system.aiStatus === 'online' ? 'text-purple-400' : 'text-slate-500'}`} />
             <span className="hidden min-[1800px]:inline">
-              {engine.aiStatus === 'online'
+              {system.aiStatus === 'online'
                 ? '🤖 AI DJ online'
-                : engine.aiStatus === 'checking'
+                : system.aiStatus === 'checking'
                   ? 'Checking AI DJ…'
                   : 'AI DJ offline (rule-based)'}
             </span>
@@ -527,7 +491,7 @@ export const App: React.FC = () => {
           {/* One light per AI backend: green = answering, red = not available, grey = not set up */}
           <div id="app-ai-backends" className="flex items-center gap-2.5 bg-black/40 px-3 py-1.5 rounded-xl border border-white/10 text-xs font-mono text-slate-300">
             {(() => {
-              const b = engine.aiBackends;
+              const b = system.aiBackends;
               const lights = [
                 {
                   id: 'ollama',
@@ -588,7 +552,7 @@ export const App: React.FC = () => {
       )}
 
       {/* iPhone Remote Modal */}
-      <MixToast notice={engine.mixNotice} />
+      <MixToast notice={system.mixNotice} />
 
       {showRemoteModal && (
         <div id="app-remote-modal" className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
@@ -715,10 +679,6 @@ export const App: React.FC = () => {
         const proCurKey = proCurTrack?.key
           ? (engine.keyLock ? proCurTrack.key : shiftKey(proCurTrack.key, activeDeckInstance.getPlaybackState().playbackRate))
           : undefined;
-        const totalQueueDurationSec = engine.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
-        const totalQueueHours = Math.floor(totalQueueDurationSec / 3600);
-        const totalQueueMins = Math.round((totalQueueDurationSec % 3600) / 60);
-        const queueDurationStr = totalQueueHours > 0 ? `${totalQueueHours}h ${totalQueueMins}m` : `${totalQueueMins}m`;
 
         return (
           <section id="app-pro-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-3 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
@@ -733,17 +693,17 @@ export const App: React.FC = () => {
                       AI UPCOMING QUEUE
                     </h3>
                     <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                      {engine.queue.length} TRACKS
+                      {queueState.queueLength} TRACKS
                     </span>
                   </div>
                   <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5 pt-0.5">
-                    <span className="text-emerald-400 font-bold">{engine.queue.filter(q => q.status === 'ready').length} ready</span>
+                    <span className="text-emerald-400 font-bold">{queueState.readyCount} ready</span>
                     <span>•</span>
-                    <span className="text-amber-300 font-medium">~{queueDurationStr} continuous party flow</span>
-                    {engine.diskCacheCount > 0 && (
+                    <span className="text-amber-300 font-medium">~{queueState.queueDurationStr} continuous party flow</span>
+                    {queueState.diskCacheCount > 0 && (
                       <>
                         <span>•</span>
-                        <span className="text-cyan-400">💾 {engine.diskCacheCount} on disk</span>
+                        <span className="text-cyan-400">💾 {queueState.diskCacheCount} on disk</span>
                       </>
                     )}
                   </div>
@@ -751,7 +711,7 @@ export const App: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                {engine.queue.length > 1 && (
+                {queueState.queueLength > 1 && (
                   <button
                     id="app-pro-sort-harmonic-btn"
                     onClick={() => engine.sortQueueHarmonically()}
@@ -783,7 +743,7 @@ export const App: React.FC = () => {
 
             {/* Queue Cards Grid */}
             <div id="app-pro-queue-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-3 pt-1 max-h-[520px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10">
-              {engine.queue.map((item, idx) => {
+              {queueState.queue.map((item, idx) => {
                 const keyDetails = item.key ? getCamelotDetails(item.key) : null;
                 const compat = proCurKey && item.key ? getHarmonicCompatibility(proCurKey, item.key) : null;
                 const colorClass = compat
