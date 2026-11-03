@@ -4,6 +4,12 @@ import path from 'path';
 import { IncomingMessage, ServerResponse } from 'http';
 import { ROOT_DIR } from './paths';
 import { parseJsonBody } from './http';
+import {
+  checkGeminiDailyBudget,
+  recordGeminiUsage,
+  getGeminiDailyUsage,
+  getMsUntilMidnight,
+} from './geminiUsage';
 
 export const OLLAMA_URL = 'http://localhost:11434';
 export const DEFAULT_OLLAMA_MODEL = 'qwen2.5:1.5b';
@@ -153,6 +159,16 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
   const cfg = getGeminiConfig();
   if (!cfg) throw new Error('GEMINI_API_KEY not configured');
 
+  // Hard Cap Budget Guard: Prevent exceeding the user's daily budget (e.g. ₹100 INR/day)
+  const budget = checkGeminiDailyBudget();
+  if (!budget.allowed) {
+    geminiBlock = {
+      until: Date.now() + getMsUntilMidnight(),
+      error: budget.reason || 'Daily budget cap reached',
+    };
+    throw new Error(budget.reason);
+  }
+
   const modelsToTry = [cfg.model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash'].filter(
     (m, i, arr) => arr.indexOf(m) === i
   );
@@ -196,12 +212,30 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
         throw new Error(`Gemini (${model}) HTTP ${resp.status}: ${errorText.slice(0, 200)}`);
       }
 
-      const data = (await resp.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      const data = (await resp.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+      };
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) {
         throw new Error('Gemini returned empty response candidate');
       }
       geminiBlock = null; // it answers again
+
+      // Track token usage & update daily spend
+      const usageMeta = data.usageMetadata;
+      const inTokens = usageMeta?.promptTokenCount || Math.ceil(prompt.length / 4);
+      const outTokens = usageMeta?.candidatesTokenCount || Math.ceil(text.length / 4);
+      const updatedUsage = recordGeminiUsage(inTokens, outTokens, model);
+
+      if (updatedUsage.estimatedSpendInr >= updatedUsage.dailyLimitInr) {
+        geminiBlock = {
+          until: Date.now() + getMsUntilMidnight(),
+          error: `Daily limit of ₹${updatedUsage.dailyLimitInr.toFixed(0)} reached (spent ₹${updatedUsage.estimatedSpendInr.toFixed(2)} today)`,
+        };
+        console.warn(`[Gemini Budget Guard] Daily limit of ₹${updatedUsage.dailyLimitInr} INR reached (spent ₹${updatedUsage.estimatedSpendInr.toFixed(2)}). Cloud requests paused until midnight.`);
+      }
+
       return text;
     } catch (err: unknown) {
       lastError = err as Error;
@@ -280,6 +314,7 @@ export async function handleLlmHealth(_req: IncomingMessage, res: ServerResponse
         online: geminiOnline,
         model: geminiCfg?.model || null,
         error: held ? `${held.error}; tried again after ${new Date(held.until).toLocaleTimeString()}` : (gemini?.error ?? null),
+        budget: getGeminiDailyUsage(),
       },
       ollama: {
         online: ollamaOnline,

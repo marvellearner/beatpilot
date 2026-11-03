@@ -5,7 +5,6 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { logError } from './logger';
 
 /** Reads a JSON array; a missing file is an empty list, an unreadable one is backed up first. */
 export function readJsonArray<T>(file: string): T[] {
