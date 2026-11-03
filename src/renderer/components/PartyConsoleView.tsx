@@ -6,11 +6,12 @@ import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { MoodEqPanel } from './MoodEqPanel';
 import { TempoControl } from './TempoControl';
 import { PreviouslyPlayedPanel } from './PreviouslyPlayedPanel';
+import { SyncedVideoPlayer } from './SyncedVideoPlayer';
 import { PLAY_LOG_MAX } from '../../audio/engine/SongLibrary';
 import { getCamelotDetails, shiftKey } from '../../audio/KeyDetector';
 import { isStrictStartSong } from '../../audio/songMatch';
 import { VuMeter } from './VuMeter';
-import { UpNextQueueItem } from './UpNextQueueItem';
+import { UpNextQueueItem, rowSignature } from './UpNextQueueItem';
 import { SearchResult } from '../../types';
 import {
   Play,
@@ -38,6 +39,8 @@ import {
   Loader2,
   Target,
   RefreshCw,
+  Video,
+  VideoOff,
 } from 'lucide-react';
 
 interface PartyConsoleViewProps {
@@ -159,6 +162,26 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const [videoEnabled, setVideoEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('ai_dj_video_enabled') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleVideo = useCallback(() => {
+    setVideoEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('ai_dj_video_enabled', next ? '1' : '0');
+      } catch {
+        // Storage unavailable
+      }
+      return next;
+    });
   }, []);
 
   const activeDeck = engine.activeDeck === 'A' ? engine.deckA : engine.deckB;
@@ -573,7 +596,15 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                   </div>
                 ) : (
                   engine.queue.filter(item => item.id !== currentTrack?.id).map((item, idx) => (
-                    <UpNextQueueItem key={item.id} engine={engine} item={item} idx={idx} curKey={curKey} pendingMixId={pendingMix?.id} />
+                    <UpNextQueueItem
+                      key={item.id}
+                      engine={engine}
+                      item={item}
+                      idx={idx}
+                      curKey={curKey}
+                      pendingMixId={pendingMix?.id}
+                      sig={rowSignature(engine, item, idx)}
+                    />
                   ))
                 )}
               </div>
@@ -604,6 +635,10 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   const historyEntries = useMemo(() => engine.playLog.slice(0, PLAY_LOG_MAX), [engine, engine.playLog.length, playLogTop]);
   const mixFromHistory = useCallback(
     (entry: { url?: string; artist: string; title: string }) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, true),
+    [engine]
+  );
+  const queueFromHistory = useCallback(
+    (entry: { url?: string; artist: string; title: string }) => engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false, 'front'),
     [engine]
   );
 
@@ -878,7 +913,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
   const rightColumn = (
     <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
       {queuePanel}
-      <PreviouslyPlayedPanel entries={historyEntries} onMix={mixFromHistory} />
+      <PreviouslyPlayedPanel entries={historyEntries} onMix={mixFromHistory} onQueue={queueFromHistory} />
       {bangersPanel}
     </div>
   );
@@ -992,9 +1027,9 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
             )}
             <button
               type="button"
-              onClick={() => engine.cancelPendingMix()}
+              onClick={() => engine.skipPlannedSong()}
               className="px-2.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white font-semibold text-xs border border-white/10 transition-colors active:scale-95 cursor-pointer"
-              title="Cancel lined up mix"
+              title="Not this song next: it moves down Up Next and the next song is lined up instead"
             >
               Cancel
             </button>
@@ -1063,43 +1098,82 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
                   </span>
                 )}
               </div>
-              <span
-                id="party-console-deck-status"
-                className={`flex items-center gap-1.5 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full border ${deckStatus.className}`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${deckStatus.dotClassName}`} />
-                {deckStatus.label}
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  id="party-console-video-toggle"
+                  type="button"
+                  onClick={toggleVideo}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider border transition-all ${
+                    videoEnabled
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-sm'
+                      : 'bg-white/5 text-slate-400 border-white/10 hover:text-white'
+                  }`}
+                  title={
+                    videoEnabled
+                      ? 'Video Display ON (click to turn off and save bandwidth)'
+                      : 'Video Display OFF (click to stream music video synced to deck)'
+                  }
+                >
+                  {videoEnabled ? <Video className="w-3 h-3 text-rose-400" /> : <VideoOff className="w-3 h-3 text-slate-400" />}
+                  <span>VIDEO {videoEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+                <span
+                  id="party-console-deck-status"
+                  className={`flex items-center gap-1.5 text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full border ${deckStatus.className}`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${deckStatus.dotClassName}`} />
+                  {deckStatus.label}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col gap-4 p-4">
+              {/* Optional Synced Live Video Stream (zero download: streamed via YouTube CDN only when enabled) */}
+              {videoEnabled && (
+                <SyncedVideoPlayer
+                  track={currentTrack}
+                  currentTime={playbackState.currentTime}
+                  isPlaying={playbackState.isPlaying}
+                  playbackRate={playbackState.playbackRate}
+                  videoEnabled={videoEnabled}
+                  onToggleVideo={toggleVideo}
+                  onTogglePlay={() => engine.togglePlayCurrent()}
+                  incomingTrack={engine.isTransitioning ? (engine.activeDeck === 'A' ? engine.deckB.getTrack() : engine.deckA.getTrack()) : null}
+                  isTransitioning={engine.isTransitioning}
+                  transitionProgress={engine.transitionProgress}
+                  className="mb-1"
+                />
+              )}
+
               {/* Hero: artwork, title/artist/chips, VU meter */}
               <div id="party-console-track-info" className="flex items-center gap-4">
-                {/* Artwork with a vinyl edge that spins while playing */}
-                <div id="party-console-vinyl" className="relative shrink-0 w-28 h-28 sm:w-32 sm:h-32 mr-4">
-                  <div
-                    className={`absolute inset-y-1 -right-4 aspect-square rounded-full bg-[radial-gradient(circle,#1e293b_0%,#0b1120_45%,#020617_46%,#111827_60%,#020617_61%,#0f172a_100%)] border border-white/10 shadow-lg ${
-                      isPlaying ? 'animate-spin [animation-duration:6s]' : ''
-                    }`}
-                    aria-hidden="true"
-                  />
-                  <div
-                    id="party-console-center-label-art"
-                    className={`relative w-full h-full rounded-xl overflow-hidden border shadow-2xl bg-gradient-to-br from-slate-800 to-slate-950 group transition-all duration-300 ${
-                      currentTrack && engine.isFavorite(currentTrack)
-                        ? 'border-rose-500/50 ring-2 ring-rose-500/30 shadow-[0_0_25px_rgba(244,63,94,0.35)]'
-                        : 'border-white/10'
-                    }`}
-                  >
-                    {currentTrack?.thumbnail ? (
-                      <img src={currentTrack.thumbnail} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <Disc3 className="w-10 h-10 text-slate-600" />
-                      </div>
-                    )}
+                {!videoEnabled && (
+                  /* Artwork with a vinyl edge that spins while playing */
+                  <div id="party-console-vinyl" className="relative shrink-0 w-28 h-28 sm:w-32 sm:h-32 mr-4">
+                    <div
+                      className={`absolute inset-y-1 -right-4 aspect-square rounded-full bg-[radial-gradient(circle,#1e293b_0%,#0b1120_45%,#020617_46%,#111827_60%,#020617_61%,#0f172a_100%)] border border-white/10 shadow-lg ${
+                        isPlaying ? 'animate-spin [animation-duration:6s]' : ''
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <div
+                      id="party-console-center-label-art"
+                      className={`relative w-full h-full rounded-xl overflow-hidden border shadow-2xl bg-gradient-to-br from-slate-800 to-slate-950 group transition-all duration-300 ${
+                        currentTrack && engine.isFavorite(currentTrack)
+                          ? 'border-rose-500/50 ring-2 ring-rose-500/30 shadow-[0_0_25px_rgba(244,63,94,0.35)]'
+                          : 'border-white/10'
+                      }`}
+                    >
+                      {currentTrack?.thumbnail ? (
+                        <img src={currentTrack.thumbnail} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <Disc3 className="w-10 h-10 text-slate-600" />
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="min-w-0 flex-1 flex flex-col gap-1.5">
                   <div className="flex items-start justify-between gap-3">

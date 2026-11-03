@@ -67,6 +67,13 @@ const NO_REPEAT_WINDOW_MS = 60 * 60 * 1000;
 const REPLAY_GAP_MS = 3 * 60 * 60 * 1000;
 // Following the listener's mood: at least this many songs like the ones they just chose, from
 // their last MOOD_RUN_SONGS choices made within MOOD_RUN_MS of each other
+// Cancel on a lined-up mix: that song isn't picked automatically for SKIP_MS, and moves down Up Next
+// Soft pair: two songs without a steady beat (acoustic ballads), or one without and one slow
+// (≤ SOFT_MAX_BPM), can't flam, so they cross in a long gentle fade, not the 4–9 s quick one
+const SOFT_MAX_BPM = 100;
+const SOFT_FADE_SECONDS: Record<MoodId, number> = { romantic: 20, chill: 20, normal: 16, party: 10, bhangra: 10 };
+const SKIP_MS = 20 * 60_000;
+const SKIP_TO_POSITION = 5;
 const MOOD_PICKS = 6;
 const MOOD_RUN_SONGS = 3;
 const MOOD_RUN_MS = 45 * 60 * 1000;
@@ -260,9 +267,13 @@ export class AudioEngine {
   })();
   // Where the song on air came in (song seconds), for the Best Parts play limit
   private playStart: { trackId: string; pos: number } | null = null;
+  // When the listener cancels proposed next songs near/at the Best Parts limit, allow current song to play beyond the limit
+  public extendedBestPartsTrackId: string | null = null;
   // The songs the listener chose lately, newest first: their type is followed (readMoodAndPushTop5)
   private chosenRun: Array<{ title: string; artist: string; url?: string; at: number }> = [];
   private moodToken = 0;
+  // Songs the listener cancelled as the next mix (Cancel): automatic mixes pass over them until then
+  private skippedUntil = new Map<string, number>();
   // Songs put in Up Next to follow the listener's type: when one plays, more of that type follow
   private moodPickUrls = new Set<string>();
   private isFetchingRecommendations: boolean = false;
@@ -881,12 +892,16 @@ export class AudioEngine {
       const effectiveBpm = isFolkHalf ? (track.aiDanceBpm ?? natural / 2) : natural;
       const ratio = this.closestTempoRatio(effectiveBpm, this.sessionBpm);
       // In Party mood: NEVER decrease BPM of original song unless it is a half-time/folk exception!
-      if (this.mood === 'party' && ratio < 1.0 && !isFolkHalf) {
-        return 1.0;
+      const slowsDown = this.mood === 'party' && ratio < 1.0 && !isFolkHalf;
+      // A song at or above the set tempo keeps its own. A slower one whose closest match is half
+      // the set tempo (Vibe: 88 BPM "matches" 62, not 124) isn't kept at its own slow tempo: it
+      // gets the Party lift below (it used to be left at 88 on air while the queue tuned it to 95)
+      if (slowsDown && natural >= this.sessionBpm) return 1.0;
+      if (!slowsDown) {
+        if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return ratio;
+        // A set tempo the user locked: as close as the ±16% limit allows
+        if (this.mood !== 'party') return Math.max(BPM_LIMITS.MIN_RATIO, Math.min(BPM_LIMITS.MAX_RATIO, ratio));
       }
-      if (Math.abs(ratio - 1) <= BPM_LIMITS.MAX_PERMITTED_PCT) return ratio;
-      // A set tempo the user locked: as close as the ±16% limit allows
-      if (this.mood !== 'party') return Math.max(BPM_LIMITS.MIN_RATIO, Math.min(BPM_LIMITS.MAX_RATIO, ratio));
     }
     const lifted = this.partyLiftBpm(natural);
     return lifted === null ? null : lifted / natural;
@@ -1086,6 +1101,10 @@ export class AudioEngine {
       item.status = 'ready';
       this.isTuningTempo = false;
       this.notify();
+      if (this.mixLoadingId === item.id) {
+        this.mixLoadingId = null;
+        this.mixQueuedTrack(item.id, undefined, true);
+      }
     }
   }
 
@@ -1132,7 +1151,7 @@ export class AudioEngine {
 
     // 1. Outro Auto-Mix: in the last stretch, plan the best blend point into the next ready song.
     // Only mix when a queued song is ready; otherwise keep the current song going.
-    const nextReady = this.queue.find((q) => q.status === 'ready');
+    const nextReady = this.queue.find((q) => q.status === 'ready' && !this.isSkipped(q));
     if (nextReady && !nextReady.audioBuffer) {
       // Re-hydrate the upcoming track's buffer from local disk in ~30ms before mixing
       void this.ensureTrackBuffer(nextReady);
@@ -1148,6 +1167,7 @@ export class AudioEngine {
       curState.duration > 60 &&
       !this.isTransitioning &&
       !this.choosingNextSong &&
+      !this.mixLoadingId &&
       remaining <= OUTRO_PLAN_SECONDS &&
       nextReady &&
       nextReady.audioBuffer
@@ -1157,6 +1177,7 @@ export class AudioEngine {
       curState.isPlaying &&
       curState.duration > 60 &&
       !this.isTransitioning &&
+      !this.mixLoadingId &&
       this.aiStatus === 'online' &&
       remaining <= OUTRO_PLAN_SECONDS + AI_PREP_LEAD_SECONDS &&
       remaining > OUTRO_PLAN_SECONDS + 5 &&
@@ -1219,9 +1240,19 @@ export class AudioEngine {
     const startsIn = this.pendingMixStartsIn();
     const holdSteady = startsIn !== null && startsIn < PLAN_STABLE_SECONDS;
     if (!this.isTransitioning && curState.isPlaying && canAutoAdjust && !holdSteady) {
-      const targetRate =
+      let targetRate =
         this.pendingMix && curTrack ? this.preMixRampRate(curTrack, this.pendingMix.item) : 1;
       const rate = curState.playbackRate;
+      // In Party mood: never drop tempo or glide down to a slower original speed mid-song!
+      // If the song entered at a higher matched tempo (e.g. 95 BPM for a 90 BPM track),
+      // maintain the dancefloor momentum instead of dragging down to original speed.
+      if (this.mood === 'party' && !this.playOriginal) {
+        if (!this.pendingMix) {
+          targetRate = Math.max(rate, 1);
+        } else if (targetRate < rate) {
+          targetRate = rate;
+        }
+      }
       if (Math.abs(targetRate - rate) > 0.0005) {
         const step = Math.min(PITCH_RETURN_PER_SECOND, Math.abs(targetRate - rate));
         curDeck.setPlaybackRate(rate + Math.sign(targetRate - rate) * step, true);
@@ -1302,7 +1333,7 @@ export class AudioEngine {
    * hook isn't known yet, or the window would run into the song's own outro (then it plays out).
    */
   private bestPartExitWindow(track: TrackMetadata): { from: number; to: number } | null {
-    if (!this.bestPartsMode || track.highlightTime === undefined || !track.bpm || track.duration < BEST_PART_MIN_SONG_SECONDS) return null;
+    if (!this.bestPartsMode || this.extendedBestPartsTrackId === track.id || track.highlightTime === undefined || !track.bpm || track.duration < BEST_PART_MIN_SONG_SECONDS) return null;
     const bar = 240 / track.bpm;
     const bestPart = Math.max(track.highlightTime, track.peakTime ?? track.highlightTime);
     const from = bestPart + BEST_PART_HOOK_BARS * bar;
@@ -1332,6 +1363,9 @@ export class AudioEngine {
    * passed without a song ready, the next 16 bars.
    */
   private mixOutWindow(track: TrackMetadata, position: number): { endsAt: number; earliestExit?: number; latestExit?: number } {
+    if (this.extendedBestPartsTrackId === track.id || this.mixLoadingId) {
+      return { endsAt: this.musicEnd(track) };
+    }
     const best = this.bestPartExitWindow(track);
     const win: { endsAt: number; earliestExit?: number } = !best
       ? { endsAt: this.musicEnd(track) }
@@ -1353,7 +1387,7 @@ export class AudioEngine {
    * bestPartsMaxSeconds after it came in. Undefined when the mode is off or the song is short.
    */
   private playLimitEnd(track: TrackMetadata, position: number): number | undefined {
-    if (!this.bestPartsMode || isStrictStartSong(track) || !track.duration || track.duration < BEST_PART_MIN_SONG_SECONDS) return undefined;
+    if (!this.bestPartsMode || this.extendedBestPartsTrackId === track.id || isStrictStartSong(track) || !track.duration || track.duration < BEST_PART_MIN_SONG_SECONDS) return undefined;
     // First seen on air without a recorded entry (first song, reload): count from here
     if (this.playStart?.trackId !== track.id) this.playStart = { trackId: track.id, pos: position };
     return this.playStart.pos + this.bestPartsMaxSeconds;
@@ -1412,7 +1446,8 @@ export class AudioEngine {
     // 16 bars with the bands handed over one at a time, planned with room for all 16
     const blendable = !!outTrack && this.canBeatmatch(outTrack, incoming);
     const showcase = blendable && !durationSeconds && keyFit !== 'clash' && this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
-    const blendBeats = showcase ? SHOWCASE_BARS * 4 : blendable ? maxBars * 4 : 8;
+    const softFade = outTrack && !blendable ? this.softPairFadeSeconds(outTrack, incoming) : 0;
+    const blendBeats = showcase ? SHOWCASE_BARS * 4 : blendable ? maxBars * 4 : softFade ? Math.round((softFade * outState.effectiveBpm) / 60) : 8;
     const plan =
       outTrack && outInfo && incInfo
         ? planMix({
@@ -1489,7 +1524,7 @@ export class AudioEngine {
    * planOutroMix and planMixInto then apply the answers at once instead of waiting for the model.
    */
   private async prepareAiForOutro(current: TrackMetadata) {
-    const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer).slice(0, 3);
+    const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer && !this.isSkipped(q)).slice(0, 3);
     const prep: AiOutroPrep = { trackId: current.id, candidateIds: ready.map((q) => q.id) };
     this.aiOutroPrep = prep;
     if (ready.length === 0) return;
@@ -1516,7 +1551,8 @@ export class AudioEngine {
     if (!outInfo || !incInfo) return;
 
     const canBlend = this.canBeatmatch(outTrack, incoming);
-    const blendBeats = canBlend ? this.blendBars() * 4 : 4;
+    const softFade = canBlend ? 0 : this.softPairFadeSeconds(outTrack, incoming);
+    const blendBeats = canBlend ? this.blendBars() * 4 : softFade ? Math.round((softFade * state.effectiveBpm) / 60) : 4;
     const mixOut = this.mixOutWindow(outTrack, state.currentTime);
     const plan = planMix({
       out: outInfo,
@@ -1750,8 +1786,15 @@ export class AudioEngine {
    * queue order is used.
    */
   private async planOutroMix(current: TrackMetadata) {
-    const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer).slice(0, 3);
-    if (ready.length === 0) return;
+    const ready = this.queue.filter((q) => q.status === 'ready' && q.audioBuffer && !this.isSkipped(q)).slice(0, 3);
+    if (ready.length === 0) {
+      if (this.bestPartsMode && this.extendedBestPartsTrackId !== current.id) {
+        this.extendedBestPartsTrackId = current.id;
+        this.acquisitionStatus = `No ready next songs: letting "${current.title}" play beyond ${this.formatPlayLimit()}!`;
+        this.notify();
+      }
+      return;
+    }
     let choice = this.keyFriendlyChoice(current, ready);
 
     const prep = this.aiOutroPrep;
@@ -1814,9 +1857,11 @@ export class AudioEngine {
     // Tempos that can't be beatmatched: fade over a low part (verse, breakdown, intro, outro) when
     // either song is in one at the mix point, instead of an abrupt cut (MIXING_RULES.md "Low-part fade")
     // (STRICT: with no pause in the old song this replaces every cut, the AI's and the vocal-clash one too)
+    // Two songs without a steady beat (ballads): a long gentle fade instead (softPairFadeSeconds)
+    const softFade = !gapCut && durationSeconds === undefined && outTrack ? this.softPairFadeSeconds(outTrack, this.queuedItemToTrack(pending.item)) : 0;
     const lowFade =
       !gapCut && durationSeconds === undefined && outTrack && !this.canBeatmatch(outTrack, this.queuedItemToTrack(pending.item))
-        ? this.lowFadeSeconds(pending.plan, onAir.getPlaybackState().effectiveBpm)
+        ? softFade || this.lowFadeSeconds(pending.plan, onAir.getPlaybackState().effectiveBpm)
         : 0;
     let exitFx = gapCut || !outTrack ? undefined : this.chooseExitFx(outTrack, this.queuedItemToTrack(pending.item), quickCut);
     if (lowFade) exitFx = this.mood === 'chill' || this.mood === 'romantic' ? 'reverb' : undefined;
@@ -1826,7 +1871,7 @@ export class AudioEngine {
     const showcase: TransitionConfig['showcase'] =
       pending.showcase && !quickCut && !gapCut && exitFx !== 'roll'
         ? 'eq_blend'
-        : showDue && lowFade && lowParts(pending.plan).exit && lowParts(pending.plan).entry
+        : showDue && lowFade && !softFade && lowParts(pending.plan).exit && lowParts(pending.plan).entry
           ? 'wash'
           : undefined;
     if (showcase) exitFx = undefined;
@@ -1862,18 +1907,67 @@ export class AudioEngine {
       gapCut,
       exitFx,
     });
-    if (vocalCut) {
+    if (softFade && lowFade === softFade) {
+      this.acquisitionStatus = `Slow ${Math.round(softFade)} s fade into "${pending.item.title}": soft songs without a steady beat cross gently (no beat to clash).`;
+      this.notify();
+    } else if (vocalCut) {
       this.acquisitionStatus += ' Both songs sing here, so a short blend instead of a long one.';
       this.notify();
     }
   }
 
   /** Drops a planned mix and puts its song back at the front of the queue. */
+  /**
+   * Cancel on a lined-up mix (laptop or phone): not this song next. It moves down Up Next and
+   * automatic mixes pass over it for SKIP_MS; the next ready song is lined up instead when it's
+   * time. Cancel used to put it straight back on top, so the next auto-mix planned the very same
+   * song again (cancelling twice in 10 s, it still played). Its own Mix button still plays it.
+   */
+  public skipPlannedSong() {
+    const pending = this.pendingMix;
+    if (!pending) {
+      this.cancelPendingMix();
+      return;
+    }
+    window.clearTimeout(pending.timer);
+    this.pendingMix = null;
+    this.mixLoadingId = null;
+    this.aiOutroPrep = null; // the AI's answer was about this song
+    const item = pending.item;
+    this.skippedUntil.set(item.id, Date.now() + SKIP_MS);
+    this.queue = this.queue.filter((q) => q.id !== item.id);
+    this.queue.splice(Math.min(SKIP_TO_POSITION, this.queue.length), 0, item);
+    this.saveQueueToStorage();
+    const next = this.queue.find((q) => q.status === 'ready' && !this.isSkipped(q));
+    const onAir = this.onAirDeck().getTrack();
+    if (this.bestPartsMode && !next && onAir) {
+      this.extendedBestPartsTrackId = onAir.id;
+      this.acquisitionStatus = `Skipped "${item.title}". All proposed next songs cancelled: letting "${onAir.title}" play beyond ${this.formatPlayLimit()}!`;
+    } else {
+      this.acquisitionStatus = `Skipped "${item.title}" for now${next ? `: "${next.title}" will be mixed in next` : ''}. Its Mix button in Up Next still plays it.`;
+    }
+    this.notify();
+  }
+
+  /** Whether the listener cancelled this song as the next mix in the last SKIP_MS. */
+  private isSkipped(item: { id: string }): boolean {
+    const until = this.skippedUntil.get(item.id);
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    this.skippedUntil.delete(item.id);
+    return false;
+  }
+
   public cancelPendingMix(status: string = 'Planned mix cancelled.') {
     if (this.mixLoadingId) {
       this.mixLoadingId = null;
     }
     if (!this.pendingMix) {
+      const onAir = this.onAirDeck().getTrack();
+      const next = this.queue.find((q) => q.status === 'ready' && !this.isSkipped(q));
+      if (this.bestPartsMode && !next && onAir) {
+        this.extendedBestPartsTrackId = onAir.id;
+      }
       this.acquisitionStatus = status;
       this.notify();
       return;
@@ -1881,6 +1975,11 @@ export class AudioEngine {
     window.clearTimeout(this.pendingMix.timer);
     this.queue.unshift(this.pendingMix.item);
     this.pendingMix = null;
+    const onAir = this.onAirDeck().getTrack();
+    const next = this.queue.find((q) => q.status === 'ready' && !this.isSkipped(q));
+    if (this.bestPartsMode && !next && onAir) {
+      this.extendedBestPartsTrackId = onAir.id;
+    }
     this.acquisitionStatus = status;
     this.notify();
   }
@@ -2485,7 +2584,8 @@ export class AudioEngine {
       this.queue,
       (item) =>
         // RULE: If any song is in previously played, same name song should NOT be there in up next queue!
-        this.playedRecently(item) ||
+        // User requested songs (source === 'request') are always allowed.
+        (!isChosen(item) && this.playedRecently(item)) ||
         this.isDontPlayAgain(item) ||
         // "Play only <artist>" (remembered across reloads): automatic picks must be theirs
         (!isChosen(item) && !this.allowedByFocus(item)) ||
@@ -2540,9 +2640,13 @@ export class AudioEngine {
           .then((r) => (r.ok ? r.json() : { songs: [] }))
           .then((j) => (j.songs ?? []) as Array<{ title: string; author: string; url: string; duration: number; thumbnail?: string; why: string }>)
           .catch(() => []),
-        this.djAgent
-          .readMoodAndRecommendTop5({ title: track.title, artist: track.artist, bpm: track.bpm, taste: tasteForPrompt(this.tasteProfile()), before: run.slice(1) })
-          .catch(() => null),
+        // Song ideas from the AI only when Gemini answers: the local model on this CPU takes ~40 s
+        // for them (timing out, competing with playback) and doesn't know the songs well
+        this.aiBackends?.gemini.online
+          ? this.djAgent
+              .readMoodAndRecommendTop5({ title: track.title, artist: track.artist, bpm: track.bpm, taste: tasteForPrompt(this.tasteProfile()), before: run.slice(1) })
+              .catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (token !== this.moodToken) return; // a newer choice is being read
 
@@ -3774,7 +3878,8 @@ export class AudioEngine {
       this.executePendingMix(true);
       return true;
     }
-    const item = this.queue.find((q) => q.status === 'ready' && q.audioBuffer);
+    // The Mix button passes over a song just cancelled (unless nothing else is ready)
+    const item = this.queue.find((q) => q.status === 'ready' && q.audioBuffer && !this.isSkipped(q)) ?? this.queue.find((q) => q.status === 'ready' && q.audioBuffer);
     if (!item && !this.isAnyDeckPlaying()) {
       const first = this.queue.find((q) => q.status !== 'failed' && this.canStream(q));
       if (first) return this.mixQueuedTrack(first.id);
@@ -3795,6 +3900,7 @@ export class AudioEngine {
    * blend point within the next 45 s per MIXING_RULES.md; asking again for the same song mixes immediately.
    */
   public mixQueuedTrack(itemId: string, durationSeconds?: number, fromLoad = false): boolean {
+    this.skippedUntil.delete(itemId); // chosen on purpose: no longer skipped
     // A double click is one click: the second must not turn a planned mix into an instant one
     if (!fromLoad) {
       const last = this.lastMixClick;
@@ -3814,7 +3920,16 @@ export class AudioEngine {
         this.executePendingMix(true);
         return true;
       }
-      this.cancelPendingMix(); // a different song was chosen: plan that one instead
+      // A different song was chosen: overwrite the planned song!
+      // The old planned song should NOT be played; cancel its mix and mark it skipped.
+      const oldMix = this.pendingMix;
+      window.clearTimeout(oldMix.timer);
+      this.pendingMix = null;
+      this.aiOutroPrep = null;
+      this.skippedUntil.set(oldMix.item.id, Date.now() + SKIP_MS);
+      this.queue = this.queue.filter((q) => q.id !== oldMix.item.id);
+      this.queue.splice(Math.min(SKIP_TO_POSITION, this.queue.length), 0, oldMix.item);
+      this.saveQueueToStorage();
     }
 
     const item = this.queue.find((q) => q.id === itemId);
@@ -3837,21 +3952,24 @@ export class AudioEngine {
       }
       // A song is on air: a beatmatched mix needs the new song's full audio, so load it first
       this.mixLoadingId = itemId;
-      this.noticeMix(`Loading "${item.title}" — it mixes in as soon as it's ready.`);
+      this.noticeMix(`Loading "${item.title}" — waiting for it to load, align, and transition.`);
       void this.ensureTrackBuffer(item).then((buf) => {
-        if (this.mixLoadingId === itemId) this.mixLoadingId = null;
+        if (this.mixLoadingId !== itemId) return; // superseded by another mix!
+        this.mixLoadingId = null;
         if (buf) this.mixQueuedTrack(itemId, durationSeconds, true);
         else this.noticeMix(`Couldn't load "${item.title}". Try another song.`);
       });
       return true;
     }
     if (item.status === 'tuning') {
+      this.mixLoadingId = itemId;
       this.noticeMix(`"${item.title}" is being tuned to the party tempo — ready in a second.`);
       return false;
     }
     if (this.onAirDeck().getPlaybackState().isPlaying) {
       const ok = this.planMixInto(itemId, MANUAL_MIX_LOOKAHEAD_SECONDS, durationSeconds);
-      const startsIn = this.pendingMix?.item.id === itemId ? this.pendingMixStartsIn() : null;
+      const pending = (this as unknown as { pendingMix: { item: QueuedTrack } | null }).pendingMix;
+      const startsIn = pending?.item.id === itemId ? this.pendingMixStartsIn() : null;
       this.noticeMix(
         startsIn !== null
           ? `Mix planned: "${item.title}" comes in at the best point in ${Math.max(1, Math.round(startsIn))} s. Click Mix again to mix now.`
@@ -3954,6 +4072,7 @@ export class AudioEngine {
       const startPos = isStrict ? 0 : (track.musicStartTime && track.musicStartTime > 0 ? track.musicStartTime : 0);
       targetDeck.play(startPos);
       this.playStart = { trackId: track.id, pos: startPos };
+      this.extendedBestPartsTrackId = null;
       this.recordSongPlay(track);
       this.saveCurrentTrackToStorage();
       this.notify();
@@ -4141,6 +4260,16 @@ export class AudioEngine {
     // If playing/mixing immediately, check if the current first song in Up Next was avoided
     if (autoMix) {
       this.checkTopSongAvoidance({ title: queryOrUrl, url: queryOrUrl });
+      if (this.pendingMix && !this.isTransitioning) {
+        const oldMix = this.pendingMix;
+        window.clearTimeout(oldMix.timer);
+        this.pendingMix = null;
+        this.aiOutroPrep = null;
+        this.skippedUntil.set(oldMix.item.id, Date.now() + SKIP_MS);
+        this.queue = this.queue.filter((q) => q.id !== oldMix.item.id);
+        this.queue.splice(Math.min(SKIP_TO_POSITION, this.queue.length), 0, oldMix.item);
+        this.saveQueueToStorage();
+      }
     }
 
     const addToQueue = (item: QueuedTrack) => {
@@ -4187,7 +4316,12 @@ export class AudioEngine {
       this.saveQueueToStorage();
 
       if (autoMix) {
-        this.startQueuedMixNow(queuedItem);
+        if (this.mixLoadingId === queuedItem.id) this.mixLoadingId = null;
+        if (this.onAirDeck().getPlaybackState().isPlaying) {
+          this.mixQueuedTrack(queuedItem.id);
+        } else {
+          this.startQueuedMixNow(queuedItem);
+        }
         this.acquisitionStatus = `Playing "${cached.metadata.title}"!`;
       }
       if (source === 'request' && (autoMix || readMoodOnPlay || !this.isAnyDeckPlaying())) {
@@ -4208,6 +4342,10 @@ export class AudioEngine {
       status: 'downloading',
       source,
     };
+
+    if (autoMix) {
+      this.mixLoadingId = queuedItem.id;
+    }
 
     addToQueue(queuedItem);
     this.saveQueueToStorage();
@@ -4280,13 +4418,21 @@ export class AudioEngine {
         this.saveQueueToStorage();
         if (autoMix) {
           this.acquisitionStatus = `Playing "${existing.title}" from queue!`;
-          if (existing.status === 'ready' && existing.audioBuffer) {
+          if (this.onAirDeck().getPlaybackState().isPlaying) {
+            this.mixQueuedTrack(existing.id);
+          } else if (existing.status === 'ready' && existing.audioBuffer) {
             this.startQueuedMixNow(existing);
           } else {
             this.queue.splice(existingResolvedIndex, 1);
             this.queue.unshift(existing);
+            this.mixLoadingId = existing.id;
             void this.ensureTrackBuffer(existing).then((buf) => {
-              if (buf) this.startQueuedMixNow(existing);
+              if (this.mixLoadingId !== existing.id) return;
+              this.mixLoadingId = null;
+              if (buf) {
+                if (this.onAirDeck().getPlaybackState().isPlaying) this.mixQueuedTrack(existing.id);
+                else this.startQueuedMixNow(existing);
+              }
             });
           }
           this.notify();
@@ -4394,9 +4540,14 @@ export class AudioEngine {
         { buffer: audioBuffer, metadata: trackMetadata }
       );
 
-      // If autoMix requested: transition immediately into set!
+      if (this.mixLoadingId === queuedItem.id) this.mixLoadingId = null;
+      // If autoMix requested: align and transition into set!
       if (autoMix) {
-        this.startQueuedMixNow(queuedItem);
+        if (this.onAirDeck().getPlaybackState().isPlaying) {
+          this.mixQueuedTrack(queuedItem.id);
+        } else {
+          this.startQueuedMixNow(queuedItem);
+        }
         this.acquisitionStatus = `Playing "${match.title}"!`;
       }
       if (source === 'request' && (autoMix || readMoodOnPlay || !this.isAnyDeckPlaying())) {
@@ -4406,6 +4557,7 @@ export class AudioEngine {
       this.notify();
       return queuedItem;
     } catch (err) {
+      if (this.mixLoadingId === queuedItem.id) this.mixLoadingId = null;
       console.error('Audio acquisition failed:', err);
       this.acquisitionStatus = `Couldn't get "${queuedItem.title}": ${err instanceof Error ? err.message : String(err)}`;
       this.markFailed(queuedItem);
@@ -4545,6 +4697,20 @@ export class AudioEngine {
    * in a low part at the mix point, 2 when one is, 0 (no fade: a quick cut) when neither is.
    * Unsynced beats overlap only where at least one side is quiet, so they don't clash.
    */
+  /**
+   * A soft pair (MIXING_RULES.md "Soft pair"): both songs without a steady beat (acoustic ballads
+   * such as Jo Tum Mere Ho into Khat, whose tempo readings are meaningless), or one without and
+   * the other slow (≤ SOFT_MAX_BPM). Nothing can flam, so they cross in a long gentle fade
+   * (SOFT_FADE_SECONDS for the mood) instead of the 4–9 s fade meant for two drum tracks. Two
+   * songs with clear beats never get this: a long unsynced overlap of drums would flam. 0 otherwise.
+   */
+  private softPairFadeSeconds(out: TrackMetadata, inc: { bpm?: number; bpmConfidence?: number }): number {
+    const beatless = (t: { bpmConfidence?: number }) => (t.bpmConfidence ?? 0) < MIN_BEATMATCH_CONFIDENCE;
+    const slow = (t: { bpm?: number; bpmConfidence?: number }) => !beatless(t) && (t.bpm ?? 999) <= SOFT_MAX_BPM;
+    const soft = (beatless(out) && (beatless(inc) || slow(inc))) || (beatless(inc) && slow(out));
+    return soft ? SOFT_FADE_SECONDS[this.mood] : 0;
+  }
+
   private lowFadeSeconds(plan: MixPlan, outBpm: number): number {
     const low = lowParts(plan);
     const bars = low.exit && low.entry ? 4 : low.exit || low.entry ? 2 : 0;
@@ -4606,7 +4772,10 @@ export class AudioEngine {
       this.acquisitionStatus = `Quick cut on the beat at natural pitch (${sourceBpm} → ${targetTrack.bpm} BPM).`;
     } else if (match.matched) {
       const shift = (match.rate - 1) * 100;
-      this.acquisitionStatus = `Beatmatched mix at ${sourceBpm} BPM (${shift >= 0 ? '+' : ''}${shift.toFixed(1)}% tempo on the new song, gliding back to normal after).`;
+      const statusSuffix = this.mood === 'party' && !this.playOriginal && match.rate >= 1
+        ? 'holding tempo for party energy'
+        : 'gliding back to normal after';
+      this.acquisitionStatus = `Beatmatched mix at ${sourceBpm} BPM (${shift >= 0 ? '+' : ''}${shift.toFixed(1)}% tempo on the new song, ${statusSuffix}).`;
     } else if (sourceState.isPlaying && config.lowFade) {
       this.acquisitionStatus = `${this.cutReason(sourceBpm, sourceConfidence, targetTrack)} — fading over the low part at natural pitch (${Math.round(durationSeconds)} s).`;
     } else if (sourceState.isPlaying) {
@@ -4665,7 +4834,10 @@ export class AudioEngine {
         else appliedFx = 'echo';
       }
       targetDeck.play(cuePoint, startTime);
-      if (targetTrack) this.playStart = { trackId: targetTrack.id, pos: cuePoint }; // the Best Parts limit counts from here
+      if (targetTrack) {
+        this.playStart = { trackId: targetTrack.id, pos: cuePoint }; // the Best Parts limit counts from here
+        this.extendedBestPartsTrackId = null;
+      }
     }
 
     this.isTransitioning = true;
@@ -5035,7 +5207,7 @@ export class AudioEngine {
     }
 
     // 2. Find the first ready track in the queue with a decoded buffer
-    const nextReady = this.queue.find((q) => q.status === 'ready' && q.audioBuffer);
+    const nextReady = this.queue.find((q) => q.status === 'ready' && q.audioBuffer && !this.isSkipped(q)) ?? this.queue.find((q) => q.status === 'ready' && q.audioBuffer);
     if (nextReady) {
       this.acquisitionStatus = `Disliked song skipped — cutting immediately to "${nextReady.title}"!`;
       this.startQueuedMixNow(nextReady, 0.3, 'drop_cut');
@@ -5158,6 +5330,7 @@ export class AudioEngine {
   /** Best Parts mode for a dancing crowd: each song plays its build-up and hook, then mixes out. Remembered. */
   public toggleBestParts() {
     this.bestPartsMode = !this.bestPartsMode;
+    this.extendedBestPartsTrackId = null;
     try {
       window.localStorage.setItem(BEST_PARTS_KEY, this.bestPartsMode ? '1' : '0');
     } catch {

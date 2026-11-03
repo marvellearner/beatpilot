@@ -16,24 +16,62 @@ export const OLLAMA_KEEP_ALIVE = '30m';
  * With a JSON schema the answer is constrained to it (e.g. one value from an enum), which a
  * small model needs for reliable classification; such answers also use temperature 0.
  */
+// The CPU by default. The GTX 1050 works with driver 582.78 and generates 3x faster (23 vs 7
+// tokens/s), but on this laptop Ollama re-checks the GPU on requests: ~6 s before each answer, and
+// some requests hang or fail ("GPU discovery watchdog timed out"). A short decision took 0.4 s on
+// the CPU and 6.8 s on the GPU, and this app only sends short ones (long song ideas go to Gemini).
+// OLLAMA_GPU=1 in .env turns the GPU on; after GPU_FAILURES_TO_CPU failures in a row the CPU is
+// then used for GPU_RETRY_AFTER_MS. Ollama not running at all ("fetch failed") isn't counted.
+const gpuWanted = envFlag('OLLAMA_GPU');
+let ollamaCpuUntil = 0;
+let ollamaGpuFailures = 0;
+const GPU_FAILURES_TO_CPU = 2;
+const GPU_RETRY_AFTER_MS = 15 * 60_000;
+// 99 = every layer on the GPU (it fits: 1.1 of 3 GB); 0 = CPU only
+export const ollamaNumGpu = () => (gpuWanted && Date.now() >= ollamaCpuUntil ? 99 : 0);
+
+/** A yes/no setting from the environment or the project's .env (Vite doesn't put .env in process.env). */
+function envFlag(name: string): boolean {
+  let value = process.env[name];
+  if (value === undefined) {
+    try {
+      value = fs.readFileSync(path.join(ROOT_DIR, '.env'), 'utf-8').match(new RegExp(`^\\s*${name}\\s*=\\s*([^\\r\\n#]+)`, 'm'))?.[1];
+    } catch {
+      // no .env
+    }
+  }
+  return /^(1|true|yes|on)$/i.test((value ?? '').trim());
+}
+
 export async function ollamaGenerate(prompt: string, maxTokens: number, timeoutMs: number, schema?: object, modelOverride?: string): Promise<string> {
   const modelToUse = modelOverride || OLLAMA_MODEL;
-  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: modelToUse,
-      prompt,
-      stream: false,
-      format: schema ?? 'json',
-      keep_alive: OLLAMA_KEEP_ALIVE,
-      options: { num_gpu: 0, temperature: schema ? 0 : 0.2, num_predict: maxTokens, num_ctx: 2048 },
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!resp.ok) throw new Error(`Ollama HTTP ${resp.status}`);
-  const data = (await resp.json()) as { response?: string };
-  return data.response ?? '';
+  try {
+    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelToUse,
+        prompt,
+        stream: false,
+        format: schema ?? 'json',
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        options: { num_gpu: ollamaNumGpu(), temperature: schema ? 0 : 0.2, num_predict: maxTokens, num_ctx: 2048 },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!resp.ok) throw new Error(`Ollama HTTP ${resp.status}`);
+    const data = (await resp.json()) as { response?: string };
+    ollamaGpuFailures = 0;
+    return data.response ?? '';
+  } catch (err) {
+    const notRunning = /fetch failed|ECONNREFUSED/i.test(`${(err as Error)?.message} ${String((err as { cause?: unknown })?.cause ?? '')}`);
+    if (!notRunning && ollamaNumGpu() > 0 && ++ollamaGpuFailures >= GPU_FAILURES_TO_CPU) {
+      ollamaCpuUntil = Date.now() + GPU_RETRY_AFTER_MS;
+      ollamaGpuFailures = 0;
+      console.warn(`Ollama on the GPU failed ${GPU_FAILURES_TO_CPU} times in a row (${(err as Error)?.message}): using the CPU for ${GPU_RETRY_AFTER_MS / 60_000} min, then the GPU again.`);
+    }
+    throw err;
+  }
 }
 
 export let ollamaWarmed = false;
@@ -209,7 +247,8 @@ export async function handleLlmHealth(_req: IncomingMessage, res: ServerResponse
       ollamaWarmed = true;
       fetch(`${OLLAMA_URL}/api/generate`, {
         method: 'POST',
-        body: JSON.stringify({ model: OLLAMA_MODEL, keep_alive: OLLAMA_KEEP_ALIVE }),
+        // Loaded where requests will run (a different GPU setting would load it a second time)
+        body: JSON.stringify({ model: OLLAMA_MODEL, keep_alive: OLLAMA_KEEP_ALIVE, options: { num_gpu: ollamaNumGpu() } }),
       }).catch(() => {
         ollamaWarmed = false;
       });
@@ -262,9 +301,12 @@ export async function handleLlm(req: IncomingMessage, res: ServerResponse, _url:
 
     // 1. First preference: Local Ollama (Qwen 2.5 1.5B / configured model)
     try {
-      // If Gemini is available as backup, cap Ollama at 12s so it fails over quickly instead of hanging.
-      // With qwen2.5:1.5b on CPU, completions typically take 2-5s.
-      const ollamaTimeout = geminiCfg ? Math.min(12_000, timeoutMs) : timeoutMs;
+      // With Gemini usable as backup, Ollama gets 12 s so a slow answer fails over quickly. Without
+      // it (not set up, or held back after a quota error) there's nothing to fail over to: cutting
+      // Ollama off then only wasted its work (every long answer "timed out" while Gemini was out of
+      // quota). qwen2.5:1.5b on CPU: short answers 2-8 s, ~7 tokens/s for long ones.
+      const geminiUsable = Boolean(geminiCfg) && !geminiBlocked();
+      const ollamaTimeout = geminiUsable ? Math.min(12_000, timeoutMs) : timeoutMs;
       const schema = body?.schema && typeof body.schema === 'object' ? body.schema : undefined;
       const response = await ollamaGenerate(String(body?.prompt ?? ''), maxTokens, ollamaTimeout, schema);
       res.end(
@@ -277,9 +319,12 @@ export async function handleLlm(req: IncomingMessage, res: ServerResponse, _url:
       );
       return;
     } catch (ollamaErr) {
+      const timedOut = /timeout|aborted/i.test((ollamaErr as Error)?.message ?? '');
       console.warn(
-        'Ollama (1st preference) failed or offline, falling back to 2nd preference (Gemini):',
-        (ollamaErr as Error)?.message || ollamaErr
+        timedOut
+          ? `Ollama (1st preference) was still answering after ${Math.round((Date.now() - started) / 1000)} s (${maxTokens}-token answer on CPU), trying Gemini`
+          : 'Ollama (1st preference) failed or offline, falling back to 2nd preference (Gemini):',
+        timedOut ? '' : (ollamaErr as Error)?.message || ollamaErr
       );
     }
 

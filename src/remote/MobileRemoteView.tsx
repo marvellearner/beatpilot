@@ -248,6 +248,12 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
       sendMixRef.current({ type: 'CMD_MIX_NOW', query: entry.url || `${entry.artist} ${entry.title}` }, entry.title),
     []
   );
+  const queuePreviouslyPlayed = useCallback(
+    (entry: { url?: string; artist: string; title: string }) => {
+      onSendAction({ type: 'CMD_ADD_QUEUE', query: entry.url || `${entry.artist} ${entry.title}` });
+    },
+    [onSendAction]
+  );
   // The Up Next list (often 1,000+ elements) is rebuilt only when the queue, the key of the song on
   // air or the mixing state change, not on every live update (time, tempo…) a few times a second:
   // redrawing it each time kept a phone busy and made the sliders crawl.
@@ -1036,11 +1042,79 @@ syncState.queue.length === 0 ? (
         )}
       </div>
 
+      {/* Up Next (right below search, above Previously Played) */}
+      {(() => {
+        const totalQueueSec = syncState.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
+        const totalQueueH = Math.floor(totalQueueSec / 3600);
+        const totalQueueM = Math.round((totalQueueSec % 3600) / 60);
+        const queueDurationStr = totalQueueH > 0 ? `${totalQueueH}h ${totalQueueM}m` : `${totalQueueM}m`;
+
+        return (
+          <div id="remote-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
+            <div id="remote-queue-header" className="flex items-center justify-between pb-2 border-b border-white/10">
+              <div id="remote-queue-title-group" className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center">
+                  <ListMusic className="w-3.5 h-3.5 text-cyan-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-extrabold text-xs text-white uppercase tracking-wider">
+                      UP NEXT QUEUE
+                    </span>
+                    <span className="font-mono text-[9px] font-bold px-1.5 py-0.2 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                      {syncState.queue.length}
+                    </span>
+                  </div>
+                  <div className="text-[9px] font-mono text-slate-400 flex items-center gap-1 pt-0.5">
+                    <span className="text-emerald-400 font-bold">{readyCount} ready</span>
+                    <span>•</span>
+                    <span className="text-amber-300 font-medium">~{queueDurationStr}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {syncState.queue.length > 1 && (
+                  <button
+                    id="remote-sort-harmonic-btn"
+                    onClick={() => onSendAction({ type: 'CMD_SORT_QUEUE_HARMONICALLY' })}
+                    className="flex items-center gap-1 whitespace-nowrap text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
+                    title="Sort by key: reorder Up Next so each song's key fits the next (no clashes)"
+                  >
+                    <Sparkles className="w-2.5 h-2.5 text-purple-300 animate-pulse" />
+                    <span>Sort</span>
+                  </button>
+                )}
+                <button
+                  id="remote-refresh-queue-btn"
+                  onClick={() => onSendAction({ type: 'CMD_REFRESH_QUEUE' })}
+                  className="flex items-center gap-1 text-[10px] font-mono font-bold text-cyan-200 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all"
+                  title="Refresh Up Next: keeps songs you added and the next 3"
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            {queueList}
+
+            {syncState.queue.length > 0 && (
+              <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 pt-1.5 border-t border-white/10 px-1">
+                <span className="text-slate-300 font-bold">{syncState.queue.length} songs (~{queueDurationStr})</span>
+                <span className="text-cyan-400">AI auto-curating</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Previously played songs (newest first) */}
       <PreviouslyPlayedPanel
         compact
         entries={syncState.recentlyPlayed ?? []}
         onMix={mixPreviouslyPlayed}
+        onQueue={queuePreviouslyPlayed}
       />
 
       {/* Favourites & Most Played: one card, two tabs */}
@@ -1119,73 +1193,6 @@ syncState.queue.length === 0 ? (
                 ))
               )}
             </div>
-          </div>
-        );
-      })()}
-
-      {/* Autonomous 50-Song Upcoming Queue */}
-      {(() => {
-        const totalQueueSec = syncState.queue.reduce((acc, q) => acc + (q.duration || 210), 0);
-        const totalQueueH = Math.floor(totalQueueSec / 3600);
-        const totalQueueM = Math.round((totalQueueSec % 3600) / 60);
-        const queueDurationStr = totalQueueH > 0 ? `${totalQueueH}h ${totalQueueM}m` : `${totalQueueM}m`;
-
-        return (
-          <div id="remote-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
-            <div id="remote-queue-header" className="flex items-center justify-between pb-2 border-b border-white/10">
-              <div id="remote-queue-title-group" className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center">
-                  <ListMusic className="w-3.5 h-3.5 text-cyan-400" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-extrabold text-xs text-white uppercase tracking-wider">
-                      UP NEXT QUEUE
-                    </span>
-                    <span className="font-mono text-[9px] font-bold px-1.5 py-0.2 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                      {syncState.queue.length}
-                    </span>
-                  </div>
-                  <div className="text-[9px] font-mono text-slate-400 flex items-center gap-1 pt-0.5">
-                    <span className="text-emerald-400 font-bold">{readyCount} ready</span>
-                    <span>•</span>
-                    <span className="text-amber-300 font-medium">~{queueDurationStr}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                {syncState.queue.length > 1 && (
-                  <button
-                    id="remote-sort-harmonic-btn"
-                    onClick={() => onSendAction({ type: 'CMD_SORT_QUEUE_HARMONICALLY' })}
-                    className="flex items-center gap-1 whitespace-nowrap text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
-                    title="Sort by key: reorder Up Next so each song's key fits the next (no clashes)"
-                  >
-                    <Sparkles className="w-2.5 h-2.5 text-purple-300 animate-pulse" />
-                    <span>Sort</span>
-                  </button>
-                )}
-                <button
-                  id="remote-refresh-queue-btn"
-                  onClick={() => onSendAction({ type: 'CMD_REFRESH_QUEUE' })}
-                  className="flex items-center gap-1 text-[10px] font-mono font-bold text-cyan-200 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all"
-                  title="Refresh Up Next: keeps songs you added and the next 3"
-                >
-                  <RefreshCw className="w-2.5 h-2.5" />
-                  <span>Refresh</span>
-                </button>
-              </div>
-            </div>
-
-            {queueList}
-
-            {syncState.queue.length > 0 && (
-              <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 pt-1.5 border-t border-white/10 px-1">
-                <span className="text-slate-300 font-bold">{syncState.queue.length} songs (~{queueDurationStr})</span>
-                <span className="text-cyan-400">AI auto-curating</span>
-              </div>
-            )}
           </div>
         );
       })()}

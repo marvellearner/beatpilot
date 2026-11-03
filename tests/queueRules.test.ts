@@ -39,6 +39,17 @@ describe('dedupeQueue', () => {
     const kept = dedupeQueue(q, (item) => item.duration > 300);
     expect(kept.map((t) => t.id)).toEqual(['a', 'c', 'e']);
   });
+
+  it('allows user requested songs (source: request) to stay in queue', () => {
+    const q = [
+      track('a', 'Lover', { source: 'request' }),
+      track('b', 'Softly', { source: 'playlist' }),
+    ];
+    // Rule drops previously played songs unless requested by user
+    const playedRecently = (item: QueuedTrack) => item.title === 'Lover' || item.title === 'Softly';
+    const kept = dedupeQueue(q, (item) => item.source !== 'request' && playedRecently(item));
+    expect(kept.map((t) => t.id)).toEqual(['a']);
+  });
 });
 
 describe('mixFamiliarAndNew', () => {

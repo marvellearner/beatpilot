@@ -1,11 +1,12 @@
 import React from 'react';
-import { History, Music, Zap } from 'lucide-react';
+import { History, Music, Plus, Zap } from 'lucide-react';
 import { PlayLogEntry } from '../../types';
 import { areSongsConsecutivelySame, songKeys, isSameSong } from '../../audio/songMatch';
 
 interface PreviouslyPlayedPanelProps {
   entries: PlayLogEntry[]; // newest first
   onMix: (entry: PlayLogEntry) => void; // play it now, or mix into it if a song is on air
+  onQueue?: (entry: PlayLogEntry) => void; // add to Up Next queue
   compact?: boolean;
 }
 
@@ -23,7 +24,7 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
 }
 
 /** Songs that played recently, newest first. Songs from the last 3 hours won't be auto-queued again. */
-const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, compact }) => {
+const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, onQueue, compact }) => {
   const now = Date.now();
 
   // RULE: In previously played no 2 consecutive songs can be same
@@ -96,14 +97,30 @@ const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entri
                     </span>
                   </div>
                 </div>
-                <button
-                  onClick={() => onMix(entry)}
-                  className="shrink-0 flex items-center gap-1 text-[9px] font-bold text-cyan-300 hover:text-black bg-cyan-500/15 hover:bg-cyan-400 border border-cyan-500/30 px-1.5 py-0.5 rounded transition-colors"
-                  title={recent ? 'Played within the last 3 hours — mix into it anyway' : 'Mix into this song now'}
-                >
-                  <Zap className="w-3 h-3" />
-                  Mix
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {onQueue && (
+                    <button
+                      id={`previously-played-queue-${entry.id}-${entry.playedAt}`}
+                      type="button"
+                      onClick={() => onQueue(entry)}
+                      className="shrink-0 flex items-center gap-1 text-[9px] font-bold text-slate-300 hover:text-white bg-white/5 hover:bg-white/15 border border-white/10 px-1.5 py-0.5 rounded transition-colors"
+                      title={recent ? 'Played within the last 3 hours — add to Up Next anyway' : 'Add to Up Next queue'}
+                    >
+                      <Plus className="w-3 h-3" />
+                      Queue
+                    </button>
+                  )}
+                  <button
+                    id={`previously-played-mix-${entry.id}-${entry.playedAt}`}
+                    type="button"
+                    onClick={() => onMix(entry)}
+                    className="shrink-0 flex items-center gap-1 text-[9px] font-bold text-cyan-300 hover:text-black bg-cyan-500/15 hover:bg-cyan-400 border border-cyan-500/30 px-1.5 py-0.5 rounded transition-colors"
+                    title={recent ? 'Played within the last 3 hours — mix into it anyway' : 'Mix into this song now'}
+                  >
+                    <Zap className="w-3 h-3" />
+                    Mix
+                  </button>
+                </div>
               </div>
             );
           })}

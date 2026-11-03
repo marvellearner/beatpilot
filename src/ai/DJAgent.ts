@@ -221,7 +221,7 @@ ${ctx.exitOptions.map((o, i) => `${i + 1}) in ${Math.round(o.inSeconds)}s at ${f
 WHERE THE NEXT SONG STARTS:
 ${ctx.entryOptions.map((o, i) => `${i + 1}) at ${formatTime(o.at)}: ${o.why}`).join('\n')}
 STYLE: ${ctx.canBlend ? '"blend" (beatmatched overlap of 4, 8 or 16 bars) or "cut" (instant switch on the beat)' : 'tempos are too far apart, so style must be "cut"'}.
-DJ RULES: never start from the hook because buildup is essential; incoming songs must start from their intro/buildup; don't throw away a chorus or hook on the outgoing song; prefer mixing out where the current song calms down; short mixes for vocal-heavy Desi songs; long smooth blends for chill moods; high energy for parties. In party mood, never decrease the BPM of the original song.
+DJ RULES: never start from the hook because buildup is essential; incoming songs must start from their intro/buildup; don't throw away a chorus or hook on the outgoing song; prefer mixing out where the current song calms down or its high part just ended; when the current song hits its lowest part/breakdown, mix out AT that low point and NEVER wait for it to start rising or building back towards high again; short mixes for vocal-heavy Desi songs; long smooth blends for chill moods; high energy for parties. In party mood, never decrease the BPM of the original song.
 Reply ONLY with JSON: {"exit": <number>, "entry": <number>, "style": "blend"|"cut", "bars": 4|8|16, "reason": "<max 12 words>"}`;
 
     const res = await this.askJson(prompt, 60, 12_000);

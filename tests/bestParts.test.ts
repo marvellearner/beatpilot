@@ -40,4 +40,17 @@ describe('planMix in Best Parts mode', () => {
     expect(plan.exitTime).toBeGreaterThan(150);
     expect(plan.exitTime).toBeLessThanOrEqual(180);
   });
+
+  it('allows playing beyond 1:30 (90s) when Best Parts limit is waived after cancelling next songs', () => {
+    // When cancelled, latestExit is no longer clamped to 90s (1:30).
+    // The song is allowed to play into later bars (e.g. 140s+) towards full duration.
+    const plan = planMix({ ...base, out: song(), inc: song(), outPosition: 140, lookAheadSeconds: 30 })!;
+    expect(plan.exitTime).toBeGreaterThan(140);
+  });
+
+  it('restricts exit to 90s when Best Parts limit is active and not waived', () => {
+    // With latestExit clamped at 90s, the exit must not exceed 90s
+    const plan = planMix({ ...base, out: song(), inc: song(), outPosition: 70, lookAheadSeconds: 30, latestExit: 90 })!;
+    expect(plan.exitTime).toBeLessThanOrEqual(90);
+  });
 });

@@ -21,7 +21,13 @@ This guide covers the host hardware, how to run the local LLM, the audio memory 
 
 ---
 
-## 2. Local LLM: CPU-Only Ollama (`qwen2.5:1.5b`)
+## 2. Local LLM: Ollama (`qwen2.5:1.5b`) on the GPU, CPU as fall-back
+
+**Update (Nov 2026): the GTX 1050 (GPU 1) works with NVIDIA driver 582.78.** `qwen2.5:1.5b` loads fully on it (1.1 of 3 GB) and generates at 23 tokens/s (CPU: 7). Through the app, short decisions answer in **0.6–1.0 s** once loaded (first load ~5 s). Turn it on with `OLLAMA_GPU=1` in `.env` (on in this laptop's `.env`); without it the CPU is used (`ollamaNumGpu` in `server/llm.ts`). If GPU requests fail twice in a row the CPU is used for 15 min, then the GPU again; Ollama not running doesn't count.
+
+Caveats seen while setting it up: right after the driver install, and again after a long session, Ollama's GPU check hung ("GPU discovery watchdog timed out"), making requests take 6–8 s or hang until Ollama was restarted; a fresh Ollama start fixed it. If that comes back, set `OLLAMA_GPU=0`, or hide the card from Ollama with the user environment variable `CUDA_VISIBLE_DEVICES=-1` and restart Ollama. With the old driver (566.36) the GPU runner crashed ("PTX compiled with an unsupported toolchain"). Ollama doesn't start by itself after a restart on this laptop: open the Ollama app first.
+
+The CPU notes below still apply to the fall-back.
 
 ### 2.1 Why `qwen2.5:1.5b` on CPU
 Loading `qwen2.5:3b` on the GTX 1050 crashed with `0xe06d7363` (CUDA out of memory), and on CPU under real workload it took 30s+ per answer (triggering hundreds of timeouts).

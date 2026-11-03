@@ -108,6 +108,14 @@ describe('high parts', () => {
     expect(result.exitTime).toBeLessThan(140);
     expect(lowParts(result).exit).toBe(true);
   });
+
+  it('exits at the drop into a low breakdown and does not wait for energy to rise again', () => {
+    // High part ends at 160s (drops to low 0.4), then starts rising at 168s (up to 1.0)
+    const breakdownThenRise = (t: number) => (t >= 140 && t < 160 ? 1.2 : t >= 160 && t < 168 ? 0.4 : 1.0);
+    const result = mixAt(song(breakdownThenRise), 150, 16);
+    expect(result.exitTime).toBeCloseTo(160, 1);
+    expect(result.exitTime).toBeLessThan(168);
+  });
 });
 
 describe('Best Parts play limit', () => {

@@ -16,9 +16,42 @@ interface UpNextQueueItemProps {
   idx: number; // position in the queue, 0 = on deck
   curKey?: string; // the on-air song's key as heard (after any tempo shift)
   pendingMixId?: string; // the song a planned mix is waiting to bring in
+  /** Everything the row shows, as one string (from rowSignature): the row redraws only when it changes */
+  sig: string;
 }
 
-export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, idx, curKey, pendingMixId }) => {
+/**
+ * The engine changes queue items in place, so React can't tell an edited song from an unchanged one.
+ * This string covers everything a row shows; the list passes it so the up-to-50 rows skip redrawing
+ * when nothing about them changed (the full list redrawing several times a second made Chrome lag).
+ */
+export function rowSignature(engine: AudioEngine, item: QueuedTrack, idx: number): string {
+  return [
+    idx === 0 ? 'hero' : 'row',
+    item.status,
+    item.title,
+    item.artist,
+    item.thumbnail,
+    item.key,
+    item.bpm === undefined ? '' : Math.round(item.bpm),
+    item.bpmConfidence === undefined ? '' : 'c',
+    item.tempoLockedTo ?? '',
+    item.original ? Math.round(item.original.bpm) : '',
+    item.isDiskCached ? 'd' : '',
+    item.unheard ? 'u' : '',
+    item.isAiRecommended ? 'ai' : '',
+    item.pickReason ?? '',
+    item.lastPlayedAt === undefined ? '' : timeAgo(item.lastPlayedAt),
+    engine.isFavorite(item) ? 'fav' : '',
+    engine.mixLoadingId === item.id ? 'loading' : '',
+    engine.isTransitioning ? 'mixing' : '',
+    idx === 0 ? engine.topSongAvoidCount : '',
+  ].join('|');
+}
+
+export const UpNextQueueItem = React.memo(UpNextQueueItemRow);
+
+function UpNextQueueItemRow({ engine, item, idx, curKey, pendingMixId }: UpNextQueueItemProps) {
   // Mix works on any song that hasn't failed: a ready one mixes, others stream or load first
   const canMix = item.status !== 'failed';
   const planned = pendingMixId === item.id;
@@ -411,4 +444,4 @@ export const UpNextQueueItem: React.FC<UpNextQueueItemProps> = ({ engine, item, 
       </div>
     </div>
   );
-};
+}

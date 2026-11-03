@@ -33,7 +33,9 @@ import {
 
 // Phone updates: at most this often (the engine can change many times per frame during a mix)
 const SYNC_THROTTLE_MS = 150;
-const RENDER_MIN_MS = 100; // the page redraws at most 10 times a second
+// The page redraws at most 5 times a second (clock, progress, statuses); right after a click or key
+// press it redraws on the next frame. The meters and waveforms animate on their own.
+const RENDER_MIN_MS = 200;
 // The full state is resent at least this often, in case a change slipped past the signature
 const FULL_SYNC_EVERY_MS = 5000;
 
@@ -131,7 +133,7 @@ export const App: React.FC = () => {
           engine.removeFromQueue(action.itemId);
           break;
         case 'CMD_CANCEL_PENDING_MIX':
-          engine.cancelPendingMix();
+          engine.skipPlannedSong();
           break;
         case 'CMD_SET_MOOD':
           engine.setMood(action.mood);
@@ -325,6 +327,16 @@ export const App: React.FC = () => {
       render();
       sync();
     };
+    // Whatever a click or key press changes shows on the next frame, not after the throttle
+    const userActed = () => {
+      lastRenderAt = 0;
+      if (renderTimer !== undefined) {
+        window.clearTimeout(renderTimer);
+        renderTimer = undefined;
+      }
+    };
+    window.addEventListener('pointerup', userActed, true);
+    window.addEventListener('keydown', userActed, true);
     // Keeps the clock, progress bar and phone moving between engine changes
     const interval = setInterval(() => {
       render();
@@ -332,6 +344,8 @@ export const App: React.FC = () => {
     }, 250);
 
     return () => {
+      window.removeEventListener('pointerup', userActed, true);
+      window.removeEventListener('keydown', userActed, true);
       clearInterval(interval);
       cancelAnimationFrame(frame);
       window.clearTimeout(renderTimer);

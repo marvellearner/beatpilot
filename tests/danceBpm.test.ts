@@ -33,5 +33,18 @@ describe('DJAgent.decideDanceBpm heuristic fallback', () => {
     expect(decision.effectiveDanceBpm).toBe(126);
     expect(decision.targetPartyBpm).toBe(126);
   });
+
+  it('evaluates Born to Shine at party tempo without dragging below 90 BPM', () => {
+    const decision = agent.heuristicDanceBpm({
+      title: 'Born to Shine',
+      artist: 'Diljit Dosanjh',
+      rawBpm: 90,
+      mood: 'party',
+      sessionBpm: null,
+    });
+
+    // In party mode, target tempo matches at least party floor (120-130)
+    expect(decision.targetPartyBpm).toBeGreaterThanOrEqual(90);
+  });
 });
 

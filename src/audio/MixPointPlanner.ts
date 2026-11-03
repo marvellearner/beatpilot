@@ -297,9 +297,10 @@ export function planMix(params: {
     const low = !outHigh(t, t + Math.max(outBar, Math.min(outBlend, 2 * outBar)));
     const endOfHigh = low && outHigh(t - 2 * outBar, t);
 
-    // Dropping into a calmer section (breakdown, outro) is the classic exit; jumping into a
-    // louder one (a chorus) is weaker since the blend would throw that chorus away
-    const changeWeight = after < before ? 1.5 : 0.6;
+    // Dropping into a calmer section (breakdown, outro) is the classic exit; entering a mix
+    // when the song is rising back up or getting louder throws away the new buildup and sounds awkward
+    const isRising = after > before * 1.08;
+    const changeWeight = after < before ? 1.8 : isRising ? -2.5 : 0;
 
     const score =
       phraseBonus(candidate.index) +
@@ -315,7 +316,7 @@ export function planMix(params: {
         : sectionChange > 0.3
         ? after < before
           ? 'current song drops into a calmer section'
-          : 'current song gets louder (new section)'
+          : 'current song starts rising towards high'
         : phraseBonus(candidate.index) === 1
           ? 'start of an 8-bar phrase'
           : phraseBonus(candidate.index) > 0
