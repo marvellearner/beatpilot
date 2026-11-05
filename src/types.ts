@@ -2,6 +2,7 @@ import type { EnergyProfile } from './audio/MixPointPlanner';
 import type { EqBandId, EqGains, MoodId } from './audio/Moods';
 import type { IntroAnalysisResult } from './audio/IntroSkitDetector';
 import type { RhythmState, RhythmCommand } from './audio/rhythm/RhythmEnhancer';
+import type { SongFilter } from '../shared/songFilter';
 
 export type DeckId = 'A' | 'B';
 
@@ -89,11 +90,23 @@ export interface DeckState {
   isCue: boolean;
 }
 
+export type TransitionStyle =
+  | 'filter_bass_swap'
+  | 'loop_roll_riser'
+  | 'vinyl_brake_drop'
+  | 'echo_freeze_throw'
+  | 'showcase_3band_handoff'
+  | 'reverb_wash_drop'
+  | 'drop_cut'
+  | 'bass_swap'
+  | 'smooth_crossfade'
+  | 'tempo_ramp';
+
 export interface TransitionConfig {
   sourceDeck: DeckId;
   targetDeck: DeckId;
   durationSeconds?: number; // omitted: engine picks 8 bars when beatmatched, a short cut when not
-  style: 'smooth_crossfade' | 'bass_swap' | 'drop_cut' | 'tempo_ramp';
+  style: TransitionStyle;
   sourceExitTime?: number; // planned outgoing position to start the blend at (otherwise the next beat)
   targetEntryTime?: number; // planned incoming start position (otherwise hook cue / first beat)
   filterSweep?: boolean; // keys clash: the outgoing song leaves through a rising high-pass
@@ -200,6 +213,7 @@ export interface HostSyncState {
   lastAiDecision: string;
   tempo: TempoInfo | null;
   masterVolume: number;
+  musicLevel?: number; // the "Music" fader: 1 = songs as they are, 0 = vocals only
   laptopVolume?: number; // 0.0 to 1.0 (Windows laptop master volume)
   laptopMuted?: boolean;
   aiProvider?: 'gemini' | 'ollama' | 'none';
@@ -211,6 +225,8 @@ export interface HostSyncState {
   } | null;
   isAiThinking?: boolean;
   aiResult?: { explanation: string; source: string; latencyMs: number } | null;
+  artistFocus?: SongFilter | null;
+  diskCacheCount?: number;
 }
 
 /** The big, slowly changing parts of HostSyncState: sent only when they change. */
@@ -298,6 +314,7 @@ export type MobileAction =
   | { type: 'CMD_SET_TEMPO'; ratio: number }
   | { type: 'CMD_SET_BPM'; bpm: number }
   | { type: 'CMD_SET_MASTER_VOLUME'; volume: number }
+  | { type: 'CMD_SET_MUSIC_LEVEL'; level: number }
   | { type: 'CMD_SET_LAPTOP_VOLUME'; volume: number }
   | { type: 'CMD_MUTE_LAPTOP'; muted?: boolean }
   | { type: 'CMD_TOGGLE_LAPTOP_MUTE' }
@@ -332,4 +349,6 @@ export type MobileAction =
       };
     }
   | { type: 'CMD_SORT_QUEUE_HARMONICALLY' }
-  | { type: 'CMD_MOVE_QUEUED'; itemId: string; direction: 'up' | 'down' | 'top' };
+  | { type: 'CMD_MOVE_QUEUED'; itemId: string; direction: 'up' | 'down' | 'top' }
+  | { type: 'CMD_SET_SONG_FILTER'; filter: SongFilter }
+  | { type: 'CMD_CLEAR_FOCUS' };

@@ -191,7 +191,7 @@ const xf = await page.evaluate(() => ({ deck: window.__e.activeDeck, xf: window.
 check(`next mix works from deck ${deck3} (crossfader follows)`, !!t4 && xf.deck !== deck3 && Math.sign(xf.xf) === (xf.deck === 'A' ? -1 : 1), `${(t4 || 'no change').slice(0, 30)}, deck ${xf.deck}, crossfader ${xf.xf}`);
 
 // --- Search ---
-const input = page.locator('input[placeholder^="Search song name"]').first();
+const input = page.locator('input[placeholder^="Search song"]').first();
 await input.fill('goliya honey singh');
 const found = await until(async () => (await page.locator('[id^="party-console-search-item-"]').count()) || null, 30_000);
 check('search shows results', !!found, `${found || 0} results`);

@@ -4,6 +4,7 @@ import { useEnginePlayback, useEngineMood } from '../hooks/useEngineStore';
 import { SyncedVideoPlayer } from './SyncedVideoPlayer';
 import { VuMeter } from './VuMeter';
 import { TempoControl } from './TempoControl';
+import { MusicLevelControl } from './MusicLevelControl';
 import { getCamelotDetails } from '../../audio/KeyDetector';
 import { isStrictStartSong } from '../../audio/songMatch';
 import {
@@ -703,6 +704,9 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({ engine, formatTi
               </select>
             )}
           </div>
+
+          {/* Music fader: lower the music, keep the vocals */}
+          <MusicLevelControl engine={engine} />
         </div>
       </div>
 

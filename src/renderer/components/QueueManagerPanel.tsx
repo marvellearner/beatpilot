@@ -5,6 +5,7 @@ import { useEngineQueue, useEngineTrack } from '../hooks/useEngineStore';
 import { UpNextQueueItem, rowSignature } from './UpNextQueueItem';
 import { SongSearchDropdown } from './SongSearchDropdown';
 import { shiftKey } from '../../audio/KeyDetector';
+import { describeFilter, type SongFilter } from '../../../shared/songFilter';
 import { Music, Sparkles, RefreshCw, X } from 'lucide-react';
 
 interface QueueManagerPanelProps {
@@ -133,6 +134,10 @@ export const QueueManagerPanel: React.FC<QueueManagerPanelProps> = ({
         onSelectSong={handleSelectSong}
         onSearchSubmit={handleSearchSubmit}
         formatTime={formatTime}
+        onApplyFilter={(filter: SongFilter) => {
+          engine.setSongFilter(filter);
+          onToast(`✨ AI Filter Activated: ${describeFilter(filter)}`);
+        }}
       />
 
       {/* Scrollable Queue List */}

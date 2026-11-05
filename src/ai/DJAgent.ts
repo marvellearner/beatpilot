@@ -1,4 +1,4 @@
-import { REQUEST_FILLER, VIBE_MOOD, describeFilter, parseSongKinds, type Vibe } from '../../shared/songFilter';
+import { REQUEST_FILLER, VIBE_MOOD, describeFilter, parseSongKinds, parseNlpSearchQuery, type Vibe } from '../../shared/songFilter';
 
 /** What each vibe means, for the AI's song checks. */
 const VIBE_DESCRIPTION: Record<Vibe, string> = {
@@ -512,7 +512,7 @@ Reply ONLY with valid JSON in this exact structure:
    */
   public async interpretCommand(
     userInput: string,
-    engine: AudioEngine
+    engine?: AudioEngine
   ): Promise<AIResponseResult> {
     const startTime = performance.now();
 
@@ -523,31 +523,31 @@ Reply ONLY with valid JSON in this exact structure:
     }
 
     // Extract current DJ system context
-    const stateA = engine.deckA.getPlaybackState();
-    const stateB = engine.deckB.getPlaybackState();
-    const rhythm = engine.rhythm.getState();
-    const crossfader = engine.getCrossfader();
+    const stateA = engine?.deckA?.getPlaybackState();
+    const stateB = engine?.deckB?.getPlaybackState();
+    const rhythm = engine?.rhythm?.getState();
+    const crossfader = engine?.getCrossfader?.() ?? 0;
 
     const currentContext = {
       deckA: {
-        title: stateA.track?.title || 'Empty',
-        bpm: stateA.effectiveBpm,
-        isPlaying: stateA.isPlaying,
-        volume: stateA.volume,
-        lowGain: stateA.lowGain,
+        title: stateA?.track?.title || 'Empty',
+        bpm: stateA?.effectiveBpm ?? 128,
+        isPlaying: stateA?.isPlaying ?? false,
+        volume: stateA?.volume ?? 1,
+        lowGain: stateA?.lowGain ?? 0,
       },
       deckB: {
-        title: stateB.track?.title || 'Empty',
-        bpm: stateB.effectiveBpm,
-        isPlaying: stateB.isPlaying,
-        volume: stateB.volume,
-        lowGain: stateB.lowGain,
+        title: stateB?.track?.title || 'Empty',
+        bpm: stateB?.effectiveBpm ?? 128,
+        isPlaying: stateB?.isPlaying ?? false,
+        volume: stateB?.volume ?? 1,
+        lowGain: stateB?.lowGain ?? 0,
       },
       rhythmEnhancer: {
-        on: rhythm.enabled,
-        style: rhythm.styleId,
-        level: rhythm.level,
-        playingNow: rhythm.section,
+        on: rhythm?.enabled ?? false,
+        style: rhythm?.styleId ?? 'dhol_wedding',
+        level: rhythm?.level ?? 0.8,
+        playingNow: rhythm?.section,
       },
       crossfader: crossfader < -0.3 ? 'Deck A (Left)' : crossfader > 0.3 ? 'Deck B (Right)' : 'Center',
     };
@@ -569,8 +569,8 @@ Interpret the user's natural language instruction and output a STRICT JSON objec
   "target_deck": "A" | "B" | "both" | "none",
   "transition": {
     "target_deck": "A" | "B",
-    "style": "bass_swap" | "smooth_crossfade" | "drop_cut",
-    "duration_seconds": 4 | 8 | 16 | 32
+    "style": "filter_bass_swap" | "loop_roll_riser" | "vinyl_brake_drop" | "echo_freeze_throw" | "showcase_3band_handoff" | "reverb_wash_drop" | "drop_cut" | "bass_swap",
+    "duration_seconds": 0.3 | 2 | 4 | 8 | 16
   },
   "percussion": {
     "active": true | false,
@@ -659,21 +659,75 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
       };
     }
 
-    // 2. Transitions
-    if (text.includes('mix') || text.includes('transition') || text.includes('crossfade') || text.includes('switch')) {
+    // 2. Transitions (Advanced DJ transitions only: filter bass swap, vinyl brake, loop roll, echo throw, 3-band)
+    if (
+      text.includes('mix') ||
+      text.includes('transition') ||
+      text.includes('crossfade') ||
+      text.includes('switch') ||
+      text.includes('brake') ||
+      text.includes('vinyl') ||
+      text.includes('stutter') ||
+      text.includes('roll') ||
+      text.includes('echo') ||
+      text.includes('reverb') ||
+      text.includes('wash') ||
+      text.includes('drop') ||
+      text.includes('cut') ||
+      text.includes('stem') ||
+      text.includes('band') ||
+      text.includes('handover') ||
+      text.includes('handoff') ||
+      text.includes('filter') ||
+      text.includes('swap')
+    ) {
       const targetDeck = /\b(deck|song)\s*a\b/.test(text) ? 'A' : 'B';
-      const isSmooth = text.includes('smooth') || text.includes('harmonic');
-      const isDrop = text.includes('drop') || text.includes('cut') || text.includes('fast');
+      const isBrake = text.includes('brake') || text.includes('vinyl') || text.includes('turntable') || text.includes('motor');
+      const isRoll = text.includes('roll') || text.includes('stutter') || text.includes('riser') || text.includes('build');
+      const isEcho = text.includes('echo') || text.includes('delay') || text.includes('freeze');
+      const isReverb = text.includes('reverb') || text.includes('wash') || text.includes('stadium');
+      const is3Band = text.includes('3 band') || text.includes('three band') || text.includes('stem') || text.includes('isolation');
+      const isDrop = text.includes('drop cut') || text.includes('hard cut') || text.includes('slam') || text.includes('instant');
+
+      let style: AICommandPlan['transition'] extends { style?: infer S } ? NonNullable<S> : any = 'filter_bass_swap';
+      let duration = 8;
+      let label = 'resonant filter sweep & bass-swap';
+
+      if (isBrake) {
+        style = 'vinyl_brake_drop';
+        duration = 2;
+        label = 'turntable vinyl brake deceleration into drop';
+      } else if (isRoll) {
+        style = 'loop_roll_riser';
+        duration = 4;
+        label = '8-beat stutter loop roll riser into drop';
+      } else if (isEcho) {
+        style = 'echo_freeze_throw';
+        duration = 3;
+        label = 'dotted-8th echo freeze throw trailing into space';
+      } else if (isReverb) {
+        style = 'reverb_wash_drop';
+        duration = 4;
+        label = 'convolution stadium reverb wash';
+      } else if (is3Band) {
+        style = 'showcase_3band_handoff';
+        duration = 16;
+        label = '3-band frequency stem handover';
+      } else if (isDrop) {
+        style = 'drop_cut';
+        duration = 0.3;
+        label = 'phrase drop cut on the 1';
+      }
 
       return {
         action: 'execute_transition',
         target_deck: targetDeck,
         transition: {
           target_deck: targetDeck,
-          style: isDrop ? 'drop_cut' : isSmooth ? 'smooth_crossfade' : 'bass_swap',
-          duration_seconds: isDrop ? 4 : isSmooth ? 16 : 8,
+          style,
+          duration_seconds: duration,
         },
-        explanation: `Executing ${isDrop ? 'quick drop-cut' : isSmooth ? 'harmonic 16s crossfade' : '8s club bass-swap'} transition into Deck ${targetDeck}.`,
+        explanation: `Executing advanced ${label} into Deck ${targetDeck}.`,
       };
     }
 
@@ -841,11 +895,25 @@ export function parseSongCommand(input: string): AICommandPlan | null {
     if (p) return p;
   }
 
-  // "more X" / "play more X songs", and "play dance songs" (a kind of song, no artist: more of it)
-  // ("songs" must be said then: "play Love Dose" is a song, not "more romantic songs by Dose")
-  if (/\bmore\b/.test(lower) || (hasKind && !artists(rest).length && /\b(songs?|music|gaane|gaana|tracks?|hits|classics|bangers)\b/.test(lower))) {
+  // "more X" / "play more X songs", and kinds of songs ("play dance songs", "play romantic songs by arijit")
+  // ("songs" / "music" / "hits" must be said then: "play Love Dose" is a song, not "more romantic songs by Dose")
+  if (
+    /\bmore\b/.test(lower) ||
+    (hasKind && /\b(songs?|music|gaane|gaana|tracks?|hits|classics|bangers|vibes?)\b/.test(lower))
+  ) {
     const p = plan(false);
     if (p) return p;
+  }
+
+  // "something like brown munde" / "similar to lover"
+  const nlp = parseNlpSearchQuery(text);
+  if (nlp.isNlp && nlp.intentType === 'similar_tracks' && nlp.trackTitle) {
+    return {
+      action: 'queue_control',
+      target_deck: 'none',
+      queue: { play_song: nlp.searchTerms[0] || nlp.trackTitle },
+      explanation: `Finding songs similar to "${nlp.trackTitle}" and mixing in next.`,
+    };
   }
 
   // "play Lover by Diljit Dosanjh" / "play Brown Munde"

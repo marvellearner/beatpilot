@@ -4,6 +4,7 @@ import { IntroSkitDetector } from './IntroSkitDetector';
 import { loudnessGainDb } from './Loudness';
 import { isStrictStartSong } from './songMatch';
 import { analyzeInWorker } from './analysis/analyzeInWorker';
+import { VocalFocus } from './engine/VocalFocus';
 
 // playbackRate shifts pitch along with tempo ("vinyl" mode); key-locked tempo changes use
 // a re-timed buffer instead. Range matches the Tempo control (0.5x – 1.5x).
@@ -60,6 +61,7 @@ export class VirtualDeck {
   private reverbReady = false;
   private rollSource: AudioBufferSourceNode | null = null; // a loop roll playing in place of the song
   private sweepFilter: BiquadFilterNode; // high-pass for a filter-sweep exit; open (10 Hz) otherwise
+  private vocalFocus: VocalFocus; // the "Music" fader: lowers the music, keeps the vocals
 
   // Playback State
   private track: TrackMetadata | null = null;
@@ -125,8 +127,10 @@ export class VirtualDeck {
     this.analyserNode = this.ctx.createAnalyser();
     this.analyserNode.fftSize = 256;
 
-    // Chain: Input -> Filters -> Gain -> Analyser -> Output Bus
-    this.inputNode.connect(this.lowFilter);
+    // Chain: Input -> Vocal focus ("Music" fader) -> Filters -> Gain -> Analyser -> Output Bus
+    this.vocalFocus = new VocalFocus(this.ctx);
+    this.inputNode.connect(this.vocalFocus.input);
+    this.vocalFocus.output.connect(this.lowFilter);
     this.lowFilter.connect(this.midFilter);
     this.midFilter.connect(this.highFilter);
     this.highFilter.connect(this.sweepFilter);
@@ -637,6 +641,16 @@ export class VirtualDeck {
     if (index < 0) index = 0;
     this.seek(hooks[index]);
     return { index, count: hooks.length, time: hooks[index] };
+  }
+
+  /** The "Music" fader: 1 = the song as it is, 0 = vocals only (see VocalFocus). */
+  public setMusicLevel(level: number) {
+    this.vocalFocus.setMusicLevel(level);
+    this.notifyUpdate();
+  }
+
+  public getMusicLevel(): number {
+    return this.vocalFocus.musicLevel;
   }
 
   public setVolume(vol: number) {

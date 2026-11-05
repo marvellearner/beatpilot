@@ -9,7 +9,7 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { ROOT_DIR } from './paths';
 import { sendFile } from './sendFile';
 import { resolveAudio, searchVideos, type VideoHit } from './audioSource';
-import { describedSongs, filterQueries } from '../shared/songFilter';
+import { describedSongs, filterQueries, parseNlpSearchQuery, type NlpSearchIntent } from '../shared/songFilter';
 import { searchVariants } from './searchVariants';
 import { EMPTY_TASTE, MAX_AUTO_SONG_SECONDS, scoreHit } from '../shared/taste';
 import { getDownload, sendFromDownload } from './audioDownload';
@@ -19,12 +19,33 @@ import { isLocalUrl, localById, savedCopyFor, searchLocal, serveLocalFile, toSea
 const FEW_RESULTS = 3; // fewer songs than this: other spellings and word orders are tried too
 
 /**
- * A search box query. One that describes a kind of songs instead of naming one ("Play all the
- * classic hindi dance songs of all time", "90s bollywood party hits") becomes the searches that
- * find such songs ("90s Bollywood party songs", "… hits", "best …"), their results taken in
- * turns; those are songs, so jukeboxes, long mixes, shorts and covers are left out.
+ * A search box query. Resolves NLP conversational queries ("play some romantic arijit singh songs",
+ * "bhangra party bangers by diljit", "something like brown munde") into targeted music searches,
+ * or handles pure mood filters / exact matches.
  */
-async function searchFor(query: string, page: number): Promise<VideoHit[]> {
+async function searchFor(query: string, page: number, nlp?: NlpSearchIntent): Promise<VideoHit[]> {
+  const nlpIntent = nlp || parseNlpSearchQuery(query);
+
+  // When natural language intent is detected, search using the parsed, high-precision search terms
+  if (nlpIntent.isNlp && nlpIntent.searchTerms.length > 0) {
+    const isSong = (h: VideoHit) => h.lengthSeconds >= 60 && h.lengthSeconds <= MAX_AUTO_SONG_SECONDS && scoreHit(h, 0, EMPTY_TASTE) > -1;
+    const queries = nlpIntent.searchTerms.slice(0, 4);
+    const lists = await Promise.all(queries.map((q) => searchVideos(q, page).catch(() => [] as VideoHit[])));
+    const ranked = lists.map((l) => l.filter(isSong));
+    const seen = new Set<string>();
+    const out: VideoHit[] = [];
+    for (let i = 0; ranked.some((l) => i < l.length); i++) {
+      for (const l of ranked) {
+        const h = l[i];
+        if (h && !seen.has(h.videoId)) {
+          seen.add(h.videoId);
+          out.push(h);
+        }
+      }
+    }
+    if (out.length >= FEW_RESULTS || page > 1) return out;
+  }
+
   const described = describedSongs(query);
   if (!described) {
     const hits = await searchVideos(query, page);
@@ -236,10 +257,16 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
 
     // Otherwise, perform title search using yt-search with caching & fast in-flight deduplication
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
+    const nlp = parseNlpSearchQuery(query);
     const cacheKey = `${query.toLowerCase().trim()}:${limit}${page > 1 ? `:p${page}` : ''}`;
     const cachedVideos = getCachedSearch(cacheKey);
     if (cachedVideos) {
-      res.end(JSON.stringify({ results: [...local, ...cachedVideos.filter((v) => !local.some((l) => l.title === v.title))], page, hasMore: cachedVideos.length > 0 }));
+      res.end(JSON.stringify({
+        results: [...local, ...cachedVideos.filter((v) => !local.some((l) => l.title === v.title))],
+        page,
+        hasMore: cachedVideos.length > 0,
+        nlp,
+      }));
       return;
     }
 
@@ -252,7 +279,7 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
         const timeoutPromise = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Search timed out after 15s')), 15_000)
         );
-        const hits = await Promise.race([searchFor(query, page), timeoutPromise]);
+        const hits = await Promise.race([searchFor(query, page, nlp), timeoutPromise]);
         const videos: SearchResult[] = hits.slice(0, limit).map((v) => ({
           title: v.title,
           url: canonicalYouTubeUrl(v.videoId),
@@ -292,7 +319,12 @@ export async function handleSearch(req: IncomingMessage, res: ServerResponse, ur
     const videos = await searchPromise;
     if (req.destroyed || req.socket?.destroyed) return;
 
-    res.end(JSON.stringify({ results: [...local, ...videos.filter((v) => !local.some((l) => l.title === v.title))], page, hasMore: videos.length > 0 }));
+    res.end(JSON.stringify({
+      results: [...local, ...videos.filter((v) => !local.some((l) => l.title === v.title))],
+      page,
+      hasMore: videos.length > 0,
+      nlp,
+    }));
   } catch (err: unknown) {
     if (local.length) {
       // Offline (or YouTube failing/timing out): the local matches still answer instantly

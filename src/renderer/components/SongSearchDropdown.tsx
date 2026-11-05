@@ -1,20 +1,50 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SearchResult } from '../../types';
-import { Search, Loader2, X, Plus, Play, Sparkles, Music } from 'lucide-react';
+import { Search, Loader2, X, Plus, Play, Sparkles, Music, SlidersHorizontal } from 'lucide-react';
+import { parseNlpSearchQuery, describeFilter, fitsFilter, type NlpSearchIntent, type SongFilter } from '../../../shared/songFilter';
+import { MAX_AUTO_SONG_SECONDS } from '../../../shared/taste';
+import { parseSongCommand } from '../../ai/DJAgent';
+
+/**
+ * The search's intent, plus "play only X & Y" / "just X" / "X only" / "sirf X" for ANY names: the
+ * search parser knows "only" for its built-in artists only, so "Play nusrat fatah ali khan & sagar
+ * wali qawali only" was read as one song title. The AI command bar's parser reads it as a filter.
+ */
+function readSearchIntent(q: string, base?: NlpSearchIntent | null): NlpSearchIntent | null {
+  const intent = base ?? parseNlpSearchQuery(q);
+  if (!intent.filter) {
+    const cmd = parseSongCommand(q);
+    const qc = cmd?.action === 'queue_control' ? cmd.queue : undefined;
+    if (qc?.only && (qc.focus_artists?.length || qc.vibe || qc.language || qc.era)) {
+      const filter: SongFilter = {
+        artists: qc.focus_artists ?? [],
+        only: true,
+        ...(qc.vibe && { vibe: qc.vibe }),
+        ...(qc.language && { language: qc.language }),
+        ...(qc.era && { era: qc.era }),
+      } as SongFilter;
+      return { ...intent, isNlp: true, intentType: 'artist_vibe', artists: filter.artists, only: true, filter, badgeLabel: describeFilter(filter) };
+    }
+  }
+  return intent.isNlp ? intent : null;
+}
 
 interface SongSearchDropdownProps {
   onSelectSong: (song: SearchResult, autoMix: boolean) => void;
   onSearchSubmit: (query: string, autoMix: boolean) => void;
   formatTime: (secs: number) => string;
+  onApplyFilter?: (filter: SongFilter) => void;
 }
 
 export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
   onSelectSong,
   onSearchSubmit,
   formatTime,
+  onApplyFilter,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [detectedNlp, setDetectedNlp] = useState<NlpSearchIntent | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
@@ -31,6 +61,7 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
     const q = searchQuery.trim();
     if (q.length < 2) {
       setSearchResults([]);
+      setDetectedNlp(null);
       setIsSearching(false);
       setIsDropdownOpen(false);
       if (searchAbortControllerRef.current) {
@@ -39,6 +70,9 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
       }
       return;
     }
+
+    // Immediately parse NLP intent client-side for zero latency visual feedback
+    setDetectedNlp(readSearchIntent(q));
 
     setIsDropdownOpen(true);
     setIsSearching(true);
@@ -63,6 +97,9 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
           if (Array.isArray(data.results)) {
             setSearchResults(data.results);
             setSearchHasMore(!!data.hasMore);
+          }
+          if (data.nlp) {
+            setDetectedNlp(readSearchIntent(q, data.nlp));
           }
         }
       } catch (err: unknown) {
@@ -121,8 +158,13 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
   }, []);
 
   const handleSelectSong = (song: SearchResult, autoMix: boolean = false) => {
+    // If user clicked a song while an explicit "only <artist>" or vibe filter was parsed, activate it
+    if (detectedNlp?.filter && onApplyFilter && detectedNlp.only) {
+      onApplyFilter(detectedNlp.filter);
+    }
     setSearchQuery('');
     setSearchResults([]);
+    setDetectedNlp(null);
     onSelectSong(song, autoMix);
   };
 
@@ -130,13 +172,33 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
     e.preventDefault();
     if (!searchQuery.trim()) return;
 
-    const topMatch = searchResults[0];
-    const targetQuery = topMatch ? topMatch.url : searchQuery.trim();
+    // If an NLP filter was recognized (e.g. "only diljit dosanjh" or "play romantic bollywood songs") and no track in list
+    if (detectedNlp?.filter && onApplyFilter && searchResults.length === 0) {
+      onApplyFilter(detectedNlp.filter);
+      setIsDropdownOpen(false);
+      setSearchQuery('');
+      setSearchResults([]);
+      setDetectedNlp(null);
+      return;
+    }
+
+    // "Play only …": the filter is the request. Start with the first result that fits it and isn't a
+    // long mix (the top hit was a 45-minute full show); none: the filter alone fills Up Next
+    const onlyFilter = detectedNlp?.only && detectedNlp.filter ? detectedNlp.filter : null;
+    const topMatch = onlyFilter
+      ? searchResults.find((r) => fitsFilter(onlyFilter, { title: r.title, author: r.author }) && (!r.duration || r.duration <= MAX_AUTO_SONG_SECONDS))
+      : searchResults[0];
+    const targetQuery = topMatch ? topMatch.url : onlyFilter ? null : searchQuery.trim();
+
+    if (detectedNlp?.filter && onApplyFilter && detectedNlp.only) {
+      onApplyFilter(detectedNlp.filter);
+    }
 
     setIsDropdownOpen(false);
     setSearchQuery('');
     setSearchResults([]);
-    onSearchSubmit(targetQuery, autoMix);
+    setDetectedNlp(null);
+    if (targetQuery) onSearchSubmit(targetQuery, autoMix);
   };
 
   return (
@@ -146,7 +208,7 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
           <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Search song name or YouTube link..."
+            placeholder="Search song, artist, link, or ask AI (e.g. 'romantic songs by Arijit', 'bhangra party by Diljit')..."
             value={searchQuery}
             onFocus={() => {
               if (searchQuery.trim().length >= 2) setIsDropdownOpen(true);
@@ -163,6 +225,7 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
               onClick={() => {
                 setSearchQuery('');
                 setSearchResults([]);
+                setDetectedNlp(null);
                 setIsDropdownOpen(false);
               }}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white p-0.5 rounded transition-colors"
@@ -211,6 +274,34 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
             <span className="text-[9px] text-slate-400">Click to play & sync mood, or use + Queue</span>
           </div>
 
+          {/* AI NLP Intent Banner */}
+          {detectedNlp?.isNlp && (
+            <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-purple-500/20 via-cyan-500/15 to-pink-500/15 border border-purple-500/35 text-[11px] mb-1.5 shadow-sm">
+              <div className="flex items-center gap-1.5 font-bold text-purple-200 truncate min-w-0">
+                <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0 animate-pulse" />
+                <span className="truncate">{detectedNlp.badgeLabel}</span>
+              </div>
+              {detectedNlp.filter && onApplyFilter && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onApplyFilter(detectedNlp.filter!);
+                    setIsDropdownOpen(false);
+                    setSearchQuery('');
+                    setSearchResults([]);
+                    setDetectedNlp(null);
+                  }}
+                  className="px-2 py-0.5 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white border border-purple-400/40 text-[10px] font-bold font-mono transition-all flex items-center gap-1 shrink-0 shadow-sm"
+                  title="Lock Up Next queue & mood to this filter"
+                >
+                  <SlidersHorizontal className="w-3 h-3" />
+                  <span>Set Filter</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {isSearching && searchResults.length === 0 ? (
             <div className="flex items-center justify-center gap-2 py-7 text-xs text-slate-400">
               <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
@@ -254,6 +345,11 @@ export const SongSearchDropdown: React.FC<SongSearchDropdownProps> = ({
                     </span>
                     <div className="flex items-center gap-2 text-[10px] text-slate-400">
                       <span className="truncate">{song.author}</span>
+                      {detectedNlp?.isNlp && idx === 0 && (
+                        <span className="text-[9px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-1.5 py-0.2 rounded shrink-0">
+                          🎯 Best AI Match
+                        </span>
+                      )}
                       {song.highlightTime !== undefined && (
                         <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0" title="Viral hook moment">
                           🔥 Hook {formatTime(song.highlightTime)}

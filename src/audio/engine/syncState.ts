@@ -58,11 +58,14 @@ export function buildLiveSyncState(engine: AudioEngine): LiveSyncState {
     lastAiDecision: engine.lastAiDecision,
     tempo: engine.getTempoInfo(),
     masterVolume: engine.masterVolume,
+    musicLevel: engine.musicLevel,
     aiProvider: engine.aiProvider,
     aiModelName: engine.aiModelName,
     aiBackends: engine.aiBackends,
     isAiThinking: engine.isAiThinking,
     aiResult: engine.lastAiResult,
+    artistFocus: engine.artistFocus,
+    diskCacheCount: engine.diskCacheCount,
   };
 }
 

@@ -33,6 +33,14 @@ const FAILED_SKIP_MS = 5 * 60_000; // a failing instance is skipped for 5 minute
 const INFO_TTL_MS = 30 * 60_000; // audio links expire after a few hours; re-resolve well before
 const REQUEST_TIMEOUT_MS = 12_000;
 const RESOLVE_ROUNDS = 3;
+// No instance reachable at all (connection errors, not an HTTP answer): up to 3 more rounds, 5 s apart
+const NETWORK_EXTRA_ROUNDS = 3;
+const NETWORK_RETRY_WAIT_MS = 5000;
+/**
+ * "host: fetch failed", DNS or connection refused/reset: the instance couldn't be reached at all
+ * (fails fast, so retrying costs little). Timeouts don't count: each one already took 12 s.
+ */
+export const isNetworkError = (msg: string) => /fetch failed|ENOTFOUND|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH/i.test(msg);
 
 /** YouTube's own hosts: an answer pointing there would mean downloading from YouTube directly. */
 const isYouTubeHost = (host: string) => /(^|\.)(googlevideo\.com|youtube\.com|youtu\.be|ytimg\.com|google\.com)$/i.test(host);
@@ -129,9 +137,13 @@ export function resolveAudio(videoId: string): Promise<AudioInfo> {
       ...instances.filter((i) => now - (failedAt.get(i.base) ?? 0) <= FAILED_SKIP_MS),
     ];
     const errors: string[] = [];
-    // Public instances often fail for a moment (HTTP 500 under load): go round them a few times
-    for (let round = 0; round < RESOLVE_ROUNDS; round++) {
-      if (round) await new Promise((r) => setTimeout(r, 1000 * round));
+    // Public instances often fail for a moment (HTTP 500 under load): go round them a few times.
+    // When no instance could even be reached (the laptop's internet dropped for a moment), keep
+    // waiting a little longer instead of failing the song after ~3 s
+    let rounds = RESOLVE_ROUNDS;
+    for (let round = 0; round < rounds; round++) {
+      if (round) await new Promise((r) => setTimeout(r, round < RESOLVE_ROUNDS ? 1000 * round : NETWORK_RETRY_WAIT_MS));
+      const errorsBefore = errors.length;
       for (const inst of ordered) {
         try {
           const info = inst.kind === 'invidious' ? await fromInvidious(inst, videoId) : await fromPiped(inst, videoId);
@@ -145,6 +157,8 @@ export function resolveAudio(videoId: string): Promise<AudioInfo> {
           errors.push(`${new URL(inst.base).host}: ${(err as Error).message}`);
         }
       }
+      const roundErrors = errors.slice(errorsBefore);
+      if (round === rounds - 1 && rounds < RESOLVE_ROUNDS + NETWORK_EXTRA_ROUNDS && roundErrors.every(isNetworkError)) rounds++;
     }
     throw new Error(`No audio source could provide this song (${[...new Set(errors)].join('; ')})`);
   })().finally(() => inFlight.delete(videoId));

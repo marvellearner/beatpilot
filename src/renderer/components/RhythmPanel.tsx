@@ -7,6 +7,7 @@ interface RhythmPanelProps {
   rhythm: RhythmState;
   onCommand: (cmd: RhythmCommand) => void;
   compact?: boolean; // phone layout
+  variant?: 'default' | 'pro'; // 'pro': a flat one-row strip under the Pro decks
 }
 
 const SECTION_LABEL: Record<RhythmState['section'], string> = {
@@ -23,10 +24,11 @@ const levelWord = (level: number) => (level < 0.5 ? 'soft' : level < 0.8 ? 'medi
  * panel is just on/off, volume and what the AI chose; "Pick drum style" shows the styles.
  * Shared by the laptop console (Party and Pro views) and the phone remote.
  */
-export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, compact }) => {
+export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, compact, variant = 'default' }) => {
   const active = rhythm.enabled && rhythm.section !== 'off';
   const ai = rhythm.mode === 'ai';
   const plan = rhythm.plan;
+  if (variant === 'pro') return <ProRhythmStrip rhythm={rhythm} onCommand={onCommand} />;
   return (
     <div
       id="rhythm-panel"
@@ -196,6 +198,149 @@ export const RhythmPanel: React.FC<RhythmPanelProps> = ({ rhythm, onCommand, com
           {rhythm.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
         </button>
       </div>
+    </div>
+  );
+};
+
+/** The Pro view's version: same controls and element ids, laid out as one flat strip. */
+const ProRhythmStrip: React.FC<{ rhythm: RhythmState; onCommand: (cmd: RhythmCommand) => void }> = ({ rhythm, onCommand }) => {
+  const ai = rhythm.mode === 'ai';
+  const plan = rhythm.plan;
+  const choice = plan
+    ? plan.play
+      ? `${getRhythmStyle(plan.styleId).name} · ${levelWord(plan.level)}`
+      : 'No drums on this song'
+    : rhythm.enabled
+      ? 'Waiting for a song…'
+      : 'Off';
+  return (
+    <div id="rhythm-panel" className="pro-panel p-4 flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+        {/* Name + on/off */}
+        <div className="flex items-center gap-3 min-w-[220px]">
+          <button
+            id="rhythm-toggle"
+            type="button"
+            onClick={() => onCommand({ kind: 'toggle' })}
+            disabled={!rhythm.samplesReady}
+            aria-pressed={rhythm.enabled}
+            title={rhythm.enabled ? 'Turn the drums off' : 'Turn the drums on'}
+            className="flex items-center gap-2 disabled:opacity-40"
+          >
+            <span className={`w-9 h-5 rounded-full relative transition-colors ${rhythm.enabled ? 'bg-rose-500' : 'bg-white/10'}`}>
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${rhythm.enabled ? 'left-[18px]' : 'left-0.5'}`} />
+            </span>
+          </button>
+          <div className="min-w-0">
+            <div className="text-[13px] font-bold text-white">Rhythm</div>
+            <div className="text-[11px] text-slate-500">Live dhol &amp; percussion on the beat</div>
+          </div>
+        </div>
+
+        {/* Who decides */}
+        <div id="rhythm-mode" className="pro-seg" role="group" aria-label="Who picks the drums">
+          {(['ai', 'manual'] as const).map((m) => (
+            <button
+              key={m}
+              id={`rhythm-mode-${m}`}
+              type="button"
+              onClick={() => rhythm.mode !== m && onCommand({ kind: 'mode' })}
+              aria-pressed={rhythm.mode === m}
+            >
+              {m === 'ai' ? 'AI decides' : 'Manual'}
+            </button>
+          ))}
+        </div>
+
+        {/* What's chosen and what it's doing */}
+        <div className="flex-1 min-w-[240px] grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 items-center">
+          <span className="pro-label">Style</span>
+          <span className="text-xs text-slate-200 truncate" title={plan?.reason}>
+            {ai ? choice : getRhythmStyle(rhythm.styleId).name}
+            {ai && plan && (
+              <span className="ml-2 text-[10px] text-slate-500">
+                {plan.source === 'ai' ? 'by AI' : plan.source === 'known' ? 'known artist' : 'guess, AI pending'}
+              </span>
+            )}
+          </span>
+          <span className="pro-label">Now</span>
+          <span id="rhythm-status" className="text-xs text-slate-400 truncate" title={rhythm.status}>
+            {rhythm.samplesReady ? (rhythm.enabled ? rhythm.status : 'Off') : 'Loading drum samples…'}
+            {rhythm.enabled && (
+              <span id="rhythm-section" className="ml-2 text-[10px] text-slate-500 pro-num">
+                {SECTION_LABEL[rhythm.section]}
+                {rhythm.bpm ? ` · ${rhythm.bpm} BPM` : ''}
+              </span>
+            )}
+          </span>
+        </div>
+
+        {/* Volume */}
+        <div className="flex items-center gap-2 w-[220px]">
+          <span className="pro-label">Level</span>
+          <input
+            id="rhythm-level"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(rhythm.level * 100)}
+            onChange={(e) => onCommand({ kind: 'level', level: Number(e.target.value) / 100 })}
+            className="flex-1"
+            aria-label="Rhythm volume"
+          />
+          <span className="text-[11px] text-slate-400 w-9 text-right pro-num">{Math.round(rhythm.level * 100)}%</span>
+          <button
+            id="rhythm-mute"
+            type="button"
+            onClick={() => onCommand({ kind: 'mute' })}
+            className={`w-7 h-7 rounded-md flex items-center justify-center border ${
+              rhythm.muted ? 'border-rose-500/50 text-rose-300 bg-rose-500/10' : 'border-white/10 text-slate-400 hover:text-white'
+            }`}
+            aria-label={rhythm.muted ? 'Unmute rhythm' : 'Mute rhythm'}
+            aria-pressed={rhythm.muted}
+          >
+            {rhythm.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Manual mode: styles and arrangement */}
+      {!ai && (
+        <div className="flex flex-col gap-2 pt-3 border-t border-white/5">
+          <div id="rhythm-styles" className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-1.5">
+            {RHYTHM_STYLES.map((s) => (
+              <button
+                id={`rhythm-style-${s.id}`}
+                key={s.id}
+                type="button"
+                onClick={() => onCommand({ kind: 'style', styleId: s.id })}
+                aria-pressed={rhythm.styleId === s.id}
+                title={s.description}
+                className={`px-2.5 py-2 rounded-lg border text-left transition-colors ${
+                  rhythm.styleId === s.id ? 'border-rose-500/60 bg-rose-500/10 text-white' : 'border-white/5 bg-[#0a0c11] text-slate-300 hover:border-white/15'
+                }`}
+              >
+                <div className="text-xs font-semibold truncate">{s.name}</div>
+                <div className="text-[10px] text-slate-500 truncate">{s.suits}</div>
+              </button>
+            ))}
+          </div>
+          <button
+            id="rhythm-follow-song"
+            type="button"
+            onClick={() => onCommand({ kind: 'followSong' })}
+            aria-pressed={rhythm.followSong}
+            className="pro-btn !h-7 self-start"
+            title={
+              rhythm.followSong
+                ? 'Follows the song: out in intros and breakdowns, light in verses, full on choruses, fills into big parts'
+                : 'Steady: the full groove all song, with a fill every 8 bars'
+            }
+          >
+            {rhythm.followSong ? 'Follows the song' : 'Steady all song'}
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -39,6 +39,8 @@ import { RhythmPanel } from '../renderer/components/RhythmPanel';
 import { TempoControl } from '../renderer/components/TempoControl';
 import { PreviouslyPlayedPanel } from '../renderer/components/PreviouslyPlayedPanel';
 import { MixToast } from '../renderer/components/MixToast';
+import { SongSearchDropdown } from '../renderer/components/SongSearchDropdown';
+import { describeFilter } from '../../shared/songFilter';
 import { getCamelotDetails, getHarmonicCompatibility } from '../audio/KeyDetector';
 import {
   Play,
@@ -101,10 +103,12 @@ const VolumeCard: React.FC<{
   laptopVolume: number | null;
   laptopMuted: boolean;
   masterVolume: number;
+  musicLevel: number;
   send: (action: MobileAction) => void;
-}> = ({ laptopVolume, laptopMuted, masterVolume, send }) => {
+}> = ({ laptopVolume, laptopMuted, masterVolume, musicLevel, send }) => {
   const laptopSlider = useDragSlider(laptopMuted ? 0 : (laptopVolume ?? 0), (volume) => send({ type: 'CMD_SET_LAPTOP_VOLUME', volume }));
   const appGainSlider = useDragSlider(masterVolume, (volume) => send({ type: 'CMD_SET_MASTER_VOLUME', volume }));
+  const musicSlider = useDragSlider(musicLevel, (level) => send({ type: 'CMD_SET_MUSIC_LEVEL', level }));
   return (
     <div id="remote-master-volume-card" className="w-full rounded-xl bg-white/5 border border-white/10 p-2.5 space-y-2">
       {/* Laptop Master Volume Header */}
@@ -197,6 +201,26 @@ const VolumeCard: React.FC<{
           </span>
         </div>
       </div>
+
+      {/* Music fader: lowers the music, keeps the vocals */}
+      <div className="pt-1.5 border-t border-white/5 flex items-center justify-between text-[10px] text-slate-400">
+        <span className="text-[10px] text-pink-300" title="Lower the music and keep the vocals (0% = mostly voice)">
+          Music (vocals stay)
+        </span>
+        <div className="flex items-center gap-2 flex-1 max-w-[180px] ml-auto">
+          <input
+            id="remote-music-level-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            {...musicSlider}
+            className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-pink-400"
+            title={`Music: ${Math.round(musicSlider.value * 100)}% (vocals stay)`}
+          />
+          <span className="font-mono text-[9px] w-6 text-right text-slate-400">{Math.round(musicSlider.value * 100)}%</span>
+        </div>
+      </div>
     </div>
   );
 };
@@ -263,40 +287,43 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
   const queueList = useMemo(() => {
     const sendMix = stableSendMix;
     return (
-syncState.queue.length === 0 ? (
-              <div id="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
-                Queue empty — request a song above, or the AI fills it once music plays.
-              </div>
-            ) : (
-              <div id="remote-queue-list" className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5">
-                {syncState.queue.map((item, idx) => {
-                  const keyDetails = item.key ? getCamelotDetails(item.key) : null;
-                  const curKey = currentTrack?.key;
-                  const compat = curKey && item.key ? getHarmonicCompatibility(curKey, item.key) : null;
-                  const colorClass = compat
-                    ? compat.color === 'emerald'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : compat.color === 'amber'
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                      : compat.color === 'cyan'
-                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                      : compat.color === 'teal'
-                      ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-                      : compat.color === 'purple'
-                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                      : compat.color === 'rose'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                      : 'bg-white/10 text-slate-300 border-white/10'
-                    : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
+      syncState.queue.length === 0 ? (
+        <div id="party-console-queue-empty" data-testid="remote-queue-empty" className="text-center py-6 text-xs text-slate-500 font-mono">
+          <div id="remote-queue-empty" className="hidden" aria-hidden="true" />
+          Queue empty — request a song above, or the AI fills it once music plays.
+        </div>
+      ) : (
+        <div id="party-console-queue-list" data-testid="remote-queue-list" className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5">
+          <div id="remote-queue-list" className="hidden" aria-hidden="true" />
+          {syncState.queue.map((item, idx) => {
+            const keyDetails = item.key ? getCamelotDetails(item.key) : null;
+            const curKey = currentTrack?.key;
+            const compat = curKey && item.key ? getHarmonicCompatibility(curKey, item.key) : null;
+            const colorClass = compat
+              ? compat.color === 'emerald'
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : compat.color === 'amber'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : compat.color === 'cyan'
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                : compat.color === 'teal'
+                ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                : compat.color === 'purple'
+                ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                : compat.color === 'rose'
+                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                : 'bg-white/10 text-slate-300 border-white/10'
+              : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
 
-                  if (idx === 0) {
-                    // Mobile #1 On-Deck Hero
-                    return (
-                      <div
-                        id={`remote-queue-hero-${item.id}`}
-                        key={item.id}
-                        className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
-                      >
+            if (idx === 0) {
+              // Mobile #1 On-Deck Hero
+              return (
+                <div
+                  id={`party-console-queue-item-${item.id}`}
+                  data-testid={`remote-queue-hero-${item.id}`}
+                  key={item.id}
+                  className="p-2.5 rounded-xl border border-cyan-500/40 bg-gradient-to-r from-cyan-950/40 via-[#0e1626]/90 to-[#0c101c]/95 shadow-md flex flex-col gap-2 ring-1 ring-cyan-500/20"
+                >
                         <div className="flex items-center justify-between gap-1.5 text-[9px] font-mono flex-wrap">
                           <div className="flex items-center gap-1.5 font-extrabold text-cyan-300 uppercase shrink-0 min-w-0">
                             <span className="relative flex h-2 w-2 shrink-0">
@@ -375,7 +402,8 @@ syncState.queue.length === 0 ? (
                   // Mobile #2+ Items
                   return (
                     <div
-                      id={`remote-queue-item-${item.id}`}
+                      id={`party-console-queue-item-${item.id}`}
+                      data-testid={`remote-queue-item-${item.id}`}
                       key={item.id}
                       className="flex items-center justify-between p-2 bg-black/40 hover:bg-[#121827]/90 rounded-xl border border-white/5 text-xs transition-all"
                     >
@@ -811,6 +839,7 @@ syncState.queue.length === 0 ? (
           laptopVolume={syncState.laptopVolume ?? null}
           laptopMuted={!!syncState.laptopMuted}
           masterVolume={syncState.masterVolume ?? 0.9}
+          musicLevel={syncState.musicLevel ?? 1}
           send={onSendAction}
         />
 
@@ -1050,9 +1079,16 @@ syncState.queue.length === 0 ? (
         const queueDurationStr = totalQueueH > 0 ? `${totalQueueH}h ${totalQueueM}m` : `${totalQueueM}m`;
 
         return (
-          <div id="remote-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
-            <div id="remote-queue-header" className="flex items-center justify-between pb-2 border-b border-white/10">
-              <div id="remote-queue-title-group" className="flex items-center gap-2">
+          <div
+            id="party-console-queue"
+            data-testid="remote-queue"
+            className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-2.5 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl"
+          >
+            {/* Alias element for remote-queue compatibility */}
+            <div id="remote-queue" className="hidden" aria-hidden="true" />
+
+            <div id="party-console-queue-header" data-testid="remote-queue-header" className="flex items-center justify-between pb-2 border-b border-white/10">
+              <div id="party-console-queue-title-group" data-testid="remote-queue-title-group" className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center">
                   <ListMusic className="w-3.5 h-3.5 text-cyan-400" />
                 </div>
@@ -1069,6 +1105,12 @@ syncState.queue.length === 0 ? (
                     <span className="text-emerald-400 font-bold">{readyCount} ready</span>
                     <span>•</span>
                     <span className="text-amber-300 font-medium">~{queueDurationStr}</span>
+                    {syncState.diskCacheCount && syncState.diskCacheCount > 0 && (
+                      <>
+                        <span>•</span>
+                        <span className="text-cyan-400 font-medium">💾 {syncState.diskCacheCount} disk</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1076,17 +1118,19 @@ syncState.queue.length === 0 ? (
               <div className="flex items-center gap-1.5">
                 {syncState.queue.length > 1 && (
                   <button
-                    id="remote-sort-harmonic-btn"
+                    id="party-console-sort-harmonic-btn"
+                    data-testid="remote-sort-harmonic-btn"
                     onClick={() => onSendAction({ type: 'CMD_SORT_QUEUE_HARMONICALLY' })}
                     className="flex items-center gap-1 whitespace-nowrap text-[10px] font-mono font-bold text-purple-200 bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all shadow-sm"
                     title="Sort by key: reorder Up Next so each song's key fits the next (no clashes)"
                   >
                     <Sparkles className="w-2.5 h-2.5 text-purple-300 animate-pulse" />
-                    <span>Sort</span>
+                    <span>Sort by key</span>
                   </button>
                 )}
                 <button
-                  id="remote-refresh-queue-btn"
+                  id="party-console-refresh-queue-btn"
+                  data-testid="remote-refresh-queue-btn"
                   onClick={() => onSendAction({ type: 'CMD_REFRESH_QUEUE' })}
                   className="flex items-center gap-1 text-[10px] font-mono font-bold text-cyan-200 bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-1 rounded-lg active:scale-95 transition-all"
                   title="Refresh Up Next: keeps songs you added and the next 3"
@@ -1096,6 +1140,50 @@ syncState.queue.length === 0 ? (
                 </button>
               </div>
             </div>
+
+            {/* Focus / Filter chip */}
+            {syncState.artistFocus && (
+              <div
+                id="party-console-artist-focus"
+                className="flex items-center justify-between gap-2 text-[11px] bg-fuchsia-500/10 border border-fuchsia-500/30 rounded-lg px-2.5 py-1.5"
+              >
+                <span className="text-fuchsia-100 truncate font-bold">
+                  {describeFilter(syncState.artistFocus)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onSendAction({ type: 'CMD_CLEAR_FOCUS' })}
+                  className="p-0.5 rounded text-fuchsia-200 hover:text-white hover:bg-white/10 shrink-0"
+                  title="Clear artist filter"
+                  aria-label="Clear artist filter"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Embedded Search Dropdown with NLP Search */}
+            <SongSearchDropdown
+              onSelectSong={(song, autoMix) =>
+                onSendAction({
+                  type: autoMix ? 'CMD_MIX_NOW' : 'CMD_ADD_QUEUE',
+                  query: song.url || `${song.title} ${song.author}`,
+                })
+              }
+              onSearchSubmit={(targetQuery, autoMix) =>
+                onSendAction({
+                  type: autoMix ? 'CMD_MIX_NOW' : 'CMD_ADD_QUEUE',
+                  query: targetQuery,
+                })
+              }
+              formatTime={formatTime}
+              onApplyFilter={(filter) =>
+                onSendAction({
+                  type: 'CMD_SET_SONG_FILTER',
+                  filter,
+                })
+              }
+            />
 
             {queueList}
 

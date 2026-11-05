@@ -15,8 +15,21 @@ export const AICommandSchema = z.object({
   transition: z
     .object({
       target_deck: z.enum(['A', 'B']),
-      style: z.enum(['bass_swap', 'smooth_crossfade', 'drop_cut']).default('bass_swap'),
-      duration_seconds: z.number().min(2).max(32).default(8),
+      style: z
+        .enum([
+          'filter_bass_swap',
+          'loop_roll_riser',
+          'vinyl_brake_drop',
+          'echo_freeze_throw',
+          'showcase_3band_handoff',
+          'reverb_wash_drop',
+          'drop_cut',
+          'bass_swap',
+          'smooth_crossfade',
+          'tempo_ramp',
+        ])
+        .default('filter_bass_swap'),
+      duration_seconds: z.number().min(0.2).max(32).default(8),
     })
     .optional(),
   // Live Rhythm Enhancer: on/off, style and level (it follows the song on air by itself)

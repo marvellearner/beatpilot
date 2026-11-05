@@ -68,12 +68,12 @@ export function fitsFilter(f: SongFilter, song: Song): boolean {
 }
 
 // Kinds of songs in plain words (removed before the rest is read as artists' names or a title).
-// Earlier entries win: "classic 90s songs" is the 90s, not just "old".
+// Earlier entries win: "bhangra" wins over generic "dance", "classic 90s songs" is the 90s, not just "old".
 const KIND_WORDS: Array<[RegExp, 'vibe' | 'language' | 'era', string]> = [
+  [/\bbhangra\b/gi, 'vibe', 'bhangra'],
   [/\b(dance|dancing|danceable|party|club|upbeat|bangers?|floor ?fillers?|naach|nachne)\b/gi, 'vibe', 'dance'],
   [/\b(romantic|love|slow)\b/gi, 'vibe', 'romantic'],
   [/\b(chill|relax(ing)?|calm|soft)\b/gi, 'vibe', 'chill'],
-  [/\bbhangra\b/gi, 'vibe', 'bhangra'],
   [/\bpunjabi\b/gi, 'language', 'punjabi'],
   [/\b(hindi|bollywood)\b/gi, 'language', 'hindi'],
   [/\benglish\b/gi, 'language', 'english'],
@@ -153,4 +153,337 @@ export function filterQueries(f: SongFilter, tasteArtists: string[]): string[] {
 export function filterForPrompt(f: SongFilter): string {
   const d = describeFilter(f).replace(/^Only /, '').replace(/^More /, '');
   return f.only ? `ONLY ${d}: nothing else at all.` : `About half of them: ${d}.`;
+}
+
+// ---------------------------------------------------------------------------
+// NLP Search Resolution Pipeline
+// Translates natural, conversational requests (e.g. "play some romantic arijit
+// singh songs", "bhangra party bangers by diljit", "something like brown munde")
+// into high-accuracy music video search queries and structured DJ intents.
+// ---------------------------------------------------------------------------
+
+export interface NlpSearchIntent {
+  rawQuery: string;
+  isNlp: boolean;
+  intentType: 'track_request' | 'artist_vibe' | 'vibe_filter' | 'similar_tracks' | 'direct_search';
+  artists: string[];
+  trackTitle?: string;
+  vibe?: Vibe;
+  language?: FilterLanguage;
+  era?: Era;
+  searchTerms: string[];
+  badgeLabel?: string;
+  filter?: SongFilter;
+  only?: boolean;
+}
+
+const KNOWN_ARTIST_ENTRIES: Array<{ match: RegExp; name: string; defaultLanguage?: FilterLanguage }> = [
+  // Punjabi / Desi Hip-hop
+  { match: /\b(diljit\s+dosanjh|diljit)\b/i, name: 'Diljit Dosanjh', defaultLanguage: 'punjabi' },
+  { match: /\b(karan\s+aujla|aujla)\b/i, name: 'Karan Aujla', defaultLanguage: 'punjabi' },
+  { match: /\b(sidhu\s+moose\s*wala|sidhu\s*moosewala|moose\s*wala|sidhu)\b/i, name: 'Sidhu Moose Wala', defaultLanguage: 'punjabi' },
+  { match: /\b(ap\s+dhillon|dhillon)\b/i, name: 'AP Dhillon', defaultLanguage: 'punjabi' },
+  { match: /\b(shubh)\b/i, name: 'Shubh', defaultLanguage: 'punjabi' },
+  { match: /\b(yo\s+yo\s+honey\s+singh|honey\s+singh)\b/i, name: 'Yo Yo Honey Singh', defaultLanguage: 'punjabi' },
+  { match: /\b(badshah)\b/i, name: 'Badshah', defaultLanguage: 'hindi' },
+  { match: /\b(guru\s+randhawa)\b/i, name: 'Guru Randhawa', defaultLanguage: 'punjabi' },
+  { match: /\b(amrinder\s+gill)\b/i, name: 'Amrinder Gill', defaultLanguage: 'punjabi' },
+  { match: /\b(b\s+praak)\b/i, name: 'B Praak', defaultLanguage: 'punjabi' },
+  { match: /\b(jassie\s+gill)\b/i, name: 'Jassie Gill', defaultLanguage: 'punjabi' },
+  { match: /\b(hardy\s+sandhu|harrdy\s+sandhu)\b/i, name: 'Harrdy Sandhu', defaultLanguage: 'punjabi' },
+  { match: /\b(mankirt\s+aulakh)\b/i, name: 'Mankirt Aulakh', defaultLanguage: 'punjabi' },
+  { match: /\b(prem\s+dhillon)\b/i, name: 'Prem Dhillon', defaultLanguage: 'punjabi' },
+  { match: /\b(mickey\s+singh)\b/i, name: 'Mickey Singh', defaultLanguage: 'punjabi' },
+  { match: /\b(ikky)\b/i, name: 'Ikky', defaultLanguage: 'punjabi' },
+  { match: /\b(divine)\b/i, name: 'DIVINE', defaultLanguage: 'hindi' },
+  { match: /\b(seedhe\s+maut)\b/i, name: 'Seedhe Maut', defaultLanguage: 'hindi' },
+  { match: /\b(raftaar)\b/i, name: 'Raftaar', defaultLanguage: 'hindi' },
+  { match: /\b(mc\s+stan)\b/i, name: 'MC Stan', defaultLanguage: 'hindi' },
+
+  // Bollywood / Hindi
+  { match: /\b(arijit\s+singh|arijit)\b/i, name: 'Arijit Singh', defaultLanguage: 'hindi' },
+  { match: /\b(atif\s+aslam|atif)\b/i, name: 'Atif Aslam', defaultLanguage: 'hindi' },
+  { match: /\b(kk|krishnakumar\s+kunnath)\b/i, name: 'KK', defaultLanguage: 'hindi' },
+  { match: /\b(mohit\s+chauhan)\b/i, name: 'Mohit Chauhan', defaultLanguage: 'hindi' },
+  { match: /\b(sonu\s+nigam)\b/i, name: 'Sonu Nigam', defaultLanguage: 'hindi' },
+  { match: /\b(shreya\s+ghoshal)\b/i, name: 'Shreya Ghoshal', defaultLanguage: 'hindi' },
+  { match: /\b(sunidhi\s+chauhan)\b/i, name: 'Sunidhi Chauhan', defaultLanguage: 'hindi' },
+  { match: /\b(neha\s+kakkar)\b/i, name: 'Neha Kakkar', defaultLanguage: 'hindi' },
+  { match: /\b(jubin\s+nautiyal)\b/i, name: 'Jubin Nautiyal', defaultLanguage: 'hindi' },
+  { match: /\b(armaan\s+malik)\b/i, name: 'Armaan Malik', defaultLanguage: 'hindi' },
+  { match: /\b(darshan\s+raval)\b/i, name: 'Darshan Raval', defaultLanguage: 'hindi' },
+  { match: /\b(pritam)\b/i, name: 'Pritam', defaultLanguage: 'hindi' },
+  { match: /\b(a\.?r\.?\s*rahman|ar\s+rahman|rahman)\b/i, name: 'A.R. Rahman', defaultLanguage: 'hindi' },
+  { match: /\b(kishore\s+kumar|kishore\s+da)\b/i, name: 'Kishore Kumar', defaultLanguage: 'hindi' },
+  { match: /\b(lata\s+mangeshkar)\b/i, name: 'Lata Mangeshkar', defaultLanguage: 'hindi' },
+  { match: /\b(mohammed\s+rafi|mohd\s+rafi|rafi\s+sahab|rafi)\b/i, name: 'Mohammed Rafi', defaultLanguage: 'hindi' },
+  { match: /\b(kumar\s+sanu)\b/i, name: 'Kumar Sanu', defaultLanguage: 'hindi' },
+  { match: /\b(udit\s+narayan)\b/i, name: 'Udit Narayan', defaultLanguage: 'hindi' },
+  { match: /\b(alka\s+yagnik)\b/i, name: 'Alka Yagnik', defaultLanguage: 'hindi' },
+  { match: /\b(anuv\s+jain)\b/i, name: 'Anuv Jain', defaultLanguage: 'hindi' },
+  { match: /\b(prateek\s+kuhad)\b/i, name: 'Prateek Kuhad', defaultLanguage: 'hindi' },
+
+  // Global / Pop / Hip-Hop
+  { match: /\b(the\s+weeknd|weeknd)\b/i, name: 'The Weeknd', defaultLanguage: 'english' },
+  { match: /\b(drake)\b/i, name: 'Drake', defaultLanguage: 'english' },
+  { match: /\b(taylor\s+swift)\b/i, name: 'Taylor Swift', defaultLanguage: 'english' },
+  { match: /\b(ed\s+sheeran)\b/i, name: 'Ed Sheeran', defaultLanguage: 'english' },
+  { match: /\b(justin\s+bieber)\b/i, name: 'Justin Bieber', defaultLanguage: 'english' },
+  { match: /\b(post\s+malone)\b/i, name: 'Post Malone', defaultLanguage: 'english' },
+  { match: /\b(dua\s+lipa)\b/i, name: 'Dua Lipa', defaultLanguage: 'english' },
+  { match: /\b(bruno\s+mars)\b/i, name: 'Bruno Mars', defaultLanguage: 'english' },
+  { match: /\b(coldplay)\b/i, name: 'Coldplay', defaultLanguage: 'english' },
+  { match: /\b(chainsmokers|the\s+chainsmokers)\b/i, name: 'The Chainsmokers', defaultLanguage: 'english' },
+  { match: /\b(calvin\s+harris)\b/i, name: 'Calvin Harris', defaultLanguage: 'english' },
+  { match: /\b(david\s+guetta)\b/i, name: 'David Guetta', defaultLanguage: 'english' },
+  { match: /\b(avicii)\b/i, name: 'Avicii', defaultLanguage: 'english' },
+  { match: /\b(travis\s+scott)\b/i, name: 'Travis Scott', defaultLanguage: 'english' },
+  { match: /\b(kendrick\s+lamar)\b/i, name: 'Kendrick Lamar', defaultLanguage: 'english' },
+  { match: /\b(eminem)\b/i, name: 'Eminem', defaultLanguage: 'english' },
+  { match: /\b(billie\s+eilish)\b/i, name: 'Billie Eilish', defaultLanguage: 'english' },
+];
+
+/** Conversational prefixes indicating intentional user commands rather than literal titles */
+const CONVERSATIONAL_PREFIXES =
+  /^(?:can you(?:\s+please)?|could you(?:\s+please)?|please|pls|plz|i want to hear|i want|we want|wanna hear|put on|play|queue up|queue|add|mix in|drop|blast|spin|find me|search for|give me|get me|look up|chalao|lagao|baja do|sunao)\s+/i;
+
+const MUSIC_DESCRIPTORS =
+  /\b(fast|slow|hard|soft|heavy|high|low|bass|loud|upbeat|acoustic|unplugged|live|remix|original|instrumental|clean|radio|extended|short|bangers?|hits?|songs?|tracks?|music|vibes?)\b/i;
+
+function toTitleCase(s: string): string {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Parses natural language intent from any search query */
+export function parseNlpSearchQuery(query: string): NlpSearchIntent {
+  const trimmed = query.trim();
+  if (!trimmed || /^(https?:\/\/|local:)/i.test(trimmed)) {
+    return {
+      rawQuery: trimmed,
+      isNlp: false,
+      intentType: 'direct_search',
+      artists: [],
+      searchTerms: [trimmed],
+    };
+  }
+
+  let withoutPrefix = trimmed;
+  let hasConversationalPrefix = false;
+  while (CONVERSATIONAL_PREFIXES.test(withoutPrefix)) {
+    hasConversationalPrefix = true;
+    withoutPrefix = withoutPrefix.replace(CONVERSATIONAL_PREFIXES, '').trim();
+  }
+
+  // 1. "Something like X" / "songs like X" / "similar to X"
+  const similarMatch =
+    withoutPrefix.match(/^(?:something|songs?|tracks?)\s+(?:like|similar\s+to)\s+(.+)$/i) ||
+    withoutPrefix.match(/^similar\s+to\s+(.+)$/i);
+  if (similarMatch) {
+    const rawRef = similarMatch[1].replace(/['"]/g, '').trim();
+    const cleanRef = rawRef.replace(REQUEST_FILLER, ' ').replace(/\s+/g, ' ').trim() || rawRef;
+    const searchTerms = [
+      `${cleanRef} official video`,
+      `${cleanRef} song`,
+      `songs like ${cleanRef} hits`,
+    ];
+    return {
+      rawQuery: trimmed,
+      isNlp: true,
+      intentType: 'similar_tracks',
+      artists: [],
+      trackTitle: cleanRef,
+      searchTerms: [...new Set(searchTerms)],
+      badgeLabel: `✨ Similar: "${toTitleCase(cleanRef)}"`,
+    };
+  }
+
+  // 2. Extract song kinds: vibe, language, era
+  const { vibe, language: parsedLanguage, era, rest: restAfterKinds } = parseSongKinds(withoutPrefix);
+  const hasKinds = !!(vibe || parsedLanguage || era);
+
+  // 3. Extract known artists
+  const matchedArtists: string[] = [];
+  let defaultLangFromArtist: FilterLanguage | undefined;
+  for (const entry of KNOWN_ARTIST_ENTRIES) {
+    if (entry.match.test(trimmed)) {
+      matchedArtists.push(entry.name);
+      defaultLangFromArtist ??= entry.defaultLanguage;
+    }
+  }
+
+  // Check explicit "by <artist>" or "from <artist>" pattern
+  const byMatch = withoutPrefix.match(/\b(?:by|from)\s+([A-Za-z0-9\s.'-]+)$/i);
+  if (byMatch) {
+    const byCandidate = byMatch[1].trim();
+    if (byCandidate.length >= 2 && !matchedArtists.some((a) => a.toLowerCase() === byCandidate.toLowerCase())) {
+      matchedArtists.push(byCandidate);
+    }
+  }
+
+  // If no known artist matched yet, but kinds exist, check if rest has leftover words that look like an artist
+  if (hasKinds && matchedArtists.length === 0) {
+    const candidate = restAfterKinds.replace(REQUEST_FILLER, ' ').replace(/[^\p{L}\p{N}\s]+/gu, ' ').trim();
+    const candidateWords = candidate.split(/\s+/).filter(Boolean);
+    const nonDescriptorWords = candidateWords.filter((w) => !MUSIC_DESCRIPTORS.test(w));
+    if (nonDescriptorWords.length >= 1 && nonDescriptorWords.length <= 4 && candidate.length >= 2) {
+      matchedArtists.push(nonDescriptorWords.join(' '));
+    }
+  }
+
+  const language = parsedLanguage || defaultLangFromArtist;
+  const isOnly = /\b(only|just|nothing but|sirf)\b/i.test(trimmed);
+
+  // 4. Compound Artist + Vibe / Era / Language
+  if (matchedArtists.length > 0 && (hasKinds || isOnly)) {
+    const primaryArtist = matchedArtists[0];
+    const vibeWord = vibe ? (vibe === 'dance' ? 'party' : VIBE_WORD[vibe]) : '';
+    const langWord = language ? LANGUAGE_WORD[language] : '';
+    const eraWord = era ? ERA_WORD[era] : '';
+
+    const searchTerms: string[] = [];
+    if (vibeWord) {
+      searchTerms.push(
+        `${primaryArtist} ${vibeWord} hits official song`,
+        `${primaryArtist} ${vibeWord} songs`,
+        `best ${primaryArtist} ${vibeWord} full video`,
+        `${primaryArtist} ${vibeWord}`
+      );
+    } else if (eraWord || langWord) {
+      searchTerms.push(
+        `${primaryArtist} ${eraWord} ${langWord} hits official song`.replace(/\s+/g, ' ').trim(),
+        `${primaryArtist} ${langWord} songs`.replace(/\s+/g, ' ').trim(),
+        `${primaryArtist} official video`
+      );
+    } else {
+      searchTerms.push(
+        `${primaryArtist} hits official video`,
+        `${primaryArtist} official songs`,
+        `best of ${primaryArtist}`
+      );
+    }
+
+    const badgeParts = [
+      vibe && VIBE_WORD[vibe].charAt(0).toUpperCase() + VIBE_WORD[vibe].slice(1),
+      language && LANGUAGE_WORD[language],
+      era && ERA_WORD[era],
+      primaryArtist,
+    ].filter(Boolean);
+
+    const filter: SongFilter = {
+      artists: matchedArtists,
+      only: isOnly,
+      ...(vibe && { vibe }),
+      ...(language && { language }),
+      ...(era && { era }),
+    };
+
+    return {
+      rawQuery: trimmed,
+      isNlp: true,
+      intentType: 'artist_vibe',
+      artists: matchedArtists,
+      vibe,
+      language,
+      era,
+      only: isOnly,
+      searchTerms: [...new Set(searchTerms)],
+      badgeLabel: isOnly ? `✨ Filter: Only ${primaryArtist}` : `✨ AI NLP: ${badgeParts.join(' · ')}`,
+      filter,
+    };
+  }
+
+  // 5. Pure Vibe / Language / Era Filter (e.g. "fast upbeat hindi dance songs", "90s bollywood party hits")
+  if (hasKinds) {
+    const filter: SongFilter = {
+      artists: [],
+      only: isOnly || !hasConversationalPrefix,
+      ...(vibe && { vibe }),
+      ...(language && { language }),
+      ...(era && { era }),
+    };
+    const baseQueries = filterQueries(filter, []);
+    const single = (baseQueries[0] || 'party songs').replace(/\bsongs$/, 'song');
+    const searchTerms = [
+      `${single} full video`,
+      `${single} official video`,
+      `best ${single} hits`,
+      ...baseQueries,
+    ];
+
+    const badgeParts = [
+      language && LANGUAGE_WORD[language],
+      era && ERA_WORD[era],
+      vibe && VIBE_WORD[vibe].charAt(0).toUpperCase() + VIBE_WORD[vibe].slice(1),
+    ].filter(Boolean);
+
+    return {
+      rawQuery: trimmed,
+      isNlp: true,
+      intentType: 'vibe_filter',
+      artists: [],
+      vibe,
+      language,
+      era,
+      only: filter.only,
+      searchTerms: [...new Set(searchTerms)],
+      badgeLabel: `✨ AI Vibe: ${badgeParts.join(' · ')}`,
+      filter,
+    };
+  }
+
+  // 6. Conversational Track Request: "play chaleya by arijit singh" or "can you play kesariya"
+  if (hasConversationalPrefix) {
+    // Check "play <track> by <artist>"
+    const trackByArtist = withoutPrefix.match(/^(.+?)\s+(?:by|from)\s+(.+)$/i);
+    if (trackByArtist) {
+      let title = trackByArtist[1].replace(/['"]/g, '').trim();
+      while (CONVERSATIONAL_PREFIXES.test(title)) {
+        title = title.replace(CONVERSATIONAL_PREFIXES, '').trim();
+      }
+      const rawArtist = trackByArtist[2].replace(/['"]/g, '').trim();
+      const known = KNOWN_ARTIST_ENTRIES.find((k) => k.match.test(rawArtist));
+      const canonicalArtist = known ? known.name : toTitleCase(rawArtist);
+      const searchTerms = [
+        `${title} ${canonicalArtist} official song video`,
+        `${title} ${canonicalArtist} official video`,
+        `${title} ${canonicalArtist}`,
+      ];
+      return {
+        rawQuery: trimmed,
+        isNlp: true,
+        intentType: 'track_request',
+        artists: [canonicalArtist],
+        trackTitle: title,
+        searchTerms: [...new Set(searchTerms)],
+        badgeLabel: `✨ AI Track: "${toTitleCase(title)}" · ${canonicalArtist}`,
+      };
+    }
+
+    const cleanTitle = withoutPrefix.replace(/^(some|a|the)\s+/i, '').replace(/['"]/g, '').trim();
+    if (cleanTitle.length >= 2) {
+      const searchTerms = [
+        `${cleanTitle} official song video`,
+        `${cleanTitle} official video`,
+        cleanTitle,
+      ];
+      return {
+        rawQuery: trimmed,
+        isNlp: true,
+        intentType: 'track_request',
+        artists: matchedArtists,
+        trackTitle: cleanTitle,
+        searchTerms: [...new Set(searchTerms)],
+        badgeLabel: `✨ AI Request: "${toTitleCase(cleanTitle)}"`,
+      };
+    }
+  }
+
+  // 7. Direct search (song title, artist name, plain keywords)
+  return {
+    rawQuery: trimmed,
+    isNlp: false,
+    intentType: 'direct_search',
+    artists: matchedArtists,
+    searchTerms: [trimmed],
+  };
 }

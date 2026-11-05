@@ -62,7 +62,34 @@ export function namesArtist(text: string, artist: string): boolean {
     if (want.every((w, k) => have[i + k] === w)) return true;
   }
   const key = want.join('');
-  return key.length >= 5 && artistKey(text).includes(key);
+  if (key.length >= 5 && artistKey(text).includes(key)) return true;
+  // Hindi / Urdu / Punjabi names have many English spellings ("Nusrat Fatah Ali Khan" is "Nusrat
+  // Fateh Ali Khan", "Sagar Wali Qawali" is "Qawwali"): the same words by sound count too, but only
+  // for names long enough that a sound-alike can't be a different name
+  const wantSound = want.map(soundKey);
+  if (wantSound.join('').length < (want.length > 1 ? 5 : 4)) return false;
+  const haveSound = have.map(soundKey);
+  for (let i = 0; i + wantSound.length <= haveSound.length; i++) {
+    if (wantSound.every((w, k) => haveSound[i + k] === w)) return true;
+  }
+  return false;
+}
+
+/**
+ * A word's sound skeleton for romanised South Asian names: q→k, w→v, ph→f, no "h", vowels dropped
+ * after the first letter, doubled letters once. Fateh / Fatah / Fatheh → "ft", Qawwali / Qawali /
+ * Kawali → "kvl", Nusrat / Nushrat → "nsrt".
+ */
+export function soundKey(word: string): string {
+  const w = word
+    .toLowerCase()
+    .replace(/ph/g, 'f')
+    .replace(/q/g, 'k')
+    .replace(/w/g, 'v')
+    .replace(/ck/g, 'k');
+  const first = w[0] ?? '';
+  const rest = w.slice(1).replace(/[aeiouyh]/g, '');
+  return (first === 'h' ? '' : first) + rest.replace(/(.)\1+/g, '$1');
 }
 
 function cleanName(name: string): string {

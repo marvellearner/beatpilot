@@ -12,8 +12,10 @@ import {
 
 describe('Gemini Token Budget & Daily Spending Limiter', () => {
   const backupFile = `${GEMINI_USAGE_FILE}.test-backup`;
+  const origEnv = process.env.GEMINI_DAILY_LIMIT_INR;
 
   beforeEach(() => {
+    process.env.GEMINI_DAILY_LIMIT_INR = '100';
     if (fs.existsSync(GEMINI_USAGE_FILE)) {
       try {
         fs.copyFileSync(GEMINI_USAGE_FILE, backupFile);
@@ -25,6 +27,11 @@ describe('Gemini Token Budget & Daily Spending Limiter', () => {
   });
 
   afterEach(() => {
+    if (origEnv !== undefined) {
+      process.env.GEMINI_DAILY_LIMIT_INR = origEnv;
+    } else {
+      delete process.env.GEMINI_DAILY_LIMIT_INR;
+    }
     if (fs.existsSync(backupFile)) {
       try {
         fs.copyFileSync(backupFile, GEMINI_USAGE_FILE);

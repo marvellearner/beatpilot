@@ -51,27 +51,48 @@ export function dedupeQueue(queue: QueuedTrack[], drop: (item: QueuedTrack) => b
   const seenKeys: string[][] = [];
   const seenCoreTitles = new Set<string>();
   const seenUrls = new Set<string>();
+  const seenVideos = new Set<string>();
   const unique: QueuedTrack[] = [];
 
   for (const item of queue) {
     if (!item.title || drop(item)) continue;
     const core = cleanCoreTitle(item.title);
     const url = lower(item.url);
+    const video = videoIdOf(item.url);
     const keys = songKeys(item);
 
-    // 1. Direct URL match
+    // 1. Same link or same YouTube video
     if (url && seenUrls.has(url)) continue;
-    // 2. Core title match (e.g. "Lover" vs "Diljit Dosanjh - Lover")
-    if (core && seenCoreTitles.has(core)) continue;
-    // 3. Multi-key fuzzy / videoId match
-    if (seenKeys.some((prev) => isSameSong(prev, keys))) continue;
+    if (video && seenVideos.has(video)) continue;
+    // A song someone chose is only a duplicate of the same video: the name matching below calls
+    // two songs from one film ("ANIMAL: Pehle Bhi Main", "ANIMAL: Satranga") the same and dropped
+    // the listener's pick
+    if (!isChosen(item)) {
+      // 2. Core title match (e.g. "Lover" vs "Diljit Dosanjh - Lover")
+      if (core && seenCoreTitles.has(core)) continue;
+      // 3. Multi-key fuzzy match
+      if (seenKeys.some((prev) => isSameSong(prev, keys))) continue;
+    }
 
     if (url) seenUrls.add(url);
+    if (video) seenVideos.add(video);
     if (core) seenCoreTitles.add(core);
     seenKeys.push(keys);
     unique.push(item);
   }
   return unique;
+}
+
+/** The YouTube video id in a link (watch?v=, youtu.be/, shorts/), if any. */
+export function videoIdOf(url?: string): string | undefined {
+  return url?.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1];
+}
+
+/** Same link or same YouTube video: the strict "same song" for songs someone picked themselves. */
+export function sameVideo(a: SongLike, b: SongLike): boolean {
+  if (a.url && b.url && lower(a.url) === lower(b.url)) return true;
+  const va = videoIdOf(a.url);
+  return !!va && va === videoIdOf(b.url);
 }
 
 /** The first songs of Up Next are left alone by reshuffles, expiry and Refresh: they're loading or about to play. */

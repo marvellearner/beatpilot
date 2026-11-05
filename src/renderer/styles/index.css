@@ -133,3 +133,144 @@ input[type='range']::-webkit-slider-thumb:hover {
   background: var(--deck-p-secondary);
   box-shadow: 0 0 10px var(--deck-p-glow);
 }
+
+/* ---------- Pro view: flat hardware-style panels (Party view keeps its own look) ---------- */
+:root {
+  --pro-panel: #0f1218;
+  --pro-inset: #0a0c11;
+  --pro-line: rgba(255, 255, 255, 0.07);
+  --pro-line-strong: rgba(255, 255, 255, 0.12);
+  --pro-a: #22d3ee;
+  --pro-b: #f59e0b;
+}
+
+.pro-panel {
+  background: var(--pro-panel);
+  border: 1px solid var(--pro-line);
+  border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.pro-inset {
+  background: var(--pro-inset);
+  border: 1px solid var(--pro-line);
+  border-radius: 10px;
+}
+
+.pro-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.pro-num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Neutral hardware button */
+.pro-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--pro-line-strong);
+  background: #161a22;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.pro-btn:hover:not(:disabled) {
+  background: #1d222c;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.pro-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.pro-btn[aria-pressed='true'] {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.35);
+  background: #222834;
+}
+
+/* Segmented control */
+.pro-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  background: var(--pro-inset);
+  border: 1px solid var(--pro-line);
+}
+.pro-seg > button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  transition: background-color 0.12s, color 0.12s;
+}
+.pro-seg > button:hover {
+  color: #e2e8f0;
+}
+.pro-seg > button[aria-pressed='true'] {
+  background: #252b37;
+  color: #fff;
+}
+
+/* Sliders inside the Pro view: thin track, flat fader cap */
+.pro-view input[type='range'] {
+  height: 4px;
+  background: #1c212b;
+  border-radius: 2px;
+}
+.pro-view input[type='range']::-webkit-slider-thumb {
+  width: 12px;
+  height: 22px;
+  border-radius: 3px;
+  background: linear-gradient(#e5e7eb, #9ca3af);
+  border: 1px solid #0b0d12;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+.pro-view input[type='range']::-webkit-slider-thumb:hover {
+  transform: none;
+  background: linear-gradient(#ffffff, #cbd5e1);
+}
+.pro-view input[type='range'].fader-a::-webkit-slider-thumb {
+  background: linear-gradient(#e5e7eb, #9ca3af);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6), inset 0 -3px 0 var(--pro-a);
+}
+.pro-view input[type='range'].fader-b::-webkit-slider-thumb {
+  background: linear-gradient(#e5e7eb, #9ca3af);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.6), inset 0 -3px 0 var(--pro-b);
+}
+/* Vertical channel faders (EQ, volume): the track stands up, max at the top */
+.pro-view input[type='range'].pro-vfader {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 4px;
+  height: 92px;
+}
+.pro-view input[type='range'].pro-vfader::-webkit-slider-thumb {
+  width: 22px;
+  height: 12px;
+}
+/* The crossfader: a wider track and a long cap */
+.pro-view input[type='range'].pro-xfader {
+  height: 6px;
+  background: linear-gradient(90deg, rgba(34, 211, 238, 0.35), #1c212b 35%, #1c212b 65%, rgba(245, 158, 11, 0.35));
+}
+.pro-view input[type='range'].pro-xfader::-webkit-slider-thumb {
+  width: 16px;
+  height: 30px;
+  background: linear-gradient(90deg, #9ca3af, #f3f4f6 50%, #9ca3af);
+}

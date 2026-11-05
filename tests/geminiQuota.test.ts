@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { geminiBlocked, geminiGenerate } from '../server/llm';
 
 // Google's answer when the free quota is used up (shortened)
@@ -6,7 +6,18 @@ const quotaAnswer = () =>
   new Response(JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota', details: [{ retryDelay: '30s' }] } }).replace('"details"', '"details"').replace('[{"retryDelay":"30s"}]', '[{"@type":"RetryInfo","retryDelay":"30s"}]'), { status: 429 });
 
 describe('Gemini quota (the light said green while every request failed with 429)', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  const origDailyLimit = process.env.GEMINI_DAILY_LIMIT_INR;
+  beforeEach(() => {
+    process.env.GEMINI_DAILY_LIMIT_INR = '999999';
+  });
+  afterEach(() => {
+    if (origDailyLimit === undefined) {
+      delete process.env.GEMINI_DAILY_LIMIT_INR;
+    } else {
+      process.env.GEMINI_DAILY_LIMIT_INR = origDailyLimit;
+    }
+    vi.unstubAllGlobals();
+  });
 
   it('tries every model, then holds Gemini back for the wait Google asks for', async () => {
     process.env.GEMINI_API_KEY = 'test-key-not-real';

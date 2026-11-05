@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QueuedTrack } from '../src/types';
-import { MAX_QUEUE_TARGET, activeCount, dedupeQueue, isQueueFull, mixFamiliarAndNew, moveWesternDown, sameSongAs, spreadArtists, staleSongs } from '../src/audio/engine/queueRules';
+import { MAX_QUEUE_TARGET, activeCount, dedupeQueue, isQueueFull, mixFamiliarAndNew, moveWesternDown, sameSongAs, sameVideo, spreadArtists, staleSongs } from '../src/audio/engine/queueRules';
 
 const track = (id: string, title: string, extra: Partial<QueuedTrack> = {}): QueuedTrack =>
   ({ id, title, artist: 'Artist', duration: 200, url: `search:${id}`, status: 'queued', ...extra }) as QueuedTrack;
@@ -49,6 +49,27 @@ describe('dedupeQueue', () => {
     const playedRecently = (item: QueuedTrack) => item.title === 'Lover' || item.title === 'Softly';
     const kept = dedupeQueue(q, (item) => item.source !== 'request' && playedRecently(item));
     expect(kept.map((t) => t.id)).toEqual(['a']);
+  });
+
+  it("never drops a listener's pick for a different song with a similar name (same film)", () => {
+    const yt = (v: string) => `https://www.youtube.com/watch?v=${v}`;
+    const q = [
+      track('pick', 'ANIMAL: SATRANGA', { source: 'request', url: yt('SSSSSSSSSSS') }),
+      track('pick2', 'Humsafar | Badlapur', { source: 'request', url: yt('HHHHHHHHHHH') }),
+      track('auto', 'ANIMAL:PEHLE BHI MAIN(Lyrical) | Ranbir Kapoor', { source: 'ai', url: yt('PPPPPPPPPPP') }),
+      track('pick3', 'Mere HumSafar OST | Male Version', { source: 'request', url: yt('MMMMMMMMMMM') }),
+      // The same video picked twice is still one song
+      track('again', 'Satranga (lyrics)', { source: 'request', url: 'https://youtu.be/SSSSSSSSSSS' }),
+    ];
+    expect(dedupeQueue(q, () => false).map((t) => t.id)).toEqual(['pick', 'pick2', 'pick3']);
+  });
+});
+
+describe('sameVideo', () => {
+  it('matches the same link or YouTube video only, never by name', () => {
+    expect(sameVideo({ url: 'https://www.youtube.com/watch?v=AAAAAAAAAAA' }, { url: 'https://youtu.be/AAAAAAAAAAA' })).toBe(true);
+    expect(sameVideo({ url: 'local:abc' }, { url: 'LOCAL:ABC' })).toBe(true);
+    expect(sameVideo({ title: 'ANIMAL: SATRANGA', url: 'https://youtu.be/AAAAAAAAAAA' }, { title: 'ANIMAL: SATRANGA', url: 'https://youtu.be/BBBBBBBBBBB' })).toBe(false);
   });
 });
 

@@ -24,8 +24,6 @@ import {
   Smartphone,
   ExternalLink,
   QrCode,
-  ListMusic,
-  Radio,
   Zap,
   Music,
   ArrowUp,
@@ -78,6 +76,9 @@ export const App: React.FC = () => {
   const [consoleMode, setConsoleMode] = useState<'party' | 'pro'>('party');
   // The top bar's slot for the Party console's my_songs.txt buttons (set once it's on screen)
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  const onHeaderSlotRef = useCallback((node: HTMLElement | null) => {
+    setHeaderSlot((prev) => (prev !== node ? node : prev));
+  }, []);
 
   // Execute Mobile Action on Host
   const handleMobileAction = useCallback(
@@ -152,6 +153,9 @@ export const App: React.FC = () => {
         case 'CMD_SET_MASTER_VOLUME':
           engine.setMasterVolume(action.volume);
           break;
+        case 'CMD_SET_MUSIC_LEVEL':
+          engine.setMusicLevel(action.level);
+          break;
         case 'CMD_SET_LAPTOP_VOLUME':
         case 'CMD_TOGGLE_LAPTOP_MUTE':
         case 'CMD_MUTE_LAPTOP':
@@ -191,6 +195,12 @@ export const App: React.FC = () => {
           break;
         case 'CMD_MOVE_QUEUED':
           engine.moveQueueItem(action.itemId, action.direction);
+          break;
+        case 'CMD_SET_SONG_FILTER':
+          engine.setSongFilter(action.filter);
+          break;
+        case 'CMD_CLEAR_FOCUS':
+          engine.clearArtistFocus();
           break;
       }
     },
@@ -421,7 +431,7 @@ export const App: React.FC = () => {
             </div>
           )}
           {/* The Party console's my_songs.txt buttons are drawn here (see PartyConsoleView) */}
-          {consoleMode === 'party' && <div id="app-header-party-slot" ref={setHeaderSlot} className="contents" />}
+          {consoleMode === 'party' && <div id="app-header-party-slot" ref={onHeaderSlotRef} className="contents" />}
 
           {/* View Switcher: Party Console vs Pro DJ Decks */}
           <div id="app-view-switcher" className="flex items-center bg-black/40 p-1 rounded-xl border border-white/10">
@@ -646,30 +656,25 @@ export const App: React.FC = () => {
           headerSlot={headerSlot}
         />
       ) : (
-        <>
-          {/* Live Rhythm Enhancer (Deck P) */}
-          <section id="app-pro-percussion">
-            <RhythmPanel rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
-          </section>
-
-          {/* Main Dual-Deck and Center Mixer Grid */}
-          <main id="app-pro-decks" className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-            {/* Deck A (Left) */}
-            <div id="app-pro-deck-a-column" className="lg:col-span-4">
+        <div className="pro-view flex flex-col gap-4">
+          {/* Decks either side of the mixer, like a DJ controller */}
+          <main id="app-pro-decks" className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px_minmax(0,1fr)] gap-4 items-start">
+            <div id="app-pro-deck-a-column" className="min-w-0">
               <DeckView deck={engine.deckA} deckId="A" engine={engine} />
             </div>
-
-            {/* Master Center Mixer & AI Transition (Middle) */}
-            <div id="app-pro-mixer-column" className="lg:col-span-4">
+            <div id="app-pro-mixer-column" className="min-w-0">
               <MixerSection engine={engine} />
             </div>
-
-            {/* Deck B (Right) */}
-            <div id="app-pro-deck-b-column" className="lg:col-span-4">
+            <div id="app-pro-deck-b-column" className="min-w-0">
               <DeckView deck={engine.deckB} deckId="B" engine={engine} />
             </div>
           </main>
-        </>
+
+          {/* Live Rhythm Enhancer (Deck P) */}
+          <section id="app-pro-percussion">
+            <RhythmPanel variant="pro" rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
+          </section>
+        </div>
       )}
 
       {/* Autonomous 50-Song Upcoming Queue Panel (Desktop Console Pro View) */}
@@ -681,209 +686,140 @@ export const App: React.FC = () => {
           : undefined;
 
         return (
-          <section id="app-pro-queue" className="dj-panel rounded-2xl p-4 border border-white/10 flex flex-col gap-3 bg-gradient-to-b from-[#111625]/95 to-[#090c15]/95 shadow-xl">
-            <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-white/10">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500/25 to-purple-500/25 border border-cyan-500/30 flex items-center justify-center shadow-sm">
-                  <ListMusic className="w-4 h-4 text-cyan-400" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-black text-sm text-white tracking-wide">
-                      AI UPCOMING QUEUE
-                    </h3>
-                    <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                      {queueState.queueLength} TRACKS
-                    </span>
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5 pt-0.5">
-                    <span className="text-emerald-400 font-bold">{queueState.readyCount} ready</span>
-                    <span>•</span>
-                    <span className="text-amber-300 font-medium">~{queueState.queueDurationStr} continuous party flow</span>
-                    {queueState.diskCacheCount > 0 && (
-                      <>
-                        <span>•</span>
-                        <span className="text-cyan-400">💾 {queueState.diskCacheCount} on disk</span>
-                      </>
-                    )}
-                  </div>
-                </div>
+          <section id="app-pro-queue" className="pro-view pro-panel p-4 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-baseline gap-3">
+                <h3 className="text-[13px] font-bold text-white tracking-wide">Up Next</h3>
+                <span className="text-[11px] text-slate-400 pro-num">
+                  {queueState.queueLength} songs · <span className="text-emerald-400">{queueState.readyCount} ready</span> · ~{queueState.queueDurationStr}
+                  {queueState.diskCacheCount > 0 && <> · {queueState.diskCacheCount} on disk</>}
+                </span>
               </div>
-
               <div className="flex items-center gap-2">
                 {queueState.queueLength > 1 && (
                   <button
                     id="app-pro-sort-harmonic-btn"
+                    type="button"
                     onClick={() => engine.sortQueueHarmonically()}
-                    className="flex items-center gap-1.5 text-xs font-mono font-extrabold text-purple-200 bg-gradient-to-r from-purple-500/25 via-indigo-500/25 to-pink-500/25 hover:from-purple-500/40 hover:to-indigo-500/40 border border-purple-500/40 px-3 py-1 rounded-xl shadow-md active:scale-95 transition-all cursor-pointer"
-                    title="Sort queue using Camelot wheel harmonic rules"
+                    className="pro-btn !h-7"
+                    title="Reorder Up Next with the Camelot wheel so each song's key fits the next"
                   >
-                    <Sparkles className="w-3 h-3 text-purple-300 animate-pulse" />
-                    <span>Sort by key</span>
+                    <Sparkles className="w-3 h-3" />
+                    Sort by key
                   </button>
                 )}
-
                 <button
+                  type="button"
                   onClick={() => engine.toggleAutoCuration()}
-                  className={`text-[11px] font-mono font-bold px-3 py-1 rounded-xl border transition-colors ${
-                    engine.autoCurationEnabled
-                      ? 'bg-purple-600/30 border-purple-500 text-purple-300'
-                      : 'bg-white/5 border-white/10 text-slate-400'
-                  }`}
+                  aria-pressed={engine.autoCurationEnabled}
+                  className="pro-btn !h-7"
+                  title="Keep Up Next filled with picks automatically"
                 >
-                  Auto-fill Up Next: {engine.autoCurationEnabled ? 'ON' : 'OFF'}
+                  <span className={`w-1.5 h-1.5 rounded-full ${engine.autoCurationEnabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                  Auto-fill {engine.autoCurationEnabled ? 'on' : 'off'}
                 </button>
-
-                <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
-                  <Radio className="w-3 h-3 animate-pulse" />
-                  <span className="font-bold">Auto-Mix Active</span>
-                </span>
               </div>
             </div>
 
-            {/* Queue Cards Grid */}
-            <div id="app-pro-queue-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-3 pt-1 max-h-[520px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10">
-              {queueState.queue.map((item, idx) => {
-                const keyDetails = item.key ? getCamelotDetails(item.key) : null;
-                const compat = proCurKey && item.key ? getHarmonicCompatibility(proCurKey, item.key) : null;
-                const colorClass = compat
-                  ? compat.color === 'emerald'
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                    : compat.color === 'amber'
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                    : compat.color === 'cyan'
-                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                    : compat.color === 'teal'
-                    ? 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-                    : compat.color === 'purple'
-                    ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                    : compat.color === 'rose'
-                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                    : 'bg-white/10 text-slate-300 border-white/10'
-                  : 'bg-purple-500/15 text-purple-300 border-purple-500/25';
+            {/* Column headings */}
+            <div className="grid grid-cols-[28px_minmax(0,1fr)_56px_112px_84px_112px] gap-3 px-2 pro-label">
+              <span className="text-right">#</span>
+              <span>Title</span>
+              <span className="text-right">BPM</span>
+              <span>Key</span>
+              <span>Status</span>
+              <span className="text-right">Actions</span>
+            </div>
 
-                const isHero = idx === 0;
+            <div id="app-pro-queue-grid" className="flex flex-col max-h-[520px] overflow-y-auto pr-1 -mt-1">
+              {queueState.queue.map((item, idx) => {
+                const compat = proCurKey && item.key ? getHarmonicCompatibility(proCurKey, item.key) : null;
+                const keyDetails = item.key ? getCamelotDetails(item.key) : null;
+                const keyColors: Record<string, string> = {
+                  emerald: 'text-emerald-400',
+                  amber: 'text-amber-400',
+                  cyan: 'text-cyan-400',
+                  teal: 'text-teal-400',
+                  purple: 'text-purple-400',
+                  rose: 'text-rose-400',
+                };
+                const keyColor = compat ? keyColors[compat.color] ?? 'text-slate-300' : 'text-slate-300';
+                const isNext = idx === 0;
+                // Still being looked up: the title is the link the listener pasted or picked
+                const resolving = /^(https?:\/\/|local:)/i.test(item.title);
+                const statusStyle = item.status === 'ready' ? 'text-emerald-400' : item.status === 'failed' ? 'text-rose-400' : 'text-amber-300';
 
                 return (
                   <div
                     id={`app-pro-queue-item-${item.id}`}
                     key={item.id}
-                    className={`p-3 rounded-xl flex flex-col justify-between gap-2.5 text-xs transition-all relative group ${
-                      isHero
-                        ? 'bg-gradient-to-b from-cyan-950/40 via-[#101728]/90 to-[#0c101c]/95 border border-cyan-500/40 shadow-lg shadow-cyan-950/30 ring-1 ring-cyan-500/25'
-                        : 'bg-black/40 hover:bg-[#121827]/90 border border-white/5 hover:border-white/20'
+                    className={`group grid grid-cols-[28px_minmax(0,1fr)_56px_112px_84px_112px] gap-3 items-center px-2 py-2 rounded-lg border-b border-white/[0.04] ${
+                      isNext ? 'bg-white/[0.04]' : 'hover:bg-white/[0.03]'
                     }`}
                   >
-                    <div className="flex flex-col gap-1.5">
-                      {/* Top Rank + Badges */}
-                      <div className="flex justify-between items-center text-[10px] font-mono gap-1.5 flex-wrap">
-                        <span className={`font-bold shrink-0 whitespace-nowrap ${isHero ? 'text-cyan-300 flex items-center gap-1 font-black' : 'text-slate-500'}`}>
-                          {isHero && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping shrink-0" />}
-                          #{idx + 1} {isHero ? 'UP NEXT' : 'UPCOMING'}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          {item.isAiRecommended && (
-                            <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1 rounded font-bold text-[8px]">
-                              AI
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => engine.removeFromQueue(item.id)}
-                            className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-white p-0.5 rounded transition-all"
-                            title="Remove from queue"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Thumbnail & Title (Spacious 2-line wrapped title for 50+ chars upfront) */}
-                      <div className="flex items-start gap-2">
-                        <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-white/10 bg-slate-900 mt-0.5">
-                          {item.thumbnail ? (
-                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center bg-slate-800">
-                              <Music className="w-3.5 h-3.5 text-slate-400" />
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex flex-col min-w-0 flex-1">
-                          <div className="font-bold text-white text-xs group-hover:text-cyan-300 transition-colors line-clamp-2 leading-snug break-words" title={item.title}>
-                            {item.title}
+                    <span className={`text-right text-[11px] pro-num ${isNext ? 'text-white font-bold' : 'text-slate-600'}`}>{idx + 1}</span>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-md overflow-hidden shrink-0 bg-white/5">
+                        {item.thumbnail ? (
+                          <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Music className="w-3.5 h-3.5 text-slate-600" />
                           </div>
-                          <div className="text-[10px] text-slate-400 truncate pt-0.5">{item.artist}</div>
-                        </div>
+                        )}
                       </div>
-
-                      {/* Camelot Key + BPM badges */}
-                      <div className="flex items-center gap-1 flex-wrap pt-0.5">
-                        {item.bpm !== undefined && (
-                          <span className="font-mono text-[9px] text-slate-300 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
-                            {Math.round(item.bpm)} BPM
-                          </span>
-                        )}
-                        {item.key && keyDetails && (
-                          <span
-                            className={`inline-flex items-center gap-0.5 font-mono text-[8px] font-bold px-1.5 py-0.5 rounded border ${colorClass}`}
-                            title={compat ? `${item.key} (${keyDetails.musicalKey}) • ${compat.description}` : `Key: ${item.key}`}
-                          >
-                            <span>{item.key}</span>
-                            {compat && compat.relation !== 'usable' && (
-                              <span className="font-black ml-0.5">{compat.badgeText}</span>
-                            )}
-                          </span>
-                        )}
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-100 truncate" title={item.title}>
+                          {resolving ? <span className="text-slate-400 font-normal">Resolving link…</span> : item.title}
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+                          {isNext && <span className="text-[9px] font-bold tracking-wider text-white bg-white/10 px-1 rounded">NEXT</span>}
+                          {item.isAiRecommended && <span className="text-[9px] font-bold tracking-wider text-purple-300">AI</span>}
+                          <span className="truncate">{resolving ? item.title : item.artist}</span>
+                        </div>
                       </div>
                     </div>
-
-                    {/* Bottom Status & Action Buttons */}
-                    <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                      <div className="flex items-center gap-1">
-                        {item.isDiskCached && (
-                          <span className="text-[8px] font-mono text-cyan-300 bg-cyan-500/15 border border-cyan-500/25 px-1 py-0.5 rounded font-bold">
-                            DISK
-                          </span>
-                        )}
-                        <span
-                          className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${
-                            item.status === 'ready'
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : item.status === 'failed'
-                              ? 'bg-red-500/20 text-red-300'
-                              : 'bg-yellow-500/20 text-yellow-300 animate-pulse'
-                          }`}
-                        >
-                          {item.status.toUpperCase()}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        {!isHero && (
-                          <button
-                            type="button"
-                            onClick={() => engine.moveQueueItem(item.id, 'top')}
-                            className="opacity-0 group-hover:opacity-100 p-1 rounded bg-white/5 hover:bg-white/15 text-slate-400 hover:text-cyan-300 text-[10px] transition-colors"
-                            title="Play Next (Move to #1 on deck)"
-                          >
-                            <ArrowUp className="w-3 h-3" />
-                          </button>
-                        )}
+                    <span className="text-right text-xs pro-num text-slate-300">{item.bpm !== undefined ? Math.round(item.bpm) : '—'}</span>
+                    <span
+                      className={`text-xs pro-num font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${keyColor}`}
+                      title={item.key ? (compat ? `${item.key} (${keyDetails?.musicalKey}) • ${compat.description}` : `Key: ${item.key}`) : 'Key not known yet'}
+                    >
+                      {item.key ?? '—'}
+                      {compat && compat.relation !== 'usable' && <span className="ml-1 text-[9px] opacity-80">{compat.badgeText}</span>}
+                    </span>
+                    <span className={`text-[10px] font-semibold tracking-wider uppercase ${statusStyle}`}>
+                      {item.status}
+                      {item.isDiskCached && <span className="ml-1 text-slate-600 normal-case tracking-normal">disk</span>}
+                    </span>
+                    <div className="flex items-center justify-end gap-1">
+                      {!isNext && (
                         <button
-                          onClick={() => engine.mixQueuedTrack(item.id)}
-                          disabled={item.status !== 'ready' || engine.isTransitioning}
-                          title={item.status === 'ready' ? 'Mix into this song now' : 'Still loading'}
-                          className={`flex items-center gap-1 text-[10px] font-black px-2.5 py-1 rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                            isHero
-                              ? 'bg-cyan-500 hover:bg-cyan-400 text-black shadow-md shadow-cyan-500/20'
-                              : 'bg-white/10 hover:bg-white/20 text-cyan-300'
-                          }`}
+                          type="button"
+                          onClick={() => engine.moveQueueItem(item.id, 'top')}
+                          className="opacity-0 group-hover:opacity-100 w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-opacity"
+                          title="Play next (move to #1)"
                         >
-                          <Zap className="w-3 h-3 fill-current" />
-                          <span>Mix</span>
+                          <ArrowUp className="w-3.5 h-3.5" />
                         </button>
-                      </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => engine.mixQueuedTrack(item.id)}
+                        disabled={item.status !== 'ready' || engine.isTransitioning}
+                        title={item.status === 'ready' ? 'Mix into this song now' : 'Still loading'}
+                        className="pro-btn !h-7 !px-2.5"
+                      >
+                        <Zap className="w-3 h-3" />
+                        Mix
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => engine.removeFromQueue(item.id)}
+                        className="opacity-0 group-hover:opacity-100 w-7 h-7 rounded-md flex items-center justify-center text-slate-500 hover:text-rose-300 hover:bg-white/10 transition-opacity"
+                        title="Remove from Up Next"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
                 );
