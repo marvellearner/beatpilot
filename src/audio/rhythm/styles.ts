@@ -1,143 +1,166 @@
 /**
- * Rhythm styles for the Live Rhythm Enhancer, written as 16-step bars (16th notes).
+ * The dhol wala's taals: what the Live Rhythm Enhancer plays, on dhol or dholak, written as
+ * 16-step bars (16th notes of a 4-beat bar).
  *
- * Each style has three versions: `light` (verses, quieter parts), `full` (choruses, drops)
- * and `fill` (the last bar before the energy rises, and the end of every 8-bar phrase in
- * full sections). A voice with several bars cycles through them for variation.
+ * Like a dhol player at a wedding, each taal has several things to play, chosen bar by bar by
+ * the score (dholScore.ts):
+ * - `light`: keeps time softly under the singing (verses)
+ * - `groove`: the full taal, for choruses, hooks and instrumental parts (several bars = variations)
+ * - `answer`: a short phrase on beats 3–4, played in the gap between two vocal lines
+ * - `break`: a 2-bar solo for a dhol break (a cue, or carrying the crowd through a mix)
+ * Rolls, tihais and accents are built from the taal's voices (dholEvents.ts).
  *
- * Step characters: X = accent, x = normal, o = ghost (soft), . = rest.
- * `swing` moves every off-beat 8th later: 0 = straight, 1/3 = full triplet shuffle.
+ * Step characters: X accent, x normal, o ghost (soft), m muted stroke (the hand damps the head),
+ * F flam (a soft grace stroke just before an accent), . rest.
+ * `swing` moves every off-beat 8th later: 0 = straight, 1/3 = full triplet shuffle (bhangra's lilt).
  */
 import type { VoiceId } from './kit';
 import type { MoodId } from '../Moods';
 
-export type RhythmStyleId =
-  | 'dhol_dhamaal'
-  | 'dholak_keherwa'
-  | 'clap_tambourine'
-  | 'club_tops'
-  | 'club_drive'
-  | 'afro_groove'
-  | 'light_shaker';
+export type RhythmStyleId = 'bhangra_chaal' | 'dhol_dhamaal' | 'luddi' | 'dholak_keherwa';
 
 type Layer = Partial<Record<VoiceId, string[]>>;
+type Phrase = Partial<Record<VoiceId, string>>;
 
 export interface RhythmStyle {
   id: RhythmStyleId;
   name: string;
+  instrument: 'dhol' | 'dholak';
   description: string;
   suits: string; // which songs it sits well on, shown in the UI
   swing: number;
+  bass: VoiceId; // the low head (accents, the boom of a tihai)
+  treble: VoiceId; // the high head (rolls, answers)
   light: Layer;
-  full: Layer;
-  fill: Partial<Record<VoiceId, string>>;
+  groove: Layer;
+  answer: Phrase; // beats 3–4 only (steps 8–15), laid over the light bar
+  break: Layer; // 2 bars
 }
 
 export const RHYTHM_STYLES: RhythmStyle[] = [
   {
-    id: 'dhol_dhamaal',
-    name: 'Dhol Dhamaal',
-    description: 'Peak-time dhol: a boom on every beat and driving cracks for the biggest moments.',
-    suits: 'High-energy Punjabi and Bollywood bangers',
-    swing: 0.12,
-    light: { dholBass: ['X.......X.......'], dholCrack: ['..x...x...x...x.'] },
-    full: {
-      dholBass: ['X...X...X...X...', 'X...X...X..xX.x.'],
-      dholCrack: ['x.X.x.X.x.X.x.X.', 'xoX.x.XoxoX.x.Xo'],
+    id: 'bhangra_chaal',
+    name: 'Bhangra Chaal',
+    instrument: 'dhol',
+    description: 'The swinging bhangra chaal: dagga on the one and the lift before three, tilli dancing in between.',
+    suits: 'Punjabi songs, Bollywood dance numbers, baraat',
+    swing: 0.28,
+    bass: 'dholBass',
+    treble: 'dholCrack',
+    light: { dholBass: ['X.......m.......'], dholCrack: ['....o.......o...'] },
+    groove: {
+      dholBass: ['X.....x.X.......', 'X.....x.X.....m.', 'X.....x.X.......', 'X.....x.X...x.x.'],
+      dholCrack: ['..x.X.x...x.X.x.', '..x.X.x...x.X.xo', 'o.x.X.x.o.x.X.x.', '..x.X.xox.x.XoXo'],
     },
-    fill: { dholBass: 'X...X...X.X.XXXX', dholCrack: 'XoxoXoxoXxXxXXXX' },
+    answer: { dholBass: '........X.....x.', dholCrack: '..........x.xxX.' },
+    break: {
+      dholBass: ['X..x..X.X..x..X.', 'X.x.X.x.X.X.X...'],
+      dholCrack: ['.xx.xoxx.xx.xoXx', 'xoxoXoxoXxXxXX..'],
+    },
+  },
+  {
+    id: 'dhol_dhamaal',
+    name: 'Dhamaal',
+    instrument: 'dhol',
+    description: 'Peak-time dhamaal: a boom on every beat and driving tilli 8ths. Full power.',
+    suits: 'The biggest Punjabi and Bollywood bangers, peak moments',
+    swing: 0.12,
+    bass: 'dholBass',
+    treble: 'dholCrack',
+    light: { dholBass: ['X.......X.......'], dholCrack: ['..x...x...x...x.'] },
+    groove: {
+      dholBass: ['X...X...X...X...', 'X...X...X..xX.x.', 'X...X...X...X...', 'X...X.x.X...X.xX'],
+      dholCrack: ['x.X.x.X.x.X.x.X.', 'xoX.x.XoxoX.x.Xo', 'x.X.x.X.x.X.x.X.', 'xoXoxoXoxoXoxXxX'],
+    },
+    answer: { dholBass: '........X.X.X...', dholCrack: '........xoXoxoX.' },
+    break: {
+      dholBass: ['X.X.X.X.X.X.X.X.', 'X...X...X.X.XXX.'],
+      dholCrack: ['XoxoXoxoXoxoXoxo', 'xxxxxxxxXxXxXX..'],
+    },
+  },
+  {
+    id: 'luddi',
+    name: 'Luddi',
+    instrument: 'dhol',
+    description: 'The bouncy luddi: a lilting two-step for folk boliyan and giddha.',
+    suits: 'Punjabi folk, boliyan, giddha, jaago',
+    swing: 0.33,
+    bass: 'dholBass',
+    treble: 'dholCrack',
+    light: { dholBass: ['X.......X.......'], dholCrack: ['......x.......x.'] },
+    groove: {
+      dholBass: ['X.....X.X.....X.', 'X.....X.X...m.X.'],
+      dholCrack: ['..x.x...X.x.x...', '..x.x.x.X.x.x.xo'],
+    },
+    answer: { dholBass: '........X.....X.', dholCrack: '..........x.x.X.' },
+    break: {
+      dholBass: ['X.x.X.x.X.x.X.x.', 'X.X.X.X.X.X.....'],
+      dholCrack: ['.x.x.x.x.x.x.x.x', 'xxxxxxxxXXXX....'],
+    },
   },
   {
     id: 'dholak_keherwa',
     name: 'Dholak Keherwa',
-    description: 'The 8-beat keherwa on dholak (dha ge na ti na ka dhi na), lighter than dhol.',
-    suits: 'Bollywood, sangeet, folk and mid-tempo desi songs',
+    instrument: 'dholak',
+    description: 'The 8-beat keherwa on dholak (dha ge na ti na ka dhi na): lighter than dhol, made for singing along.',
+    suits: 'Bollywood, sangeet, ladies sangeet, mid-tempo and romantic desi songs',
     swing: 0.18,
+    bass: 'dholakGe',
+    treble: 'dholakNa',
     light: { dholakGe: ['X.......x.......'], dholakNa: ['....x.......x...'] },
-    full: {
+    groove: {
       dholakGe: ['X.x.........x...', 'X.x.......x.x...'],
       dholakNa: ['x...x.x.x.o...x.', 'x...x.x.x.o.o.x.'],
     },
-    fill: { dholakGe: 'X.x.X.x.X.x.XxXx', dholakNa: 'x.x.x.xox.xoxoxo' },
-  },
-  {
-    id: 'clap_tambourine',
-    name: 'Clap & Tambourine',
-    description: 'Claps on 2 and 4 with a tambourine shuffle. No low end, so it fits on almost anything.',
-    suits: 'Pop, Bollywood, anything with its own strong drums',
-    swing: 0.05,
-    light: { tambourine: ['..x...x...x...x.'] },
-    full: { clap: ['....X.......X...'], tambourine: ['o.x.o.x.o.x.o.x.'] },
-    fill: { clap: '....X...X.X.XXXX', tambourine: 'oxoxoxoxoxoxXxXx' },
-  },
-  {
-    id: 'club_tops',
-    name: 'Club Tops',
-    description: 'House-style shaker and claps on top of the song. Adds drive without touching the kick.',
-    suits: 'House, EDM, dance remixes',
-    swing: 0,
-    light: { shaker: ['..x...x...x...x.'] },
-    full: { shaker: ['o.Xoo.Xoo.Xoo.Xo'], clap: ['....X.......X...'] },
-    fill: { clap: '....X...X..XX.XX', shaker: 'oxoxoxoxoxoxXXXX', tambourine: '........x.x.x.xX' },
-  },
-  {
-    id: 'club_drive',
-    name: 'Club Drive (with kick)',
-    description: 'Four-on-the-floor kick, claps and shaker. Only for songs whose own kick is weak or missing.',
-    suits: 'Songs with soft or no drums',
-    swing: 0,
-    light: { kick: ['X.......X.......'], shaker: ['..x...x...x...x.'] },
-    full: { kick: ['X...X...X...X...'], clap: ['....X.......X...'], shaker: ['o.Xoo.Xoo.Xoo.Xo'] },
-    fill: { kick: 'X...X...X.X.XXXX', clap: '....X...X.X.XXXX' },
-  },
-  {
-    id: 'afro_groove',
-    name: 'Afro Groove',
-    description: 'Congas, a son clave on sticks, shaker and a soft frame-drum pulse.',
-    suits: 'Afrobeats, amapiano, reggaeton, Latin',
-    swing: 0.1,
-    light: { shaker: ['o.x.o.x.o.x.o.x.'], stick: ['X..X..X...X.X...'] },
-    full: {
-      conga: ['..x..X.x..x..X.o', '..x..X.x..x.xX.o'],
-      stick: ['X..X..X...X.X...'],
-      shaker: ['xoxoXoxoxoxoXoxo'],
-      frameDrum: ['X.......X.......'],
+    answer: { dholakGe: '........x.x.....', dholakNa: '..........x.xox.' },
+    break: {
+      dholakGe: ['X.x.X.x.X.x.XxXx', 'XxXxXxXxX.x.X...'],
+      dholakNa: ['x.x.xox.x.xoxoxo', 'xoxoxoxoxoxoX...'],
     },
-    fill: { conga: 'x.x.X.x.XxXxXXXX', stick: 'X..X..X...X.X...' },
-  },
-  {
-    id: 'light_shaker',
-    name: 'Light Shaker',
-    description: 'Just a soft shaker and maraca: movement without weight.',
-    suits: 'Chill, romantic and acoustic songs',
-    swing: 0,
-    light: { shaker: ['..o...o...o...o.'] },
-    full: { shaker: ['o.x.o.x.o.x.o.x.'], maraca: ['....x.......x...'] },
-    fill: { shaker: 'o.x.o.x.oxoxoxXx' },
   },
 ];
 
 export const RHYTHM_STYLE_IDS = RHYTHM_STYLES.map((s) => s.id) as [RhythmStyleId, ...RhythmStyleId[]];
 
-export const getRhythmStyle = (id: RhythmStyleId): RhythmStyle =>
+export const getRhythmStyle = (id: RhythmStyleId | string): RhythmStyle =>
   RHYTHM_STYLES.find((s) => s.id === id) ?? RHYTHM_STYLES[0];
 
-/** Where the fallback rules start for each mood (the AI DJ decides per song when it is available). */
+export const isRhythmStyleId = (id: unknown): id is RhythmStyleId => RHYTHM_STYLES.some((s) => s.id === id);
+
+/** The taal a manual "choose myself" setup starts on in each mood. */
 export const STYLE_FOR_MOOD: Record<MoodId, RhythmStyleId> = {
-  normal: 'clap_tambourine',
-  party: 'dhol_dhamaal',
-  bhangra: 'dhol_dhamaal',
-  chill: 'light_shaker',
-  romantic: 'light_shaker',
+  normal: 'bhangra_chaal',
+  party: 'bhangra_chaal',
+  bhangra: 'bhangra_chaal',
+  chill: 'dholak_keherwa',
+  romantic: 'dholak_keherwa',
 };
 
-const VELOCITY: Record<string, number> = { X: 1, x: 0.72, o: 0.42 };
+export interface StepHit {
+  velocity: number; // 0 = no hit
+  muted: boolean; // damped stroke: short decay
+  flam: boolean; // with a grace stroke just before
+}
 
-/** Velocity (0 = no hit) of `voice` at `step` (0–15) of a bar, cycling multi-bar patterns. */
-export function hitVelocity(bars: string[] | string | undefined, barIndex: number, step: number): number {
-  if (!bars) return 0;
+const NO_HIT: StepHit = { velocity: 0, muted: false, flam: false };
+const HITS: Record<string, StepHit> = {
+  X: { velocity: 1, muted: false, flam: false },
+  x: { velocity: 0.72, muted: false, flam: false },
+  o: { velocity: 0.42, muted: false, flam: false },
+  m: { velocity: 0.7, muted: true, flam: false },
+  F: { velocity: 1, muted: false, flam: true },
+};
+
+/** The hit (or none) of a voice at `step` (0–15) of a bar, cycling multi-bar patterns. */
+export function stepHit(bars: string[] | string | undefined, barIndex: number, step: number): StepHit {
+  if (!bars) return NO_HIT;
   const bar = typeof bars === 'string' ? bars : bars[((barIndex % bars.length) + bars.length) % bars.length];
-  return VELOCITY[bar[step]] ?? 0;
+  return HITS[bar[step]] ?? NO_HIT;
+}
+
+/** Velocity only (0 = no hit), for callers that don't need the stroke type. */
+export function hitVelocity(bars: string[] | string | undefined, barIndex: number, step: number): number {
+  return stepHit(bars, barIndex, step).velocity;
 }
 
 /**

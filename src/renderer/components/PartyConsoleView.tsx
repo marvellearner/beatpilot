@@ -2,7 +2,7 @@ import React, { useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import type { AudioEngine } from '../../audio/AudioEngine';
 import { NowPlayingHero } from './NowPlayingHero';
-import { RhythmPanel } from './RhythmPanel';
+import { EngineRhythmPanel } from './RhythmPanel';
 import { MoodEqPanel } from './MoodEqPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { QueueManagerPanel } from './QueueManagerPanel';
@@ -262,7 +262,7 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
 
         {/* Middle Column: Rhythm Enhancer + Mood & Equalizer + Offline Library */}
         <div id="party-console-middle-column" className="flex flex-col gap-3 min-w-0">
-          <RhythmPanel rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
+          <EngineRhythmPanel engine={engine} />
           <MoodEqPanel
             compact
             mood={moodState.mood}

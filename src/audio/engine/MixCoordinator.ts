@@ -49,6 +49,8 @@ export interface MixRequest {
 
 export class MixCoordinator {
   public isTransitioning: boolean = false;
+  /** The mix running now (the rhythm layer reads when the new song starts, to bridge into it). */
+  public current: MixRequest | null = null;
   public transitionProgress: number = 0; // 0 to 1
   private transitionTimer: number | null = null;
   private mixTimers: number[] = [];
@@ -81,6 +83,7 @@ export class MixCoordinator {
     }
 
     this.isTransitioning = true;
+    this.current = req;
     this.transitionProgress = 0;
 
     this.transitionTimer = window.setInterval(() => {
@@ -98,6 +101,7 @@ export class MixCoordinator {
 
       this.stopTimers();
       this.isTransitioning = false;
+      this.current = null;
       graph.applyCrossfader(targetCrossfader);
       sourceDeck.pause();
       sourceDeck.setEQ(0, 0, 0);
@@ -121,6 +125,7 @@ export class MixCoordinator {
     this.stopTimers();
     if (this.isTransitioning) {
       this.isTransitioning = false;
+      this.current = null;
       this.graph.applyCrossfader(this.graph.crossfaderPosition);
       for (const id of ['A', 'B'] as const) {
         this.deck(id).setEQ(0, 0, 0);
@@ -133,6 +138,7 @@ export class MixCoordinator {
   public dispose(): void {
     this.stopTimers();
     this.isTransitioning = false;
+    this.current = null;
     this.transitionProgress = 0;
   }
 

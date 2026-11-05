@@ -16,6 +16,7 @@ import {
   type RhythmPlan,
   type SongLanguage,
   type SongRhythmFeatures,
+  type VocalMap,
 } from '../rhythm/rhythmPlan';
 
 const SONG_LANGUAGES_KEY = 'ai_dj_song_languages'; // the AI DJ's answer per song, so it's asked once
@@ -43,6 +44,11 @@ export class SongRhythmPlans {
   /** The song's audio measures, worked out elsewhere (the analysis worker). */
   public setFeatures(track: TrackMetadata, features: SongRhythmFeatures) {
     this.features.set(songStorageKey(track), features);
+  }
+
+  /** Where the song's singing is (for the dhol's answers between vocal lines), once analysed. */
+  public vocalMapFor(track: TrackMetadata): VocalMap | undefined {
+    return this.features.get(songStorageKey(track))?.vocal;
   }
 
   /**

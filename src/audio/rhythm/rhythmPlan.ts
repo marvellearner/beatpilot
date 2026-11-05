@@ -32,9 +32,63 @@ export interface SongRhythmFeatures {
   midShare: number; // 300 Hz–3 kHz share of the loudness: vocals and leads
   contrastDb: number; // loud parts vs quieter parts (8 s windows, 90th vs 30th percentile)
   punch: number; // how hard the low end hits (kick, 808, dhol), relative to its level
+  vocal?: VocalMap; // where someone is singing (for the dhol's answers between vocal lines)
 }
 
-/** One pass over the audio (about 30 ms for a 4-minute song). */
+/**
+ * Where the voice is, 10 times a second: the centre of the stereo mix in the voice range
+ * (300 Hz–3.4 kHz) minus what's in the sides of that range (wide instruments, reverb), relative to
+ * the song's own singing level (its 80th percentile = 1). A rough map, not a transcription: it's
+ * used to find clear gaps between vocal lines, where a dhol wala answers.
+ */
+export interface VocalMap {
+  rate: number; // values per second
+  values: Float32Array; // 0 = no voice … ~1 = the song's normal singing level
+  duration: number; // seconds of the audio it was measured on (the song's natural tempo)
+}
+
+export const VOCAL_MAP_RATE = 10;
+
+export function computeVocalMap(buffer: AudioBuffer): VocalMap {
+  const sr = buffer.sampleRate;
+  const L = buffer.getChannelData(0);
+  const R = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : L;
+  const frame = Math.max(1, Math.round(sr / VOCAL_MAP_RATE));
+  const frames = Math.floor(L.length / frame);
+  const centred = new Float32Array(frames);
+  // One-pole high-pass at 300 Hz and low-pass at 3.4 kHz on the centre and on the sides
+  const hp = Math.exp((-2 * Math.PI * 300) / sr);
+  const lp = 1 - Math.exp((-2 * Math.PI * 3400) / sr);
+  let mPrevIn = 0, mHp = 0, mLp = 0, sPrevIn = 0, sHp = 0, sLp = 0;
+  for (let f = 0; f < frames; f++) {
+    let me = 0, se = 0;
+    for (let i = f * frame, end = i + frame; i < end; i++) {
+      const m = (L[i] + R[i]) * 0.5;
+      const s = (L[i] - R[i]) * 0.5;
+      mHp = hp * (mHp + m - mPrevIn);
+      mPrevIn = m;
+      mLp += lp * (mHp - mLp);
+      sHp = hp * (sHp + s - sPrevIn);
+      sPrevIn = s;
+      sLp += lp * (sHp - sLp);
+      me += mLp * mLp;
+      se += sLp * sLp;
+    }
+    // Sides in the voice range are instruments and reverb: take them off what the centre holds
+    centred[f] = Math.max(0, Math.sqrt(me / frame) - Math.sqrt(se / frame));
+  }
+  const sorted = Array.from(centred).sort((a, b) => a - b);
+  const ref = sorted[Math.floor(sorted.length * 0.8)] || 1;
+  const values = new Float32Array(frames);
+  for (let f = 0; f < frames; f++) {
+    // Light smoothing (300 ms): syllables blur into lines, a line's end still shows
+    const a = centred[Math.max(0, f - 1)], b = centred[f], c = centred[Math.min(frames - 1, f + 1)];
+    values[f] = Math.min(1.5, (a + b + c) / 3 / ref);
+  }
+  return { rate: VOCAL_MAP_RATE, values, duration: buffer.length / sr };
+}
+
+/** One pass over the audio (about 30 ms for a 4-minute song, plus ~60 ms for the vocal map). */
 export function computeRhythmFeatures(buffer: AudioBuffer, profile: EnergyProfile): SongRhythmFeatures {
   const mean = (a: ArrayLike<number>, from = 0, to = a.length) => {
     let s = 0;
@@ -69,7 +123,7 @@ export function computeRhythmFeatures(buffer: AudioBuffer, profile: EnergyProfil
     }
   }
   const punch = count > 1 ? rise / count / (levels / count || 1e-9) : 0;
-  return { midShare, contrastDb, punch };
+  return { midShare, contrastDb, punch, vocal: computeVocalMap(buffer) };
 }
 
 const DEVOTIONAL = /\b(chalisa|aarti|bhajan|mantra|shabad|gurbani|kirtan|naat|stotram|hymn|devotional|bhakti)\b/i;
@@ -107,50 +161,40 @@ export function planRhythm(
   const what = `${lang ? `${lang} ` : ''}song`;
   const plan = (play: boolean, styleId: RhythmStyleId, level: number, reason: string): RhythmPlan => ({ play, styleId, level, reason, source });
 
-  if (song.bpmConfidence < 0.5) return plan(false, 'light_shaker', 0.5, 'beat not clear enough to play along');
-  if (DEVOTIONAL.test(`${song.title} ${song.artist}`)) return plan(false, 'light_shaker', 0.5, 'devotional song: left as it is');
-  if (song.bpm < 75 && mood !== 'party' && mood !== 'bhangra') return plan(false, 'light_shaker', 0.5, 'slow song: left as it is');
+  const text = `${song.title} ${song.artist}`;
+  if (song.bpmConfidence < 0.5) return plan(false, 'bhangra_chaal', 0.5, 'beat not clear enough to play along');
+  if (DEVOTIONAL.test(text)) return plan(false, 'dholak_keherwa', 0.5, 'devotional song: left as it is');
+  const dancing = mood === 'party' || mood === 'bhangra';
+  if (song.bpm < 75 && !dancing) return plan(false, 'dholak_keherwa', 0.5, 'slow song: left as it is');
 
-  const desi = language === 'punjabi' || language === 'hindi';
-  const clubTempo = song.bpm >= 118 && song.bpm <= 132;
+  // Like a dhol wala at a wedding: dhol on Punjabi songs, and on Hindi songs when people dance;
+  // dholak on other Hindi songs; nothing on songs a dhol doesn't belong to (English pop, Latin…),
+  // unless the Bhangra mood asks for dhol on everything
+  const folk = FOLK.test(text);
   let styleId: RhythmStyleId;
-  switch (mood) {
-    case 'bhangra':
-      styleId = 'dhol_dhamaal';
-      break;
-    case 'party':
-      styleId =
-        language === 'punjabi' ? 'dhol_dhamaal'
-        : language === 'hindi' ? 'dholak_keherwa'
-        : language === 'spanish' ? 'afro_groove'
-        : clubTempo ? 'club_tops'
-        : 'clap_tambourine';
-      break;
-    case 'chill':
-    case 'romantic':
-      styleId = desi ? 'dholak_keherwa' : 'light_shaker';
-      break;
-    default:
-      styleId =
-        language === 'punjabi' ? 'dhol_dhamaal'
-        : language === 'hindi' ? 'dholak_keherwa'
-        : language === 'spanish' ? 'afro_groove'
-        : 'clap_tambourine';
+  if (language === 'punjabi') {
+    styleId = folk ? 'luddi' : 'bhangra_chaal';
+    if (mood === 'chill' || mood === 'romantic') styleId = 'dholak_keherwa';
+  } else if (language === 'hindi') {
+    styleId = dancing && song.bpm >= 85 ? 'bhangra_chaal' : 'dholak_keherwa';
+  } else if (mood === 'bhangra') {
+    styleId = 'bhangra_chaal';
+  } else {
+    return plan(false, 'bhangra_chaal', 0.5, `${what}: a dhol doesn't belong on it (Bhangra mood puts dhol on everything)`);
   }
 
   let level = mood === 'chill' || mood === 'romantic' ? 0.45 : 0.7;
   const lighter: string[] = [];
-  let extra = '';
   if (features) {
     if (features.punch > 0.13) {
-      // The song's drums are already busy: stay lighter, and no extra boom on top of them
+      // The song's drums are already busy: the dhol plays lighter so it doesn't pile on top
       level = Math.min(level, 0.5);
-      if (styleId === 'dhol_dhamaal') styleId = 'dholak_keherwa';
       lighter.push('its drums are already strong');
-    } else if (features.punch < 0.095 && mood === 'party' && !desi && language !== 'spanish') {
-      styleId = 'club_drive';
+    } else if (features.punch < 0.095 && dancing && styleId === 'bhangra_chaal') {
+      // Soft drums at a dance: the dhol carries the beat, dhamaal-style
+      styleId = 'dhol_dhamaal';
       level = 0.8;
-      extra = ', adding a kick because its drums are soft';
+      lighter.push('its drums are soft, so the dhol carries the beat');
     }
     if (features.midShare > 0.58) {
       level = Math.min(level, 0.55);
@@ -158,6 +202,9 @@ export function planRhythm(
     }
   }
   const name = RHYTHM_STYLES.find((s) => s.id === styleId)!.name;
-  const why = lighter.length ? `, kept light (${lighter.join(', ')})` : extra;
+  const why = lighter.length ? ` (${lighter.join(', ')})` : '';
   return plan(true, styleId, level, `${what}, ${MOOD_PHRASE[mood]}: ${name}${why}`);
 }
+
+// Folk songs get the luddi (boliyan, giddha, jaago, tappe, mahiya…)
+const FOLK = /\b(boli(y|a)an|boliyan|giddha|gidha|jaago|luddi|tappe|mahiya|folk|lok geet|kikli)\b/i;

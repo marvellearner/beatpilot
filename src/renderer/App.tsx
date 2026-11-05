@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AudioEngine } from '../audio/AudioEngine';
 import { DeckView } from './components/DeckView';
-import { RhythmPanel } from './components/RhythmPanel';
+import { EngineRhythmPanel } from './components/RhythmPanel';
 import { MixerSection } from './components/MixerSection';
 import { PartyConsoleView } from './components/PartyConsoleView';
 import { RamUsageMeter } from './components/RamUsageMeter';
@@ -638,7 +638,7 @@ export const App: React.FC = () => {
             <button onClick={() => setShowHelp(false)} className="hover:text-white">✕</button>
           </div>
           <p>
-            1. <strong>Autonomous Drums Decision:</strong> The AI analyzes the active song's rhythm and genre. If it detects a Punjabi banger, it activates the Punjabi Dhol at the exact BPM. If it detects an EDM track, it switches to Club Drums. If sync confidence is low or it's an acoustic track, it <strong>holds/mutes percussion to prevent clashing</strong>.
+            1. <strong>Autonomous Drums Decision:</strong> The AI analyzes the active song's rhythm and genre. If it detects a Punjabi banger, it activates the Punjabi Dhol at the exact BPM. Like a wedding dhol wala, it plays soft under the singing, answers between lines, rolls into choruses and carries the crowd through mixes; English pop and unclear beats get no dhol.
           </p>
           <p>
             2. <strong>Autonomous 5-Song Queue:</strong> If you haven't given the next track, the AI automatically searches the internet for 5 culturally and energetically compatible tracks and keeps them ready in the queue.
@@ -672,7 +672,7 @@ export const App: React.FC = () => {
 
           {/* Live Rhythm Enhancer (Deck P) */}
           <section id="app-pro-percussion">
-            <RhythmPanel variant="pro" rhythm={engine.rhythm.getState()} onCommand={(cmd) => engine.rhythmCommand(cmd)} />
+            <EngineRhythmPanel variant="pro" engine={engine} />
           </section>
         </div>
       )}

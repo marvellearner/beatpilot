@@ -7,7 +7,7 @@ How the cuts were made: each hit starts 2 ms before its attack (so it lands on t
 | Files | Sound | Source |
 | :--- | :--- | :--- |
 | `dhol_bass_1–4.wav` | Dhol bass side ("dagga") | [Dhol outside.wav](https://freesound.org/people/makbulchowdhury/sounds/172446/) by makbulchowdhury |
-| `dhol_crack_1–4.wav` | Stick crack (dhol-tasha) | [Dhol_Tasha_Maharashtra_Urban_2](https://freesound.org/people/prospekt42/sounds/712286/) by prospekt42 |
+| `dhol_crack_1–4.wav` | Dhol treble side ("tilli" tak), strokes at 2.87 s, 4.90 s, 3.26 s and 1.97 s, cut 90 / 90 / 68 / 68 ms (the next stroke follows) | [Dhol outside.wav](https://freesound.org/people/makbulchowdhury/sounds/172446/) by makbulchowdhury (the same dhol as the bass side). These replaced cuts from a Dhol-Tasha recording, which were tasha strokes: a ringing ~2 kHz tone with nothing below 1 kHz, heard as a high-pitched instrument instead of a dhol. |
 | `dholak_ge_1–3.wav` | Dholak bass head | [Maybe Dollak Drum Freestyle Jamming](https://freesound.org/people/qubodup/sounds/865161/) by qubodup |
 | `dholak_ge_4.wav` | Dholak bass head | [DHOLAK (BASS SKIN)](https://freesound.org/people/curesforbrokenhearts/sounds/536872/) by curesforbrokenhearts |
 | `dholak_na_1–4.wav` | Dholak treble head | [DHOLAK-085-01.wav](https://freesound.org/people/iyankc/sounds/479246/) by iyankc |

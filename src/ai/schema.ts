@@ -32,12 +32,14 @@ export const AICommandSchema = z.object({
       duration_seconds: z.number().min(0.2).max(32).default(8),
     })
     .optional(),
-  // Live Rhythm Enhancer: on/off, style and level (it follows the song on air by itself)
+  // Live Rhythm Enhancer (the dhol wala): on/off, taal, level, and live cues (roll, dhol break,
+  // dhamaal = go big, rest). It follows the song on air by itself
   percussion: z
     .object({
       active: z.boolean(),
       style_id: z.enum(RHYTHM_STYLE_IDS).optional(),
       level: z.number().min(0).max(1).optional(),
+      cue: z.enum(['roll', 'break', 'dhamaal', 'rest']).optional(),
     })
     .optional(),
   eq: z

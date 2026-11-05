@@ -10,7 +10,7 @@ const VIBE_DESCRIPTION: Record<Vibe, string> = {
 import { z } from 'zod';
 import { AICommandSchema, type AICommandPlan } from './schema';
 import type { AudioEngine } from '../audio/AudioEngine';
-import { RHYTHM_STYLES, type RhythmStyleId } from '../audio/rhythm/styles';
+import { RHYTHM_STYLES, isRhythmStyleId, type RhythmStyleId } from '../audio/rhythm/styles';
 import { SONG_LANGUAGES, type SongLanguage } from '../audio/rhythm/rhythmPlan';
 import { tempoStep } from '../audio/engine/setFlow';
 
@@ -91,17 +91,27 @@ const SONG_ID_JSON_SCHEMA = {
   required: ['language'],
 };
 
-// Typed-command keywords for the rhythm styles, checked in order (dholak before dhol)
+// Typed-command keywords for the taals, checked in order (dholak before dhol)
 const RHYTHM_KEYWORDS: Array<[RegExp, RhythmStyleId]> = [
   [/\bdholak|keherwa|sangeet\b/, 'dholak_keherwa'],
-  [/\bdhamaal|peak|hard|heavy\b/, 'dhol_dhamaal'],
-  [/\bdhol|bhangra|punjabi\b/, 'dhol_dhamaal'],
-  [/\bkick|four on the floor|4 on the floor\b/, 'club_drive'],
-  [/\bhouse|club|edm|electronic\b/, 'club_tops'],
-  [/\bafro|amapiano|latin|reggaeton|conga\b/, 'afro_groove'],
-  [/\bclaps?|tambourine\b/, 'clap_tambourine'],
-  [/\bshaker|soft|light|gentle\b/, 'light_shaker'],
+  [/\bluddi|boliyan|giddha|folk\b/, 'luddi'],
+  [/\bchaal|bhangra|punjabi\b/, 'bhangra_chaal'],
 ];
+
+/**
+ * Live requests to the dhol wala in plain words: "dhol roll", "give me a dhol break",
+ * "dhamaal!", "rest the dhol". Checked before the taals ("dhamaal" is the go-big cue).
+ */
+export function parseRhythmCue(text: string): 'roll' | 'break' | 'dhamaal' | 'rest' | null {
+  const t = text.toLowerCase();
+  // Must name the dhol: "loop roll" / "vinyl brake" are mixing transitions, not dhol cues
+  if (!/\b(dhol|dholak|drums?|rhythm|dhamaal)\b/.test(t)) return null;
+  if (/\b(rest|breathe|hold|wait|chup|ruk)\b/.test(t)) return 'rest';
+  if (/\broll\b/.test(t)) return 'roll';
+  if (/\b(break|solo)\b/.test(t)) return 'break';
+  if (/\b(dhamaal|go big|full power|full on|hype|josh|zor)\b/.test(t)) return 'dhamaal';
+  return null;
+}
 
 export interface MoodReadingResult {
   detectedMood: string;
@@ -271,9 +281,9 @@ Analyze its musical meter (standard 4/4 vs 6/8 folk dadra / triplet swing / half
 Some songs (e.g. "Chappa Chappa Charkha Chale", acoustic folk, 6/8 dadra) detect high BPM (150+) because of rapid subdivisions/triplets, but the human foot-tapping dance pulse is actually slow half-time (75-80 BPM), which feels dragging on a dancefloor.
 1. What is its true perceived dancing pulse (effectiveDanceBpm)? If it has a half-time/compound folk feel, give the half-time pulse (e.g. 76 for 152).
 2. What exact playback BPM should this song be played at in ${track.mood} mode to keep people dancing (targetPartyBpm)? (Usually 122-130 for party dance, or 105-115 for mid-tempo groove).
-3. Suggested rhythm layer: "dhol_dhamaal", "club_drive", or "dholak_keherwa".
+3. Suggested taal: "bhangra_chaal", "dhol_dhamaal", "luddi" or "dholak_keherwa".
 Reply ONLY with JSON:
-{"effectiveDanceBpm": <number>, "targetPartyBpm": <number>, "perceivedMeter": "standard_4_4"|"half_time_folk"|"triplet_compound", "rhythmStyle": "dhol_dhamaal"|"club_drive"|"dholak_keherwa", "reason": "<max 15 words>"}`;
+{"effectiveDanceBpm": <number>, "targetPartyBpm": <number>, "perceivedMeter": "standard_4_4"|"half_time_folk"|"triplet_compound", "rhythmStyle": "bhangra_chaal"|"dhol_dhamaal"|"luddi"|"dholak_keherwa", "reason": "<max 15 words>"}`;
 
     const res = await this.askJson(prompt, 100, 10_000);
     if (!res) {
@@ -287,7 +297,7 @@ Reply ONLY with JSON:
       effectiveDanceBpm: parsed.data.effectiveDanceBpm,
       targetPartyBpm: parsed.data.targetPartyBpm,
       perceivedMeter: parsed.data.perceivedMeter,
-      rhythmStyle: (parsed.data.rhythmStyle as RhythmStyleId) || undefined,
+      rhythmStyle: isRhythmStyleId(parsed.data.rhythmStyle) ? parsed.data.rhythmStyle : undefined,
       reason: parsed.data.reason,
     };
   }
@@ -516,8 +526,9 @@ Reply ONLY with valid JSON in this exact structure:
   ): Promise<AIResponseResult> {
     const startTime = performance.now();
 
-    // Song and Up Next requests are understood at once; the model (up to 30 s) is for the rest
-    const quick = parseSongCommand(userInput);
+    // Song and Up Next requests, and live dhol cues ("dhol roll" must happen now), are understood
+    // at once; the model (up to 30 s) is for the rest
+    const quick = parseRhythmCue(userInput) ? this.heuristicFallback(userInput, {}) : parseSongCommand(userInput);
     if (quick) {
       return { plan: quick, latencyMs: Math.round(performance.now() - startTime), source: 'fallback_heuristic', provider: 'heuristic' };
     }
@@ -545,7 +556,8 @@ Reply ONLY with valid JSON in this exact structure:
       },
       rhythmEnhancer: {
         on: rhythm?.enabled ?? false,
-        style: rhythm?.styleId ?? 'dhol_wedding',
+        style: rhythm?.styleId ?? 'bhangra_chaal',
+        cues: rhythm?.cues,
         level: rhythm?.level ?? 0.8,
         playingNow: rhythm?.section,
       },
@@ -555,7 +567,7 @@ Reply ONLY with valid JSON in this exact structure:
     const systemPrompt = `You are an expert club & wedding AI DJ mixing agent governed by strict musical principles:
 1. Music first, effects second. Protect the listening experience and maintain set flow.
 2. Bass management: Never play two competing basslines or kicks at full volume; use 'bass_swap' to cut outgoing bass before bringing in the incoming bass.
-3. Live Rhythm Enhancer (Deck P): real dhol/percussion that follows the song on air by itself (beat, arrangement, mixes). Only change it when the user asks for drums, a style or a level.
+3. Live Rhythm Enhancer (Deck P): a dhol wala (real dhol / dholak) playing along with the song on air by itself (answers the singer, rolls into choruses, bridges mixes). Taals: bhangra_chaal, dhol_dhamaal, luddi, dholak_keherwa. Live cues in percussion.cue: "roll", "break" (dhol solo), "dhamaal" (go big, toggles), "rest" (toggles). Only change it when the user asks for drums, a taal, a level or a cue.
 4. Transitions: Choose musically appropriate durations (4s for drop cuts, 8s for standard phrase blends, 16s/32s for smooth harmonic blends).
 5. User Intent: Always honor explicit user requests (e.g. cutting bass, specific percussion styles).
 
@@ -646,16 +658,26 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
   private heuristicFallback(input: string, _context: Record<string, unknown>): AICommandPlan {
     const text = input.toLowerCase();
 
-    // 1. Rhythm layer
-    if (/(dhol|dholak|percussion|drums?|rhythm|tambourine|claps?|shaker|congas?)/.test(text)) {
-      const isStop = /(stop|pause|kill|off|mute)/.test(text);
+    // 1. Rhythm layer: a live cue to the dhol wala, or on/off and a taal
+    const cue = parseRhythmCue(text);
+    if (cue) {
+      const said = {
+        roll: 'Dhol roll coming up.',
+        break: 'Dhol break from the next bar.',
+        dhamaal: 'Dhamaal: dhol at full power (say it again to stop).',
+        rest: 'Dhol resting (say it again to bring it back).',
+      };
+      return { action: 'control_percussion', target_deck: 'none', percussion: { active: true, cue }, explanation: said[cue] };
+    }
+    if (/\b(dhol|dholak|percussion|drums?|rhythm|tabla)\b/.test(text)) {
+      const isStop = /\b(stop|pause|kill|off|mute)\b/.test(text);
       const styleId = RHYTHM_KEYWORDS.find(([pattern]) => pattern.test(text))?.[1];
-      const name = styleId ? RHYTHM_STYLES.find((st) => st.id === styleId)!.name : 'the rhythm layer';
+      const name = styleId ? RHYTHM_STYLES.find((st) => st.id === styleId)!.name : 'the dhol';
       return {
         action: 'control_percussion',
         target_deck: 'none',
         percussion: { active: !isStop, style_id: styleId },
-        explanation: isStop ? 'Stopped the rhythm layer.' : `Playing ${name}, locked to the song on air.`,
+        explanation: isStop ? 'Stopped the dhol.' : `Playing ${name}, along with the song on air.`,
       };
     }
 
@@ -794,7 +816,10 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
     // 2. Rhythm layer
     if (plan.percussion) {
       const rhythm = engine.rhythm.getState();
-      if (plan.percussion.active) {
+      if (plan.percussion.cue) {
+        // A live request to the dhol wala (it switches the dhol on if needed)
+        engine.rhythmCommand({ kind: 'cue', cue: plan.percussion.cue });
+      } else if (plan.percussion.active) {
         if (plan.percussion.style_id) engine.rhythmCommand({ kind: 'style', styleId: plan.percussion.style_id });
         if (plan.percussion.level !== undefined) engine.rhythmCommand({ kind: 'level', level: plan.percussion.level });
         if (!rhythm.enabled) engine.rhythmCommand({ kind: 'toggle' });
