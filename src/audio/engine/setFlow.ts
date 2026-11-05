@@ -5,6 +5,8 @@
  * dance floor, and a breather after a long run of peak songs. Guest requests are never skipped. Rules: MIXING_RULES.md "Set Flow".
  */
 import { DESI_RUN, type LanguageFamily } from '../../../shared/songLanguage';
+import { isSongVibeCompatible } from './queueRules';
+import type { Vibe } from '../../../shared/songFilter';
 
 export interface FlowSong {
   title: string;
@@ -27,6 +29,7 @@ export interface FlowContext {
   desiRun?: number; // Hindi / Punjabi songs in a row, incl. the current
   danceFloor: boolean; // Party / Bhangra mood: keep the energy up
   peakRun?: number; // songs on air in a row (incl. the current) with no step down in energy
+  prevailingVibe?: Vibe | null; // detected prevailing vibe from previous 3-5 songs
 }
 
 const LOOK_AHEAD = 3; // only the next 3 ready songs are considered
@@ -92,10 +95,23 @@ export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext
     bad.push('an English song in a Hindi / Punjabi run');
   }
 
+  if (ctx.prevailingVibe === 'dance' || ctx.prevailingVibe === 'bhangra') {
+    if (!isSongVibeCompatible('dance', c)) {
+      score -= 5;
+      bad.push('a slow romantic song on a dance floor');
+    }
+  } else if (ctx.prevailingVibe === 'romantic') {
+    if (!isSongVibeCompatible('romantic', c)) {
+      score -= 5;
+      bad.push('a loud party song in a romantic set');
+    }
+  }
+
   if (ctx.danceFloor && c.loudnessDb !== undefined && ctx.current.loudnessDb !== undefined) {
     const drop = ctx.current.loudnessDb - c.loudnessDb;
     const breatherDue = (ctx.peakRun ?? 0) >= BREATHER_AFTER;
-    if (breatherDue && drop >= BREATHER_MIN_DB && drop <= BREATHER_MAX_DB) {
+    const isBallad = ctx.prevailingVibe === 'dance' && !isSongVibeCompatible('dance', c);
+    if (!isBallad && breatherDue && drop >= BREATHER_MIN_DB && drop <= BREATHER_MAX_DB) {
       score += 0.8;
       good.unshift(`a breather after ${ctx.peakRun} high-energy songs`);
     } else if (drop > (breatherDue ? BREATHER_MAX_DB : QUIET_DROP_DB)) {

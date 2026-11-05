@@ -12,6 +12,7 @@ export const MY_SONGS_FILE = path.join(ROOT_DIR, 'my_songs.txt');
 export const PLAY_HISTORY_FILE = path.join(DATA_DIR, 'play_history.json');
 export const FAVORITES_FILE = path.join(DATA_DIR, 'favorites.json');
 export const BANNED_SONGS_FILE = path.join(DATA_DIR, 'banned_songs.json');
+export const TRANSITION_HISTORY_FILE = path.join(DATA_DIR, 'transition_history.json');
 
 /** A song as the app sends it in a request body. */
 interface SongInput {
@@ -317,4 +318,59 @@ function parseSongLines(raw: string): string[] {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#') && !l.startsWith('//'));
+}
+
+export const MAX_TRANSITION_LOGS = 1000;
+
+/** Transitions logger: persists executed DJ transitions for post-set analysis. */
+export async function handleTransitions(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  res.setHeader('Content-Type', 'application/json');
+
+  if (req.method === 'GET') {
+    try {
+      const logs = readJsonArray<any>(TRANSITION_HISTORY_FILE);
+      logs.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+      res.end(JSON.stringify({ transitions: logs, total: logs.length }));
+    } catch (err) {
+      logError('transitions_get', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Failed to read transitions', transitions: [] }));
+    }
+    return true;
+  }
+
+  if (req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<any>(req);
+      if (!body || !body.outgoing || !body.incoming) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'Invalid transition payload' }));
+        return true;
+      }
+      const logs = readJsonArray<any>(TRANSITION_HISTORY_FILE);
+      logs.unshift(body);
+      const capped = logs.slice(0, MAX_TRANSITION_LOGS);
+      writeJsonAtomic(TRANSITION_HISTORY_FILE, capped);
+      res.end(JSON.stringify({ success: true, count: capped.length }));
+    } catch (err) {
+      logError('transitions_post', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Failed to save transition log' }));
+    }
+    return true;
+  }
+
+  if (req.method === 'DELETE') {
+    try {
+      writeJsonAtomic(TRANSITION_HISTORY_FILE, []);
+      res.end(JSON.stringify({ success: true, count: 0 }));
+    } catch (err) {
+      logError('transitions_delete', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Failed to clear transition logs' }));
+    }
+    return true;
+  }
+
+  return false;
 }

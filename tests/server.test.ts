@@ -4,7 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readJsonArray, writeJsonAtomic } from '../server/jsonFile';
 import { parseRange } from '../server/sendFile';
-import { findSong } from '../server/library';
+import { findSong, handleTransitions } from '../server/library';
 import { guessLanguage } from '../shared/songLanguage';
 
 describe('jsonFile', () => {
@@ -83,5 +83,22 @@ describe('guessLanguage', () => {
     expect(guessLanguage('295', 'Sidhu Moose Wala')).toEqual({ language: 'punjabi', sure: true });
     expect(guessLanguage('Kesariya', 'Arijit Singh')).toEqual({ language: 'hindi', sure: true });
     expect(guessLanguage('Blinding Lights', 'The Weeknd')).toEqual({ language: 'english', sure: false });
+  });
+});
+
+describe('handleTransitions', () => {
+  it('handles GET and returns transitions array', async () => {
+    let out = '';
+    const res: any = {
+      setHeader: () => {},
+      statusCode: 200,
+      end: (data: string) => { out = data; },
+    };
+    const reqGet: any = { method: 'GET' };
+    const handled = await handleTransitions(reqGet, res, new URL('http://localhost/api/transitions'));
+    expect(handled).toBe(true);
+    const parsed = JSON.parse(out);
+    expect(parsed).toHaveProperty('transitions');
+    expect(Array.isArray(parsed.transitions)).toBe(true);
   });
 });

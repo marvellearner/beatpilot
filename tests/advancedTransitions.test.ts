@@ -236,5 +236,14 @@ describe('Advanced AI Transitions Suite', () => {
     expect(engine.isTransitioning).toBe(true);
     expect(engine.acquisitionStatus).toContain('3-Band Frequency Stem Isolation Handoff');
     engine.cancelTransition();
+
+    // 6. Test Transitions Logger automatically logged all executed transitions
+    expect(engine.transitionHistory.length).toBeGreaterThanOrEqual(5);
+    expect(engine.transitionHistory[0].outgoing.title).toBe('Track Alpha');
+    expect(engine.transitionHistory[0].incoming.title).toBe('Track Beta');
+    const analytics = engine.getTransitionAnalytics();
+    expect(analytics.totalTransitions).toBeGreaterThanOrEqual(5);
+    expect(analytics.styleCounts['showcase_3band_handoff']).toBeGreaterThanOrEqual(1);
+    expect(analytics.styleCounts['loop_roll_riser']).toBeGreaterThanOrEqual(1);
   });
 });

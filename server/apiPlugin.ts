@@ -9,7 +9,7 @@ import { attachRemoteHub, handleRemoteInfo } from './remoteHub';
 import { handleSearch, handleCacheStatus, handleStream, handleHeatmap } from './youtube';
 import { handleRecommend, handleSimilar } from './recommendations';
 import { handleLlmHealth, handleLlm } from './llm';
-import { handleHistory, handleFavorites, handleBanned, handleMySongs } from './library';
+import { handleHistory, handleFavorites, handleBanned, handleMySongs, handleTransitions } from './library';
 import { handleSystemMemory } from './system';
 import { handleLaptopVolume } from './laptopAudio';
 import { handleLocalLibrary, scanLibrary, backfillMostPlayed } from './localLibrary';
@@ -48,6 +48,7 @@ function attachApi(httpServer: HttpServer, middlewares: Connect.Server) {
     if (path === '/api/heatmap') return handleHeatmap(req, res, url);
     // Library: these answer only some methods; anything else carries on to next()
     if (path === '/api/history' && (await handleHistory(req, res, url))) return;
+    if (path === '/api/transitions' && (await handleTransitions(req, res, url))) return;
     if ((path === '/api/favorites' || path === '/api/favorites/toggle') && (await handleFavorites(req, res, url))) return;
     if ((path === '/api/banned' || path === '/api/banned/toggle') && (await handleBanned(req, res, url))) return;
     if (path === '/api/my-songs' && (await handleMySongs(req, res, url))) return;

@@ -1,6 +1,7 @@
 import { VirtualDeck } from './VirtualDeck';
-import { RhythmEnhancer, type SongClock, type RhythmCommand } from './rhythm/RhythmEnhancer';
+import { RhythmEnhancer, type SongClock, type DeckClock, type RhythmCommand } from './rhythm/RhythmEnhancer';
 import { SongLibrary } from './engine/SongLibrary';
+import { TransitionLogger, type TransitionAnalytics } from './engine/TransitionLogger';
 import { buildLiveSyncState, buildSyncState, syncSignature } from './engine/syncState';
 import { SongRhythmPlans } from './engine/SongRhythmPlans';
 import {
@@ -17,6 +18,7 @@ import {
   TempoInfo,
   PlayLogEntry,
   ExitFx,
+  TransitionLogEntry,
 } from '../types';
 import {
   keyCompatibility,
@@ -45,6 +47,9 @@ import {
   sameVideo,
   spreadArtists,
   staleSongs,
+  detectPrevailingVibe,
+  isSongVibeCompatible,
+  alignQueueTopWithVibe,
   type SongLike,
 } from './engine/queueRules';
 import { DJAgent, type DanceBpmDecision } from '../ai/DJAgent';
@@ -54,7 +59,7 @@ import { apiFailure } from './engine/apiErrors';
 import { TrackQueueManager } from './engine/TrackQueueManager';
 import { MixCoordinator } from './engine/MixCoordinator';
 import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
-import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter } from '../../shared/songFilter';
+import { VIBE_MOOD, describeFilter, fitsFilter, type SongFilter, type Vibe } from '../../shared/songFilter';
 import type { IntroAnalysisResult } from './IntroSkitDetector';
 import { chooseNext, tempoStep } from './engine/setFlow';
 import { DESI_RUN, guessLanguage, languageFamily } from '../../shared/songLanguage';
@@ -363,6 +368,17 @@ export class AudioEngine {
 
   // Favourites, banned songs, play history and the play log (see engine/SongLibrary.ts)
   public readonly library = new SongLibrary(() => this.notify());
+
+  /** Transitions Logger: records and persists every transition executed by the engine */
+  public readonly transitionLogger = new TransitionLogger(() => this.notify());
+
+  public get transitionHistory(): TransitionLogEntry[] {
+    return this.transitionLogger.history;
+  }
+
+  public getTransitionAnalytics(): TransitionAnalytics {
+    return this.transitionLogger.getAnalytics();
+  }
 
   /** Every play with its time (kept across reloads): "Previously played" + the 1-hour no-repeat rule */
   public get playLog(): PlayLogEntry[] {
@@ -1467,7 +1483,15 @@ export class AudioEngine {
         : null;
     if (!plan) return this.startQueuedMixNow(item, durationSeconds);
 
-    this.queue = this.queue.filter((q) => q.id !== itemId);
+    // Keep the planned song in the Up Next queue until it actually gets played!
+    // Bring the planned item to the top of Up Next (#1 ON DECK) so it is prominently displayed.
+    const existingIdx = this.queue.findIndex((q) => q.id === itemId);
+    if (existingIdx > 0) {
+      const [it] = this.queue.splice(existingIdx, 1);
+      this.queue.unshift(it);
+    } else if (existingIdx === -1) {
+      this.queue.unshift(item);
+    }
     const outKey = outTrack?.key
       ? this.keyLock
         ? outTrack.key
@@ -1690,6 +1714,7 @@ export class AudioEngine {
       desiRun: this.desiRun(),
       danceFloor: this.mood === 'party' || this.mood === 'bhangra',
       peakRun: this.peakRun(current),
+      prevailingVibe: this.getPrevailingVibe(),
     });
     if (reason) this.lastAiDecision = `Next: "${pick.title}" — ${reason}`;
     return pick.item;
@@ -1723,6 +1748,25 @@ export class AudioEngine {
     if (next === this.queue) return false;
     this.queue = next;
     return true;
+  }
+
+  /** Prevailing vibe detected from the previous 3 to 5 songs in play history. */
+  public getPrevailingVibe(): Vibe | null {
+    return detectPrevailingVibe(this.playLog);
+  }
+
+  /**
+   * Enforces that the top `topCount` (default 10) songs in Up Next belong to the prevailing vibe
+   * of the previous 3-5 songs. Clashing songs are moved down below slot 10.
+   */
+  public keepVibeOnTop(topCount = 10): boolean {
+    const vibe = this.getPrevailingVibe();
+    if (!vibe) return false;
+    const mixing = this.pendingMix?.item;
+    const keepTop = mixing ? 1 : 0;
+    const before = this.queue.map((q) => q.id).join(',');
+    this.queue = alignQueueTopWithVibe(this.queue, vibe, topCount, keepTop);
+    return this.queue.map((q) => q.id).join(',') !== before;
   }
 
   /**
@@ -1912,6 +1956,9 @@ export class AudioEngine {
     const incTrack = this.queuedItemToTrack(pending.item);
     const isStrict = isStrictStartSong(incTrack);
     (targetDeckId === 'A' ? this.deckA : this.deckB).loadTrack(incTrack);
+    // Track has now actually started mixing/playing: remove it from Up Next queue now!
+    this.queue = this.queue.filter((q) => q.id !== pending.item.id);
+    this.saveQueueToStorage();
     this.startTransition({
       sourceDeck: this.activeDeck,
       targetDeck: targetDeckId,
@@ -2001,7 +2048,9 @@ export class AudioEngine {
       return;
     }
     window.clearTimeout(this.pendingMix.timer);
-    this.queue.unshift(this.pendingMix.item);
+    if (!this.queue.some((q) => q.id === this.pendingMix!.item.id)) {
+      this.queue.unshift(this.pendingMix.item);
+    }
     this.pendingMix = null;
     const onAir = this.onAirDeck().getTrack();
     const next = this.queue.find((q) => q.status === 'ready' && !this.isSkipped(q));
@@ -3057,6 +3106,7 @@ export class AudioEngine {
 
     try {
       const onAirTrack = this.onAirDeck().getTrack();
+      const prevailingVibe = this.getPrevailingVibe();
       // Familiar songs fill at most 70 % when new picks can fill the rest
       const familiarCap = this.autoCurationEnabled ? Math.round(FAMILIAR_SHARE * MAX_QUEUE_TARGET) : MAX_QUEUE_TARGET;
       const familiarFull = () => isQueueFull(this.queue) || this.queue.filter((q) => !isChosen(q) && !isNewPick(q)).length >= familiarCap;
@@ -3083,6 +3133,8 @@ export class AudioEngine {
           !this.allowedByFocus({ title, artist }) ||
           // "only dance songs": a song from the listener's history goes in only once the AI says it fits
           (this.artistFocus?.only && this.artistFocus.vibe && this.vibeVerdict({ title, artist }) !== true) ||
+          // Prevailing vibe of previous 3-5 songs: don't inject clashing ballads into top familiar pool
+          (prevailingVibe && !isSongVibeCompatible(prevailingVibe, { title, artist })) ||
           this.autoBlocked({ title, artist, url }) ||
           this.isDontPlayAgain({ title, artist, url }) ||
           this.isSongInQueueOrPlayed({ title, artist, url }) ||
@@ -3171,6 +3223,7 @@ export class AudioEngine {
       // One artist doesn't flood Up Next (not under "play only <artist>", where every song is theirs)
       if (!this.artistFocus?.only || !this.artistFocus.artists.length) this.queue = spreadArtists(this.queue);
       this.keepDesiOnTop();
+      this.keepVibeOnTop(10);
       if (this.queue.length > MAX_QUEUE_TARGET) {
         this.queue = this.queue.slice(0, MAX_QUEUE_TARGET);
       }
@@ -3513,10 +3566,25 @@ export class AudioEngine {
       : otherTrack && this.canBeatmatch(track, otherTrack)
         ? 'blend'
         : 'cut';
-    const forceFullTime = this.mood === 'party' || track.aiPerceivedMeter === 'half_time_folk';
+    // The song coming in (until it takes over as the song on air), so the dhol can bridge into it
+    const mix = this.mixCoordinator.current;
+    const otherAnchor = other.getClockAnchor();
+    const incoming =
+      mix && otherTrack && otherAnchor && (mix.targetDeckId === 'A' ? this.deckA : this.deckB) === other
+        ? { ...this.deckRhythmClock(otherTrack, otherAnchor, false), startsAt: mix.startTime }
+        : undefined;
+    return {
+      ...this.deckRhythmClock(track, anchor, true),
+      isPlaying: anchor !== null,
+      transition,
+      incoming,
+    };
+  }
+
+  /** One deck's song for the rhythm layer: its beat grid, sections, singing and dhol plan. */
+  private deckRhythmClock(track: TrackMetadata, anchor: { startedAt: number; rate: number } | null, onAir: boolean): DeckClock {
     return {
       trackId: track.id,
-      isPlaying: anchor !== null,
       bpm: track.bpm,
       bpmConfidence: track.bpmConfidence ?? 0,
       downbeat: track.firstDownbeatTime ?? 0,
@@ -3526,9 +3594,9 @@ export class AudioEngine {
       energyProfile: track.energyProfile,
       musicStartTime: track.musicStartTime,
       hookTime: track.highlightTime,
-      transition,
-      plan: this.rhythmPlans.planFor(track, true),
-      forceFullTime,
+      plan: this.rhythmPlans.planFor(track, onAir),
+      forceFullTime: this.mood === 'party' || track.aiPerceivedMeter === 'half_time_folk',
+      vocal: this.rhythmPlans.vocalMapFor(track),
     };
   }
 
@@ -3905,15 +3973,15 @@ export class AudioEngine {
         this.executePendingMix(true);
         return true;
       }
-      // A different song was chosen: overwrite the planned song!
-      // The old planned song should NOT be played; cancel its mix and mark it skipped.
+      // A different song was explicitly chosen: cancel the planned timer.
+      // The previously planned song was NOT played yet, so it must NOT get lost or marked as skipped!
       const oldMix = this.pendingMix;
       window.clearTimeout(oldMix.timer);
       this.pendingMix = null;
       this.aiOutroPrep = null;
-      this.skippedUntil.set(oldMix.item.id, Date.now() + SKIP_MS);
-      this.queue = this.queue.filter((q) => q.id !== oldMix.item.id);
-      this.queue.splice(Math.min(SKIP_TO_POSITION, this.queue.length), 0, oldMix.item);
+      if (!this.queue.some((q) => q.id === oldMix.item.id)) {
+        this.queue.unshift(oldMix.item);
+      }
       this.saveQueueToStorage();
     }
 
@@ -4251,9 +4319,9 @@ export class AudioEngine {
         window.clearTimeout(oldMix.timer);
         this.pendingMix = null;
         this.aiOutroPrep = null;
-        this.skippedUntil.set(oldMix.item.id, Date.now() + SKIP_MS);
-        this.queue = this.queue.filter((q) => q.id !== oldMix.item.id);
-        this.queue.splice(Math.min(SKIP_TO_POSITION, this.queue.length), 0, oldMix.item);
+        if (!this.queue.some((q) => q.id === oldMix.item.id)) {
+          this.queue.unshift(oldMix.item);
+        }
         this.saveQueueToStorage();
       }
     }
@@ -4761,6 +4829,52 @@ export class AudioEngine {
       durationSeconds = 0.35;
     }
 
+    // Transitions Logger: Record executed transition with full harmonic, tempo & style details
+    const outTrack = sourceState.track;
+    const inTrack = targetTrack;
+    const harmonicCompat = outTrack?.key && inTrack.key ? getHarmonicCompatibility(outTrack.key, inTrack.key) : null;
+    const keyFit = outTrack ? this.keyFit(outTrack, sourceState.playbackRate, inTrack) : undefined;
+    const bpmDiff = outTrack?.bpm && inTrack.bpm ? Math.round((inTrack.bpm - outTrack.bpm) * 10) / 10 : undefined;
+    const bpmRatio = outTrack?.bpm && inTrack.bpm ? Math.round((Math.max(outTrack.bpm, inTrack.bpm) / Math.min(outTrack.bpm, inTrack.bpm)) * 1000) / 1000 : undefined;
+
+    const transitionRecord: TransitionLogEntry = {
+      id: `trn_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: Date.now(),
+      isoDate: new Date().toISOString(),
+      outgoing: {
+        id: outTrack?.id,
+        title: outTrack?.title || 'Unknown Outgoing',
+        artist: outTrack?.artist || 'Unknown Artist',
+        bpm: outTrack?.bpm,
+        key: outTrack?.key,
+        exitTime: config.sourceExitTime,
+        duration: outTrack?.duration,
+      },
+      incoming: {
+        id: inTrack.id,
+        title: inTrack.title,
+        artist: inTrack.artist,
+        bpm: inTrack.bpm,
+        key: inTrack.key,
+        entryTime: config.targetEntryTime,
+        duration: inTrack.duration,
+      },
+      style: effectiveStyle,
+      durationSeconds: Math.round(durationSeconds * 10) / 10,
+      sourceDeck: config.sourceDeck,
+      targetDeck: config.targetDeck,
+      exitFx: appliedFx,
+      showcase: config.showcase,
+      bpmDifference: bpmDiff,
+      bpmRatio,
+      harmonicCompatibility: harmonicCompat ? `${harmonicCompat.badgeText} (${harmonicCompat.label})` : undefined,
+      keyFit,
+      tempoMatched: match.matched,
+      mood: this.mood,
+      reason: config.gapCut ? 'Gap cut' : config.instant ? 'Instant switch' : this.lastAiDecision || this.pendingMix?.plan?.reason || 'DJ set flow transition',
+    };
+    void this.transitionLogger.logTransition(transitionRecord);
+
     // Start "on the one": incoming song's first beat lands locked with the outgoing beat.
     let startTime = this.ctx.currentTime + 0.05;
     const isSourcePlaying = sourceState.isPlaying && !!sourceState.track;
@@ -5122,7 +5236,8 @@ export class AudioEngine {
     this.queue = this.queue.filter((q) => q.status === 'downloading' || !this.isSameSong(playedKeys, this.songKeys(q)));
     // Hindi / Punjabi back to back now: English songs leave the top of Up Next
     const reordered = this.keepDesiOnTop();
-    if (this.queue.length !== before || reordered) this.saveQueueToStorage();
+    const reorderedVibe = this.keepVibeOnTop(10);
+    if (this.queue.length !== before || reordered || reorderedVibe) this.saveQueueToStorage();
     this.notify();
 
     await this.library.postPlay(track);

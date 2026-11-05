@@ -126,6 +126,44 @@ export interface TransitionConfig {
  */
 export type ExitFx = 'roll' | 'brake' | 'reverb' | 'echo';
 
+/** Record of an executed transition for historical analysis and review. */
+export interface TransitionLogEntry {
+  id: string;
+  timestamp: number;
+  isoDate: string;
+  outgoing: {
+    id?: string;
+    title: string;
+    artist?: string;
+    bpm?: number;
+    key?: string;
+    exitTime?: number;
+    duration?: number;
+  };
+  incoming: {
+    id?: string;
+    title: string;
+    artist?: string;
+    bpm?: number;
+    key?: string;
+    entryTime?: number;
+    duration?: number;
+  };
+  style: TransitionStyle;
+  durationSeconds: number;
+  sourceDeck: DeckId;
+  targetDeck: DeckId;
+  exitFx?: ExitFx;
+  showcase?: 'eq_blend' | 'wash';
+  bpmDifference?: number;
+  bpmRatio?: number;
+  harmonicCompatibility?: string;
+  keyFit?: 'good' | 'ok' | 'clash' | 'unknown';
+  tempoMatched: boolean;
+  mood: string;
+  reason?: string;
+}
+
 /** A mix that has been planned for a good moment but hasn't started yet. */
 export interface PendingMixInfo {
   id?: string;

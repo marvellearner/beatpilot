@@ -6,6 +6,7 @@
 import type { QueuedTrack } from '../../types';
 import { cleanCoreTitle, isSameSong, songKeys } from '../songMatch';
 import { artistKey, songArtists } from '../../../shared/taste';
+import type { Vibe } from '../../../shared/songFilter';
 
 export type SongLike = { id?: string; title?: string; artist?: string; url?: string };
 
@@ -191,4 +192,164 @@ export function staleSongs(queue: QueuedTrack[], now: number, keepTop = KEEP_AT_
   return queue
     .slice(keepTop)
     .filter((q) => isNewPick(q) && (q.status === 'queued' || q.status === 'failed') && q.queuedAt !== undefined && now - q.queuedAt > STALE_AFTER_MS);
+}
+
+// --- Vibe Alignment for Up Next Top 10 ---
+
+export const SLOW_ROMANTIC_TITLE = /\b(sad|unplugged|lo-?fi|slowed|acoustic|piano|lullaby|reprise|emotional|heart ?break|bewafa|dard|judai|ishq|mohabbat|tum hi ho|khairiyat|humsafar|raataan lambiyan|pehli nazar|shayad|kasoor|baarishein|tune jo na|gehra hua|channa mereya|kabira|agar tum saath ho|jeena jeena|samjhawan|hamari adhuri|tera chehra|kaun tujhe|enrique|hero|perfect|ed sheeran)\b/i;
+
+export const ROMANTIC_BALLAD_ARTISTS = /\b(mohit chauhan|prateek kuhad|anuv jain|lucky ali|arijit singh|atif aslam|shreya ghoshal|armaan malik|jubin nautiyal|jasleen royal|papon|rahat fateh ali khan|ali sethi|mitraz)\b/i;
+
+export const BHANGRA_TITLE_ARTIST = /\b(bhangra|dhol|boliyan|tappe|gidda|jazzy b|surjit bindrakhia|sukshinder shinda|tru-skool|panjabi mc|daler mehndi|malkit singh|labh janjua)\b/i;
+
+export const DANCE_PARTY_TITLE = /\b(party|club|remix|dj|dance|edm|mashup|banger|daru|sharab|bass|groove|nach|nachne|floor|thumka|morni|yaar bolda|sadi gali|angreji beat|brown munde|295|so high|elevated|winning speech|lean on|gasolina|despacito|danza kuduro|pegg|gedi|bapu zimidar)\b/i;
+
+export const DANCE_PARTY_ARTISTS = /\b(diljit dosanjh|karan aujla|sidhu moose wala|ap dhillon|honey singh|badshah|guru randhawa|mika singh|sukhbir|dr zeus|hardy sandhu|major lazer|dj snake|tiesto|calvin harris|david guetta|pitbull|shubh|amrit maan)\b/i;
+
+/**
+ * Infers the vibe of a song from its title, artist and BPM.
+ */
+export function inferSongVibe(song: { title?: string; artist?: string; bpm?: number; bpmConfidence?: number }): Vibe {
+  const title = song.title || '';
+  const artist = song.artist || '';
+
+  // 1. Explicit dance remix / party version takes priority even if the original singer is romantic
+  if (DANCE_PARTY_TITLE.test(title)) {
+    return BHANGRA_TITLE_ARTIST.test(title) || BHANGRA_TITLE_ARTIST.test(artist) ? 'bhangra' : 'dance';
+  }
+
+  // 2. Slow romantic title cues (sad, acoustic, unplugged, emotional ballads)
+  if (SLOW_ROMANTIC_TITLE.test(title)) {
+    return 'romantic';
+  }
+
+  // 3. Bhangra markers
+  if (BHANGRA_TITLE_ARTIST.test(title) || BHANGRA_TITLE_ARTIST.test(artist)) {
+    return 'bhangra';
+  }
+
+  // 4. Known dance / party artists
+  if (DANCE_PARTY_ARTISTS.test(artist)) {
+    return 'dance';
+  }
+
+  // 5. Known romantic ballad artists
+  if (ROMANTIC_BALLAD_ARTISTS.test(artist)) {
+    return 'romantic';
+  }
+
+  // 6. BPM cues
+  if (song.bpm && (song.bpmConfidence ?? 0) >= 0.6) {
+    if (song.bpm >= 110) return 'dance';
+    if (song.bpm < 88) return 'romantic';
+  }
+
+  return 'dance'; // default upbeat for modern party player
+}
+
+/**
+ * Checks whether a song is compatible with a given target vibe.
+ * - Dance / Bhangra set: rejects slow romantic acoustic ballads or quiet low-tempo songs.
+ * - Romantic set: rejects loud party/club/remix bangers.
+ */
+export function isSongVibeCompatible(
+  targetVibe: Vibe,
+  song: { title?: string; artist?: string; bpm?: number; bpmConfidence?: number }
+): boolean {
+  const title = song.title || '';
+  const artist = song.artist || '';
+  const inferred = inferSongVibe(song);
+
+  if (targetVibe === 'dance' || targetVibe === 'bhangra') {
+    // Clashes if romantic or slow acoustic
+    if (inferred === 'romantic' || inferred === 'chill') return false;
+    if (SLOW_ROMANTIC_TITLE.test(title) && !DANCE_PARTY_TITLE.test(title)) return false;
+    if (ROMANTIC_BALLAD_ARTISTS.test(artist) && !DANCE_PARTY_TITLE.test(title) && (!song.bpm || song.bpm < 110)) return false;
+    if (song.bpm && (song.bpmConfidence ?? 0) >= 0.6 && song.bpm < 88) return false;
+    return true;
+  }
+
+  if (targetVibe === 'romantic') {
+    if (inferred === 'dance' || inferred === 'bhangra') return false;
+    if (DANCE_PARTY_TITLE.test(title)) return false;
+    if (DANCE_PARTY_ARTISTS.test(artist) && !SLOW_ROMANTIC_TITLE.test(title)) return false;
+    return true;
+  }
+
+  if (targetVibe === 'chill') {
+    if (inferred === 'bhangra' || DANCE_PARTY_TITLE.test(title)) return false;
+    return true;
+  }
+
+  return true;
+}
+
+/**
+ * Detects the prevailing vibe of the previous 3 to 5 songs in play history.
+ * If at least 60% of the recent 3-5 songs belong to the same vibe family,
+ * that vibe becomes the prevailing vibe of the current session.
+ */
+export function detectPrevailingVibe(
+  history: Array<{ title?: string; artist?: string; bpm?: number; bpmConfidence?: number }>
+): Vibe | null {
+  if (!history || history.length < 3) return null;
+  const recent = history.slice(0, Math.min(5, history.length));
+  let danceCount = 0;
+  let romanticCount = 0;
+  let chillCount = 0;
+
+  for (const song of recent) {
+    const v = inferSongVibe(song);
+    if (v === 'dance' || v === 'bhangra') danceCount++;
+    else if (v === 'romantic') romanticCount++;
+    else if (v === 'chill') chillCount++;
+  }
+
+  const threshold = Math.ceil(recent.length * 0.6); // 2 of 3, 3 of 4, 3 of 5
+  if (danceCount >= threshold) return 'dance';
+  if (romanticCount >= threshold) return 'romantic';
+  if (chillCount >= threshold) return 'chill';
+  return null;
+}
+
+/**
+ * Reorders the Up Next queue so that the top `topCount` (default 10) songs strictly match the
+ * prevailing vibe of the previous 3-5 songs.
+ *
+ * Rules:
+ * - Guest requested songs (`isChosen`) are preserved.
+ * - The very first track (if currently mixing/decoding) is left alone (`keepTop`).
+ * - Clashing songs (e.g. romantic ballad when previous songs are dance party bangers) are pushed
+ *   down past slot 10, while compatible songs from deeper in the queue are promoted into the top 10.
+ */
+export function alignQueueTopWithVibe(
+  queue: QueuedTrack[],
+  prevailingVibe: Vibe | null,
+  topCount = 10,
+  keepTop = 1
+): QueuedTrack[] {
+  if (!prevailingVibe || queue.length <= 1) return queue;
+
+  const safeKeep = Math.min(queue.length, Math.max(0, keepTop));
+  const head = queue.slice(0, safeKeep);
+  const rest = queue.slice(safeKeep);
+
+  const compatible: QueuedTrack[] = [];
+  const clashing: QueuedTrack[] = [];
+
+  for (const item of rest) {
+    if (isChosen(item) || isSongVibeCompatible(prevailingVibe, item)) {
+      compatible.push(item);
+    } else {
+      clashing.push(item);
+    }
+  }
+
+  // The top slots (up to topCount) must only contain compatible songs
+  const targetSlotsNeeded = Math.max(0, topCount - head.length);
+  const topPromoted = compatible.slice(0, targetSlotsNeeded);
+  const remainingCompatible = compatible.slice(targetSlotsNeeded);
+
+  // Compatible top songs first, then remaining compatible, and clashing placed after top 10
+  return [...head, ...topPromoted, ...remainingCompatible, ...clashing];
 }
