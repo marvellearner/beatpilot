@@ -71,7 +71,7 @@ export function fitsFilter(f: SongFilter, song: Song): boolean {
 // Earlier entries win: "bhangra" wins over generic "dance", "classic 90s songs" is the 90s, not just "old".
 const KIND_WORDS: Array<[RegExp, 'vibe' | 'language' | 'era', string]> = [
   [/\bbhangra\b/gi, 'vibe', 'bhangra'],
-  [/\b(dance|dancing|danceable|party|club|upbeat|bangers?|floor ?fillers?|naach|nachne)\b/gi, 'vibe', 'dance'],
+  [/\b(dance|dancing|danceable|party|club|upbeat|bangers?|floor ?fillers?|naach|nachne|edm|house(\s+music)?|techno|electro|trance|electronic(\s+dance)?)\b/gi, 'vibe', 'dance'],
   [/\b(romantic|love|slow)\b/gi, 'vibe', 'romantic'],
   [/\b(chill|relax(ing)?|calm|soft)\b/gi, 'vibe', 'chill'],
   [/\bpunjabi\b/gi, 'language', 'punjabi'],
@@ -237,6 +237,17 @@ const KNOWN_ARTIST_ENTRIES: Array<{ match: RegExp; name: string; defaultLanguage
   { match: /\b(calvin\s+harris)\b/i, name: 'Calvin Harris', defaultLanguage: 'english' },
   { match: /\b(david\s+guetta)\b/i, name: 'David Guetta', defaultLanguage: 'english' },
   { match: /\b(avicii)\b/i, name: 'Avicii', defaultLanguage: 'english' },
+  { match: /\b(martin\s+garrix)\b/i, name: 'Martin Garrix', defaultLanguage: 'english' },
+  { match: /\b(tiesto|tiësto)\b/i, name: 'Tiësto', defaultLanguage: 'english' },
+  { match: /\b(dj\s+snake)\b/i, name: 'DJ Snake', defaultLanguage: 'english' },
+  { match: /\b(alan\s+walker)\b/i, name: 'Alan Walker', defaultLanguage: 'english' },
+  { match: /\b(marshmello)\b/i, name: 'Marshmello', defaultLanguage: 'english' },
+  { match: /\b(skrillex)\b/i, name: 'Skrillex', defaultLanguage: 'english' },
+  { match: /\b(fred\s+again(\.\.)?)\b/i, name: 'Fred again..', defaultLanguage: 'english' },
+  { match: /\b(swedish\s+house\s+mafia)\b/i, name: 'Swedish House Mafia', defaultLanguage: 'english' },
+  { match: /\b(alesso)\b/i, name: 'Alesso', defaultLanguage: 'english' },
+  { match: /\b(kygo)\b/i, name: 'Kygo', defaultLanguage: 'english' },
+  { match: /\b(zedd)\b/i, name: 'Zedd', defaultLanguage: 'english' },
   { match: /\b(travis\s+scott)\b/i, name: 'Travis Scott', defaultLanguage: 'english' },
   { match: /\b(kendrick\s+lamar)\b/i, name: 'Kendrick Lamar', defaultLanguage: 'english' },
   { match: /\b(eminem)\b/i, name: 'Eminem', defaultLanguage: 'english' },
@@ -244,7 +255,7 @@ const KNOWN_ARTIST_ENTRIES: Array<{ match: RegExp; name: string; defaultLanguage
 ];
 
 /** Conversational prefixes indicating intentional user commands rather than literal titles */
-const CONVERSATIONAL_PREFIXES =
+export const CONVERSATIONAL_PREFIXES =
   /^(?:can you(?:\s+please)?|could you(?:\s+please)?|please|pls|plz|i want to hear|i want|we want|wanna hear|put on|play|queue up|queue|add|mix in|drop|blast|spin|find me|search for|give me|get me|look up|chalao|lagao|baja do|sunao)\s+/i;
 
 const MUSIC_DESCRIPTORS =
@@ -336,7 +347,8 @@ export function parseNlpSearchQuery(query: string): NlpSearchIntent {
   // 4. Compound Artist + Vibe / Era / Language
   if (matchedArtists.length > 0 && (hasKinds || isOnly)) {
     const primaryArtist = matchedArtists[0];
-    const vibeWord = vibe ? (vibe === 'dance' ? 'party' : VIBE_WORD[vibe]) : '';
+    const isEdm = /\b(edm|electronic(\s+dance)?|house(\s+music)?|techno|electro|trance)\b/i.test(trimmed);
+    const vibeWord = isEdm ? 'edm' : vibe ? (vibe === 'dance' ? 'party' : VIBE_WORD[vibe]) : '';
     const langWord = language ? LANGUAGE_WORD[language] : '';
     const eraWord = era ? ERA_WORD[era] : '';
 
@@ -363,7 +375,7 @@ export function parseNlpSearchQuery(query: string): NlpSearchIntent {
     }
 
     const badgeParts = [
-      vibe && VIBE_WORD[vibe].charAt(0).toUpperCase() + VIBE_WORD[vibe].slice(1),
+      isEdm ? 'EDM' : vibe && VIBE_WORD[vibe].charAt(0).toUpperCase() + VIBE_WORD[vibe].slice(1),
       language && LANGUAGE_WORD[language],
       era && ERA_WORD[era],
       primaryArtist,
@@ -394,6 +406,7 @@ export function parseNlpSearchQuery(query: string): NlpSearchIntent {
 
   // 5. Pure Vibe / Language / Era Filter (e.g. "fast upbeat hindi dance songs", "90s bollywood party hits")
   if (hasKinds) {
+    const isEdm = /\b(edm|electronic(\s+dance)?|house(\s+music)?|techno|electro|trance)\b/i.test(trimmed);
     const filter: SongFilter = {
       artists: [],
       only: isOnly || !hasConversationalPrefix,
@@ -403,14 +416,26 @@ export function parseNlpSearchQuery(query: string): NlpSearchIntent {
     };
     const baseQueries = filterQueries(filter, []);
     const single = (baseQueries[0] || 'party songs').replace(/\bsongs$/, 'song');
-    const searchTerms = [
-      `${single} full video`,
-      `${single} official video`,
-      `best ${single} hits`,
-      ...baseQueries,
-    ];
+    const searchTerms: string[] = [];
+    if (isEdm) {
+      searchTerms.push(
+        'best edm dance hits official video',
+        'top edm club song official music video',
+        'popular edm tracks official audio',
+        'famous edm festival anthem official video',
+        ...baseQueries
+      );
+    } else {
+      searchTerms.push(
+        `${single} full video`,
+        `${single} official video`,
+        `best ${single} hits`,
+        ...baseQueries
+      );
+    }
 
     const badgeParts = [
+      isEdm ? 'EDM' : undefined,
       language && LANGUAGE_WORD[language],
       era && ERA_WORD[era],
       vibe && VIBE_WORD[vibe].charAt(0).toUpperCase() + VIBE_WORD[vibe].slice(1),

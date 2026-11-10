@@ -39,6 +39,7 @@ export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {
       targetDeck,
       durationSeconds: transitionDuration,
       style: transitionStyle,
+      manualStyle: true,
     });
   };
 

@@ -43,7 +43,21 @@ async function searchFor(query: string, page: number, nlp?: NlpSearchIntent): Pr
         }
       }
     }
-    if (out.length >= FEW_RESULTS || page > 1) return out;
+    // Secondary pass: if strict filters dropped everything (e.g. 6.5 min club mixes or slight score hit),
+    // salvage legitimate single tracks under 8 mins that aren't multi-hour continuous jukeboxes
+    if (out.length === 0) {
+      const isSoftSong = (h: VideoHit) =>
+        h.lengthSeconds >= 60 &&
+        h.lengthSeconds <= 480 &&
+        !/\b(1 hour|hour mix|2 hours|3 hours|non[- ]?stop|jukebox)\b/i.test(h.title);
+      for (const h of lists.flat()) {
+        if (isSoftSong(h) && !seen.has(h.videoId)) {
+          seen.add(h.videoId);
+          out.push(h);
+        }
+      }
+    }
+    if (out.length > 0 || page > 1) return out;
   }
 
   const described = describedSongs(query);
@@ -68,11 +82,14 @@ async function searchFor(query: string, page: number, nlp?: NlpSearchIntent): Pr
     return merged;
   }
   // "… songs" mostly finds jukeboxes; "… song full video" finds the songs themselves
-  const base = filterQueries(described, [])[0];
-  const single = base.replace(/\bsongs$/, 'song');
-  const queries = [`${single} full video`, base, `${single} official video`, `best ${base}`, `${base} hits`, `${single} video`];
+  const isEdm = /\b(edm|electronic(\s+dance)?|house(\s+music)?|techno|electro|trance)\b/i.test(query);
+  const base = isEdm ? 'best edm dance hits' : (filterQueries(described, [])[0] || 'party songs');
+  const single = isEdm ? 'edm dance' : base.replace(/\bsongs$/, 'song');
+  const queries = isEdm
+    ? ['best edm dance hits official video', 'top edm club song official music video', 'popular edm tracks official audio', 'edm dance hits']
+    : [`${single} full video`, base, `${single} official video`, `best ${base}`, `${base} hits`, `${single} video`];
   const lists = await Promise.all(queries.map((q) => searchVideos(q, page).catch(() => [] as VideoHit[])));
-  const isSong = (h: VideoHit) => h.lengthSeconds >= 90 && h.lengthSeconds <= MAX_AUTO_SONG_SECONDS && scoreHit(h, 0, EMPTY_TASTE) > -1;
+  const isSong = (h: VideoHit) => h.lengthSeconds >= 60 && h.lengthSeconds <= MAX_AUTO_SONG_SECONDS && scoreHit(h, 0, EMPTY_TASTE) > -1;
   const ranked = lists.map((l) => l.filter(isSong));
   const seen = new Set<string>();
   const out: VideoHit[] = [];
@@ -85,12 +102,12 @@ async function searchFor(query: string, page: number, nlp?: NlpSearchIntent): Pr
       }
     }
   }
-  return out.length || page > 1 ? out : searchVideos(query, page); // nothing found that way: as typed
+  return out.length || page > 1 ? out : searchVideos(isEdm ? 'best edm dance hits' : query, page); // nothing found that way: as typed
 }
 
 // Downloaded song audio (compressed, as YouTube sends it; ~4 MB per song), one file per video id
 export const AUDIO_CACHE_DIR = path.join(ROOT_DIR, 'cache', 'audio');
-export const AUDIO_CACHE_MAX_BYTES = 2 * 1024 ** 3; // ~500 songs; least recently played go first
+export const AUDIO_CACHE_MAX_BYTES = 4 * 1024 ** 3; // ~1,000 songs; least recently played go first
 const STALE_PART_MS = 60 * 60 * 1000;
 
 export function cachedAudioPath(videoId: string): string {

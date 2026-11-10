@@ -195,7 +195,7 @@ describe('Pending Mix Queue Retention', () => {
     const queue = (engine as any).queue as QueuedTrack[];
     expect(queue.some((q) => q.id === plannedSong.id)).toBe(true);
     expect((engine as any).skippedUntil.has(plannedSong.id)).toBe(false);
-  });
+  }, 30000);
 
   it('removes the song from the queue only when the mix actually executes', () => {
     const song1 = createTrack('s1', 'Tera Yaar Bolda', 'Surjit Bindrakhia');

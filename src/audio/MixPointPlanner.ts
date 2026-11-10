@@ -256,7 +256,9 @@ export function planMix(params: {
   const exitLatest = Math.min(outPosition + params.lookAheadSeconds, out.duration - outBlend - 0.5, hardLimit);
   let exits = barStarts(out, Math.max(exitFrom, params.earliestExit ?? 0), exitLatest);
   // The window may have closed (e.g. no song was ready in time): then the next good bar from here
-  if (exits.length === 0 && params.earliestExit !== undefined) exits = barStarts(out, exitFrom, exitLatest);
+  if (exits.length === 0 && params.earliestExit !== undefined && outPosition >= params.earliestExit) {
+    exits = barStarts(out, exitFrom, exitLatest);
+  }
 
   // Never wait into the old song's fade-out: the old song is still playing for at least the first
   // half of the mix, so an exit starts a bar (or half the blend) before its music ends. One a bar

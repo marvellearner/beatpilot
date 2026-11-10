@@ -16,6 +16,12 @@ describe('describeApiFailure', () => {
     expect(msg).toMatch(/don't have this upload/);
   });
 
+  it('says the source refused the audio when the download itself gets an HTTP error', () => {
+    const msg = describeApiFailure('Error: HTTP 403', 'download', 502);
+    expect(msg).toMatch(/refused it \(HTTP 403\)/);
+    expect(msg).toMatch(/already on this laptop still play/);
+  });
+
   it('falls back to the server details', () => {
     expect(describeApiFailure('', 'search', 502)).toBe('search failed (HTTP 502)');
   });

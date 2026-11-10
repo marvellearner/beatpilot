@@ -5,7 +5,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { DATA_DIR, ROOT_DIR } from './paths';
+import { DATA_DIR } from './paths';
 import { writeJsonAtomic } from './jsonFile';
 
 export const GEMINI_USAGE_FILE = path.join(DATA_DIR, 'gemini_usage.json');
@@ -22,20 +22,18 @@ export interface GeminiDailyUsage {
   lastUpdated: number;
 }
 
-/** Returns the daily limit in INR (defaults to 100 INR if not set) */
+/**
+ * Returns the daily limit in INR.
+ * Gemini max limit capping is completely removed/disabled per user request (returns 0 = uncapped).
+ * If a custom limit is explicitly passed in process.env.GEMINI_DAILY_LIMIT_INR (e.g. in tests), it is supported.
+ */
 export function getDailyLimitInr(): number {
   const envVal = process.env.GEMINI_DAILY_LIMIT_INR;
-  if (envVal !== undefined && !isNaN(Number(envVal))) {
-    return Math.max(1, Number(envVal));
+  if (envVal !== undefined && envVal.trim() !== '') {
+    const num = Number(envVal);
+    if (!isNaN(num) && num > 0) return num;
   }
-  try {
-    const envFile = fs.readFileSync(path.join(ROOT_DIR, '.env'), 'utf-8');
-    const match = envFile.match(/^\s*GEMINI_DAILY_LIMIT_INR\s*=\s*([0-9.]+)/m);
-    if (match) return Math.max(1, Number(match[1]));
-  } catch {
-    // ignore
-  }
-  return 100; // default ₹100 INR per day
+  return 0; // Uncapped by default (0 = no max limit capping)
 }
 
 /** Formats today's local date as YYYY-MM-DD */
@@ -94,7 +92,7 @@ export function getGeminiDailyUsage(): GeminiDailyUsage {
       requestsCount: 0,
       estimatedSpendInr: 0,
       dailyLimitInr: limit,
-      remainingInr: limit,
+      remainingInr: limit > 0 ? limit : 0,
       lastUpdated: Date.now(),
     };
     try {
@@ -104,16 +102,16 @@ export function getGeminiDailyUsage(): GeminiDailyUsage {
     }
   } else {
     data.dailyLimitInr = limit;
-    data.remainingInr = Math.max(0, Number((limit - (data.estimatedSpendInr || 0)).toFixed(4)));
+    data.remainingInr = limit > 0 ? Math.max(0, Number((limit - (data.estimatedSpendInr || 0)).toFixed(4))) : 0;
   }
 
   return data as GeminiDailyUsage;
 }
 
-/** Checks whether another Gemini API call is permitted under today's budget */
+/** Checks whether another Gemini API call is permitted under today's budget (uncapped when dailyLimitInr <= 0) */
 export function checkGeminiDailyBudget(): { allowed: boolean; reason?: string; usage: GeminiDailyUsage } {
   const usage = getGeminiDailyUsage();
-  if (usage.estimatedSpendInr >= usage.dailyLimitInr) {
+  if (usage.dailyLimitInr > 0 && usage.estimatedSpendInr >= usage.dailyLimitInr) {
     const msLeft = getMsUntilMidnight();
     const hoursLeft = Math.ceil(msLeft / 3_600_000);
     return {

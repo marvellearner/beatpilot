@@ -53,4 +53,12 @@ describe('planMix in Best Parts mode', () => {
     const plan = planMix({ ...base, out: song(), inc: song(), outPosition: 70, lookAheadSeconds: 30, latestExit: 90 })!;
     expect(plan.exitTime).toBeLessThanOrEqual(90);
   });
+
+  it('does not exit prematurely before earliestExit when song is still before the 30s threshold', () => {
+    // Song is at 10s, earliestExit is at 40s (30s minimum from start pos 10s)
+    // lookAheadSeconds is 20s (reaches 30s, does not reach earliestExit at 40s)
+    const plan = planMix({ ...base, out: song(), inc: song(), outPosition: 10, lookAheadSeconds: 20, earliestExit: 40 });
+    // Must return null instead of exiting immediately at 12s
+    expect(plan).toBeNull();
+  });
 });

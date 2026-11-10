@@ -1,5 +1,5 @@
 import React from 'react';
-import { History, Music, Plus, Zap } from 'lucide-react';
+import { Heart, History, Music, Plus, Zap } from 'lucide-react';
 import { PlayLogEntry } from '../../types';
 import { areSongsConsecutivelySame, songKeys, isSameSong } from '../../audio/songMatch';
 
@@ -7,7 +7,15 @@ interface PreviouslyPlayedPanelProps {
   entries: PlayLogEntry[]; // newest first
   onMix: (entry: PlayLogEntry) => void; // play it now, or mix into it if a song is on air
   onQueue?: (entry: PlayLogEntry) => void; // add to Up Next queue
+  favorites?: { title?: string; url?: string }[]; // to show which songs are already saved
+  onFavorite?: (entry: PlayLogEntry) => void; // save to / remove from Favourites
   compact?: boolean;
+}
+
+/** Same matching as the Favourites list (SongLibrary.isFavorite): the link, else the title. */
+function isSaved(entry: PlayLogEntry, favorites: { title?: string; url?: string }[]): boolean {
+  const title = entry.title.trim().toLowerCase();
+  return favorites.some((f) => (entry.url && f.url === entry.url) || (!!f.title && f.title.trim().toLowerCase() === title));
 }
 
 const NO_REPEAT_MS = 3 * 60 * 60 * 1000; // Up Next skips songs played this recently (AudioEngine REPLAY_GAP_MS)
@@ -24,7 +32,7 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
 }
 
 /** Songs that played recently, newest first. Songs from the last 3 hours won't be auto-queued again. */
-const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, onQueue, compact }) => {
+const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, onQueue, favorites = [], onFavorite, compact }) => {
   const now = Date.now();
 
   // RULE: In previously played no 2 consecutive songs can be same
@@ -98,6 +106,25 @@ const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entri
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {onFavorite && (() => {
+                    const saved = isSaved(entry, favorites);
+                    return (
+                      <button
+                        id={`previously-played-fav-${entry.id}-${entry.playedAt}`}
+                        type="button"
+                        onClick={() => onFavorite(entry)}
+                        aria-pressed={saved}
+                        className={`shrink-0 p-1 rounded border transition-colors ${
+                          saved
+                            ? 'text-rose-400 bg-rose-500/15 border-rose-500/30 hover:bg-rose-500/25'
+                            : 'text-slate-400 hover:text-rose-300 bg-white/5 hover:bg-white/15 border-white/10'
+                        }`}
+                        title={saved ? 'Saved in Favourites (click to remove)' : 'Save to Favourites'}
+                      >
+                        <Heart className={`w-3 h-3 ${saved ? 'fill-current' : ''}`} />
+                      </button>
+                    );
+                  })()}
                   {onQueue && (
                     <button
                       id={`previously-played-queue-${entry.id}-${entry.playedAt}`}

@@ -151,6 +151,12 @@ function retryDelayMs(errorText: string): number | null {
 
 /** Whether Gemini is held back after such a failure (and why). */
 export function geminiBlocked(now = Date.now()): { until: number; error: string } | null {
+  if (geminiBlock && /daily (budget|limit)/i.test(geminiBlock.error)) {
+    const budget = checkGeminiDailyBudget();
+    if (budget.allowed) {
+      geminiBlock = null; // Auto-unblock if budget cap was removed
+    }
+  }
   return geminiBlock && now < geminiBlock.until ? geminiBlock : null;
 }
 
@@ -228,7 +234,7 @@ export async function geminiGenerate(prompt: string, maxTokens: number, timeoutM
       const outTokens = usageMeta?.candidatesTokenCount || Math.ceil(text.length / 4);
       const updatedUsage = recordGeminiUsage(inTokens, outTokens, model);
 
-      if (updatedUsage.estimatedSpendInr >= updatedUsage.dailyLimitInr) {
+      if (updatedUsage.dailyLimitInr > 0 && updatedUsage.estimatedSpendInr >= updatedUsage.dailyLimitInr) {
         geminiBlock = {
           until: Date.now() + getMsUntilMidnight(),
           error: `Daily limit of ₹${updatedUsage.dailyLimitInr.toFixed(0)} reached (spent ₹${updatedUsage.estimatedSpendInr.toFixed(2)} today)`,

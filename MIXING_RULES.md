@@ -172,8 +172,8 @@ The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of
 **Shown:** the status line names the style, e.g. "Echo-out on the old song".
 
 **No abrupt transitions (STRICT):** a song may change abruptly **only where the old song itself pauses** (a gap cut into its own silence). Everywhere else every transition overlaps for at least 4 s (`SMOOTH_MIN_SECONDS`), whoever asked for it: the AI DJ's "cut", the vocal-clash cut (now a 2-bar blend), Mix now, a disliked-song skip, a length picked by hand. So:
-- Loop roll and brake are no longer used (both end in a hard landing).
-- Tempos that can't be beatmatched and no low part at the mix point: a 5 s bass-swapped fade with an echo tail (`SMOOTH_FALLBACK_SECONDS`), not a quick cut.
+- Loop roll and brake are the exception: hard landings, used only on a dance floor with no low part at the mix point, and never two close together.
+- Tempos that can't be beatmatched never get a plain fade. The move comes from `pickSignatureFx`, in rotation: echo-out, loop roll, reverb wash, brake (calm moods and quiet parts: reverb or echo only, thrown 60 % into a filtered, bass-swapped fade). Two soft beatless songs get the long wash fade.
 - Anything that overlaps stays beatmatched (natural tempo only for gap cuts), so the beats don't flam.
 Code: `smoothOnly` in `startTransition`, `executePendingMix`, `chooseExitFx`, `lowFadeSeconds`.
 
@@ -409,7 +409,8 @@ Switch: **"Best parts only"** under the transport controls (Party console), **"B
 - The auto-mix treats the end of the exit window as the song's end: it plans the mix (and asks the AI DJ ahead of time) 45 s before it, exactly as it would before a real outro.
 - **Never cut a phrase short to hit a time:** the exit is always a bar start chosen for musical reasons inside the window.
 
-## 4. The hard limit (`bestPartsMaxSeconds`, default 90 s)
+## 4. The hard limit (`bestPartsMaxSeconds`, default 90 s) and 30-Second Minimum Playback
+- **Minimum Play Duration (at least 30 seconds):** Every song in Best Parts mode (or after jumping to a hook with "Best part") must play on air for **at least 30 seconds** (`BEST_PART_MIN_PLAY_SECONDS = 30`) before the engine is permitted to mix it out on its own. Automatic mixes (`planOutroMix`) are suppressed until 30 seconds have elapsed, and the earliest allowable exit point (`earliestExit`) is held to at least `playStart + 30s`.
 - Counted from where the song came in (its entry point, or where the listener jumped to with a seek / Best part), mix included: the old song is **half faded by the limit** (`latestExit` in `planMix`).
 - Everything else works **inside** the limit: the exit window, the phrase search, the "never in a high part" wait and gap cuts. If a high part runs past the limit, the best bar before the limit is used.
 - An exit window running past the limit ends at it; one starting after the limit is dropped and the exit is chosen in the 45 s before the limit.

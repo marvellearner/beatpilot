@@ -24,5 +24,8 @@ export function describeApiFailure(details: string, what: 'search' | 'download',
   if (/No audio source could provide/i.test(details)) {
     return 'the audio sources don\'t have this upload right now. Try another result for the same song';
   }
+  // The source gave a link, then refused the audio itself (403 for every song when it is blocked)
+  const refused = what === 'download' && details.match(/^(?:Error: )?HTTP (\d{3})$/)?.[1];
+  if (refused) return `the audio source refused it (HTTP ${refused}). Songs already on this laptop still play`;
   return `${what === 'search' ? 'search' : 'download'} failed (${details.slice(0, 120) || `HTTP ${status}`})`;
 }

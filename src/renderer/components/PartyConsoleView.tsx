@@ -9,7 +9,7 @@ import { QueueManagerPanel } from './QueueManagerPanel';
 import { PreviouslyPlayedPanel } from './PreviouslyPlayedPanel';
 import { BangersPanel } from './BangersPanel';
 import { SongListEditorModal } from './SongListEditorModal';
-import { useEngineTrack, useEngineMood } from '../hooks/useEngineStore';
+import { useEngineTrack, useEngineMood, useEngineBangers } from '../hooks/useEngineStore';
 import { PLAY_LOG_MAX } from '../../audio/engine/SongLibrary';
 import { FileText, Edit3, Play, Disc3, Loader2, Sparkles } from 'lucide-react';
 
@@ -97,6 +97,17 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
     (entry: { url?: string; artist: string; title: string }) =>
       engine.acquireTrack(entry.url || `${entry.artist} ${entry.title}`, false, 'front'),
     [engine]
+  );
+
+  // Hearts in Previously Played: redraws when Favourites change
+  const { favorites } = useEngineBangers(engine);
+  const favoriteFromHistory = useCallback(
+    (entry: { url?: string; artist: string; title: string; thumbnail?: string }) => {
+      const saved = engine.isFavorite({ url: entry.url, title: entry.title });
+      void engine.toggleFavorite({ title: entry.title, artist: entry.artist, url: entry.url, thumbnail: entry.thumbnail });
+      showToast(saved ? `Removed "${entry.title}" from Favourites` : `Saved "${entry.title}" to Favourites`);
+    },
+    [engine, showToast]
   );
 
   const pendingMix = playback.pendingMix;
@@ -277,7 +288,13 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
         {/* Right Column: Up Next Queue + Previously Played + Bangers Panel */}
         <div id="party-console-right-column" className="flex flex-col gap-3 min-w-0">
           <QueueManagerPanel engine={engine} onToast={showToast} formatTime={formatTime} />
-          <PreviouslyPlayedPanel entries={historyEntries} onMix={mixFromHistory} onQueue={queueFromHistory} />
+          <PreviouslyPlayedPanel
+            entries={historyEntries}
+            onMix={mixFromHistory}
+            onQueue={queueFromHistory}
+            favorites={favorites}
+            onFavorite={favoriteFromHistory}
+          />
           <BangersPanel engine={engine} onToast={showToast} />
         </div>
       </div>

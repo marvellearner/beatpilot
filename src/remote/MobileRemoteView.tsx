@@ -278,6 +278,12 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
     },
     [onSendAction]
   );
+  const favoritePreviouslyPlayed = useCallback(
+    (entry: { url?: string; artist: string; title: string; thumbnail?: string }) => {
+      onSendAction({ type: 'CMD_TOGGLE_FAVORITE', song: { title: entry.title, artist: entry.artist, url: entry.url, thumbnail: entry.thumbnail } });
+    },
+    [onSendAction]
+  );
   // The Up Next list (often 1,000+ elements) is rebuilt only when the queue, the key of the song on
   // air or the mixing state change, not on every live update (time, tempo…) a few times a second:
   // redrawing it each time kept a phone busy and made the sliders crawl.
@@ -1203,6 +1209,8 @@ export const MobileRemoteView: React.FC<MobileRemoteViewProps> = ({ syncState, c
         entries={syncState.recentlyPlayed ?? []}
         onMix={mixPreviouslyPlayed}
         onQueue={queuePreviouslyPlayed}
+        favorites={syncState.favorites}
+        onFavorite={favoritePreviouslyPlayed}
       />
 
       {/* Favourites & Most Played: one card, two tabs */}

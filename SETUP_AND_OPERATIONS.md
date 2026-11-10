@@ -124,7 +124,7 @@ New-NetFirewallRule -DisplayName "AI-DJ-DevServer" -Direction Inbound -LocalPort
 - **Song audio on disk:** `cache/audio/<videoId>.audio` holds each downloaded song as YouTube sent it (compressed, about 4–5 MB).
   - It's saved while the song streams, under a temporary `.part` name, and renamed only once complete. An interrupted download is deleted.
   - Replays and page refreshes load from disk (about 0.03 s vs about 2 s), and cached songs play without internet.
-  - The folder is capped at 2 GB (~500 songs). The least recently played files are deleted first.
+  - The folder is capped at 4 GB (~1,000 songs). The least recently played files are deleted first.
   - It isn't committed to git. Deleting the folder is always safe; songs just download again.
 - **Offline library:** `music/` holds your own songs (uploads go to `music/Uploads`) and, in `music/Most Played`, an MP3 (192 kbps, tagged) of every liked song and every song played 2+ times, named "Artist - Title [videoId].mp3". A background sync (`runOfflineSync` in `server/localLibrary.ts`: at startup, every 30 min, and after a like) downloads any that aren't cached yet through the third-party audio source, one at a time with 15 s between downloads; failures are logged to `logs/server-issues.log` as `[offline-sync]` and retried after 6 h. Unlike the cache it isn't trimmed. Extra folders you add are scanned in place and only listed in `data/local_library.json`. Neither is committed to git. Deleting `music/Most Played` is safe: the sync saves the songs again.
   - The MP3s need **ffmpeg** on the PATH (here it came with yt-dlp: `winget install yt-dlp.FFmpeg`). Without it the original audio is copied instead, which plays just as well.

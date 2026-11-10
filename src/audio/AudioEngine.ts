@@ -56,6 +56,7 @@ import { DJAgent, type DanceBpmDecision } from '../ai/DJAgent';
 import { PHASE_TOLERANCE_SECONDS, PhaseLock } from './engine/PhaseLock';
 import { AudioGraph } from './engine/AudioGraph';
 import { apiFailure } from './engine/apiErrors';
+import { pickSignatureFx } from './engine/signatureFx';
 import { TrackQueueManager } from './engine/TrackQueueManager';
 import { MixCoordinator } from './engine/MixCoordinator';
 import { MAX_AUTO_SONG_SECONDS, artistKey, buildTaste, songArtists, tasteForPrompt, type TasteProfile } from '../../shared/taste';
@@ -192,6 +193,7 @@ const BEST_PART_EXIT_BARS = 16; // ...then mix out at the best phrase within the
 const BEST_PART_BUILD_BARS = 16; // incoming songs enter up to 16 bars before their hook
 const BEST_PART_MIN_BUILD_BARS = 4; // ...and never later than 4 bars before it
 const BEST_PART_MIN_SONG_SECONDS = 120; // shorter songs play whole
+export const BEST_PART_MIN_PLAY_SECONDS = 30; // each song must play at least 30 seconds before auto-mixing out
 const BEST_PARTS_MAX_KEY = 'ai_dj_best_parts_max_seconds';
 const BEST_PARTS_DEFAULT_SECONDS = 90; // the most of a song that plays, from where it came in, mix included
 const BEST_PARTS_MIN_LIMIT = 45;
@@ -365,6 +367,8 @@ export class AudioEngine {
 
   // In-memory audio buffer cache (avoids re-downloading or re-rendering songs)
   private audioBufferCache = new Map<string, { buffer: AudioBuffer; metadata: TrackMetadata }>();
+  // Why the server wouldn't give a song on a deck its audio (shown when Play can't start it)
+  private loadRefusals = new WeakMap<TrackMetadata, string>();
 
   // Favourites, banned songs, play history and the play log (see engine/SongLibrary.ts)
   public readonly library = new SongLibrary(() => this.notify());
@@ -406,6 +410,7 @@ export class AudioEngine {
   private topBangersCache: { key: string; raw: SongHistoryItem[]; list: SongHistoryItem[] } | null = null;
 
   private mixesSinceShowFx = SHOW_FX_EVERY; // mixes since the last loop roll / brake
+  private recentExitFx: ExitFx[] = []; // the latest exit moves, newest first (pickSignatureFx)
   private onAirLoudness: Array<{ id: string; db: number }> = []; // newest first, for set-flow breathers
   // A mix waiting for its planned blend point (the song is out of the queue meanwhile)
   private pendingMix: {
@@ -1176,6 +1181,8 @@ export class AudioEngine {
     }
     // Best Parts mode: the mix-out deadline is the end of the song's exit window, not the song's end
     const remaining = curTrack ? this.mixOutWindow(curTrack, curState.currentTime).endsAt - curState.currentTime : 0;
+    const playedSoFar = curTrack ? curState.currentTime - (this.playStart?.trackId === curTrack.id ? this.playStart.pos : 0) : 0;
+    const minPlayMet = !this.bestPartsMode || playedSoFar >= BEST_PART_MIN_PLAY_SECONDS;
     if (this.pendingMix) {
       // Safety net if the planned-mix timer fired late (background tabs throttle timers)
       const startsIn = this.pendingMixStartsIn();
@@ -1186,6 +1193,7 @@ export class AudioEngine {
       !this.isTransitioning &&
       !this.choosingNextSong &&
       !this.mixLoadingId &&
+      minPlayMet &&
       remaining <= OUTRO_PLAN_SECONDS &&
       nextReady &&
       nextReady.audioBuffer
@@ -1354,7 +1362,8 @@ export class AudioEngine {
     if (!this.bestPartsMode || this.extendedBestPartsTrackId === track.id || track.highlightTime === undefined || !track.bpm || track.duration < BEST_PART_MIN_SONG_SECONDS) return null;
     const bar = 240 / track.bpm;
     const bestPart = Math.max(track.highlightTime, track.peakTime ?? track.highlightTime);
-    const from = bestPart + BEST_PART_HOOK_BARS * bar;
+    const minExit = (this.playStart?.trackId === track.id ? this.playStart.pos : 0) + BEST_PART_MIN_PLAY_SECONDS;
+    const from = Math.max(minExit, bestPart + BEST_PART_HOOK_BARS * bar);
     const to = from + BEST_PART_EXIT_BARS * bar;
     return to < this.musicEnd(track) - OUTRO_PLAN_SECONDS / 2 ? { from, to } : null;
   }
@@ -1384,19 +1393,22 @@ export class AudioEngine {
     if (this.extendedBestPartsTrackId === track.id || this.mixLoadingId) {
       return { endsAt: this.musicEnd(track) };
     }
+    const minExit = this.bestPartsMode
+      ? (this.playStart?.trackId === track.id ? this.playStart.pos : 0) + BEST_PART_MIN_PLAY_SECONDS
+      : 0;
     const best = this.bestPartExitWindow(track);
     const win: { endsAt: number; earliestExit?: number } = !best
-      ? { endsAt: this.musicEnd(track) }
+      ? { endsAt: Math.max(this.musicEnd(track), minExit + 8), earliestExit: minExit > 0 ? minExit : undefined }
       : position < best.to - 4
-        ? { endsAt: best.to, earliestExit: best.from }
-        : { endsAt: Math.min(this.musicEnd(track), position + BEST_PART_EXIT_BARS * (240 / track.bpm)) };
+        ? { endsAt: Math.max(best.to, minExit + 8), earliestExit: Math.max(best.from, minExit) }
+        : { endsAt: Math.max(Math.min(this.musicEnd(track), position + BEST_PART_EXIT_BARS * (240 / track.bpm)), minExit + 8), earliestExit: minExit > 0 ? minExit : undefined };
     const limit = this.playLimitEnd(track, position);
     if (limit === undefined) return win;
     // The hard limit: the old song is gone by then, whatever the hook window, a high part or the
     // phrase search would prefer (passed already, e.g. no song was ready: the next few seconds)
-    const latestExit = Math.max(limit, position + LIMIT_PASSED_LEAD_SECONDS);
-    const endsAt = Math.min(win.endsAt, latestExit);
-    const earliestExit = win.earliestExit !== undefined && win.earliestExit < endsAt - 4 ? win.earliestExit : undefined;
+    const latestExit = Math.max(limit, position + LIMIT_PASSED_LEAD_SECONDS, minExit + 8);
+    const endsAt = Math.max(Math.min(win.endsAt, latestExit), minExit + 8);
+    const earliestExit = win.earliestExit !== undefined && win.earliestExit < endsAt - 2 ? win.earliestExit : minExit > 0 ? minExit : undefined;
     return { endsAt, earliestExit, latestExit };
   }
 
@@ -1408,7 +1420,7 @@ export class AudioEngine {
     if (!this.bestPartsMode || this.extendedBestPartsTrackId === track.id || isStrictStartSong(track) || !track.duration || track.duration < BEST_PART_MIN_SONG_SECONDS) return undefined;
     // First seen on air without a recorded entry (first song, reload): count from here
     if (this.playStart?.trackId !== track.id) this.playStart = { trackId: track.id, pos: position };
-    return this.playStart.pos + this.bestPartsMaxSeconds;
+    return this.playStart.pos + Math.max(BEST_PART_MIN_PLAY_SECONDS + 15, this.bestPartsMaxSeconds);
   }
 
   /** Best Parts mode: how much of each song plays at most (45–180 s). Remembered. */
@@ -1439,7 +1451,7 @@ export class AudioEngine {
    * and picks the incoming song's entry point, then waits for that moment.
    * Falls back to an immediate mix when no plan is possible (e.g. too close to the end).
    */
-  private planMixInto(itemId: string, lookAheadSeconds: number, durationSeconds?: number, earliestExit?: number, latestExit?: number): boolean {
+  private planMixInto(itemId: string, lookAheadSeconds: number, durationSeconds?: number, earliestExit?: number, latestExit?: number, fallbackNow: boolean = true): boolean {
     const item = this.queue.find((q) => q.id === itemId);
     if (!item || !item.audioBuffer) return false;
 
@@ -1481,7 +1493,7 @@ export class AudioEngine {
             entryRange: this.bestPartEntryRange(incoming),
           })
         : null;
-    if (!plan) return this.startQueuedMixNow(item, durationSeconds);
+    if (!plan) return fallbackNow ? this.startQueuedMixNow(item, durationSeconds) : false;
 
     // Keep the planned song in the Up Next queue until it actually gets played!
     // Bring the planned item to the top of Up Next (#1 ON DECK) so it is prominently displayed.
@@ -1888,7 +1900,7 @@ export class AudioEngine {
     const state = this.onAirDeck().getPlaybackState();
     if (!state.isPlaying || !state.track) return;
     const mixOut = this.mixOutWindow(state.track, state.currentTime);
-    this.planMixInto(choice.id, mixOut.endsAt - state.currentTime, undefined, mixOut.earliestExit, mixOut.latestExit);
+    this.planMixInto(choice.id, mixOut.endsAt - state.currentTime, undefined, mixOut.earliestExit, mixOut.latestExit, false);
     // Only the decision about this song (an older one can still be stored when the rules picked it)
     if (this.lastAiDecision.startsWith(`Next: "${choice.title}"`) && !this.acquisitionStatus.startsWith('🤖')) {
       this.acquisitionStatus = `🤖 AI DJ picked ${this.lastAiDecision.slice(6)}. ${this.acquisitionStatus}`;
@@ -1927,20 +1939,24 @@ export class AudioEngine {
         ? softFade || this.lowFadeSeconds(pending.plan, onAir.getPlaybackState().effectiveBpm)
         : 0;
     let exitFx = gapCut || !outTrack ? undefined : this.chooseExitFx(outTrack, this.queuedItemToTrack(pending.item), quickCut);
-    if (lowFade) exitFx = this.mood === 'chill' || this.mood === 'romantic' ? 'reverb' : undefined;
+    // Tempos can't match: a real DJ move, never a plain fade (soft pairs get the wash below)
+    if (lowFade) {
+      const low = lowParts(pending.plan);
+      exitFx = softFade ? undefined : pickSignatureFx({ mood: this.mood, inLowPart: low.exit || low.entry, recent: this.recentExitFx });
+    }
     // Showcases (now and then): the planned 16-bar band-by-band blend, or for songs that can't be
     // beatmatched a slow wash fade when both are in a low part
     const showDue = this.mixesSinceShowFx >= SHOW_FX_EVERY - 1;
     const showcase: TransitionConfig['showcase'] =
       pending.showcase && !quickCut && !gapCut && exitFx !== 'roll'
         ? 'eq_blend'
-        : showDue && lowFade && !softFade && lowParts(pending.plan).exit && lowParts(pending.plan).entry
+        : lowFade && (softFade > 0 || (showDue && lowParts(pending.plan).exit && lowParts(pending.plan).entry))
           ? 'wash'
           : undefined;
     if (showcase) exitFx = undefined;
     this.mixesSinceShowFx = exitFx === 'roll' || exitFx === 'brake' || showcase ? 0 : this.mixesSinceShowFx + 1;
     if (showcase === 'wash') {
-      durationSeconds = WASH_FADE_SECONDS;
+      durationSeconds = softFade || WASH_FADE_SECONDS;
     } else if (lowFade) {
       durationSeconds = lowFade;
     } else if (gapCut) {
@@ -3043,7 +3059,12 @@ export class AudioEngine {
     if (!track.url) return null;
     try {
       const streamRes = await fetch(`/api/stream?url=${encodeURIComponent(track.url)}`);
-      if (!streamRes.ok) throw new Error(`Stream download failed: ${streamRes.statusText}`);
+      if (!streamRes.ok) {
+        const failure = await apiFailure(streamRes, 'download');
+        this.loadRefusals.set(track, failure.message);
+        throw failure;
+      }
+      this.loadRefusals.delete(track);
       const arrayBuffer = await streamRes.arrayBuffer();
       const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
       track.audioBuffer = audioBuffer;
@@ -3703,6 +3724,40 @@ export class AudioEngine {
 
   // --- Remote Mobile Control Commands ---
 
+  /** Says why a song on a deck can't be played, as a status line and a toast. */
+  private reportUnplayable(track: TrackMetadata) {
+    this.noticeMix(`Couldn't play "${track.title}": ${this.loadRefusals.get(track) ?? "its audio couldn't be loaded"}.`);
+  }
+
+  /**
+   * A deck's own PLAY button. A deck can hold a song whose audio isn't in yet (restored after a
+   * refresh, or a failed download): the song is loaded first, or the reason it can't be is shown.
+   */
+  public toggleDeckPlay(deckId: DeckId) {
+    const deck = deckId === 'A' ? this.deckA : this.deckB;
+    const track = deck.getTrack();
+    const playable = !track || track.audioBuffer || (deck.isStreaming() && !deck.streamError);
+    if (playable || deck.getPlaybackState().isPlaying) {
+      deck.togglePlay();
+      return;
+    }
+    if (deckId === this.activeDeck) {
+      this.playCurrent();
+      return;
+    }
+    deck.releaseStream();
+    this.acquisitionStatus = `Loading "${track.title}"...`;
+    this.notify();
+    void this.hydrateTrackBuffer(track).then((buf) => {
+      if (deck.getTrack() !== track) return; // another song was loaded meanwhile
+      if (!buf) return this.reportUnplayable(track);
+      this.analyzeTrack(track);
+      deck.play();
+      this.acquisitionStatus = `"${track.title}" playing on Deck ${deckId}.`;
+      this.notify();
+    });
+  }
+
   public playCurrent() {
     const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
     // Empty deck: Play starts the first ready song in the queue
@@ -3711,6 +3766,7 @@ export class AudioEngine {
       return;
     }
     const track = cur.getTrack()!;
+    if (!track.audioBuffer && cur.streamError) cur.releaseStream(); // a failed stream: try again
     if (!track.audioBuffer && !cur.isStreaming() && !this.isAnyDeckPlaying() && this.canStream(track)) {
       cur.attachStream(`/api/stream?url=${encodeURIComponent(track.url!)}`);
       cur.play();
@@ -3756,6 +3812,8 @@ export class AudioEngine {
           }
           this.saveCurrentTrackToStorage();
           this.notify();
+        } else if (cur.getTrack() === track) {
+          this.reportUnplayable(track);
         }
       });
       return;
@@ -3831,6 +3889,8 @@ export class AudioEngine {
     const cur = this.activeDeck === 'A' ? this.deckA : this.deckB;
     const now = cur.getCurrentTime();
     cur.seek(now + deltaSeconds);
+    const seeked = cur.getTrack();
+    if (seeked) this.playStart = { trackId: seeked.id, pos: Math.max(0, now + deltaSeconds) };
     this.afterSeek();
     this.saveCurrentTrackToStorage();
     this.notify();
@@ -3887,6 +3947,51 @@ export class AudioEngine {
     }, BACK_NAV_SETTLE_MS);
   }
 
+  /**
+   * A played song's audio and analysis, if it is still decoded: on a deck, else in the memory
+   * cache. At its natural tempo (Previous plays it as it is), so a song re-timed for the set gives
+   * back its original audio and timing.
+   */
+  private decodedSong(song: PlayLogEntry): Partial<QueuedTrack> | null {
+    const isSong = sameSongAs(song);
+    const tracks = [this.deckA.getTrack(), this.deckB.getTrack()];
+    const cached = [song.url, song.title].map((k) => (k ? this.audioBufferCache.get(this.normalizeCacheKey(k)) : undefined)).find(Boolean);
+    if (cached) tracks.push(cached.metadata.audioBuffer ? cached.metadata : { ...cached.metadata, audioBuffer: cached.buffer });
+    for (const t of tracks) {
+      if (!t || !isSong(t)) continue;
+      const o = t.original;
+      const buffer = o ? t.originalBuffer : t.audioBuffer;
+      if (!buffer) continue;
+      const timing = o ?? t;
+      return {
+        audioBuffer: buffer,
+        duration: buffer.duration,
+        bpm: timing.bpm,
+        bpmConfidence: t.bpmConfidence,
+        firstDownbeatTime: timing.firstDownbeatTime,
+        highlightTime: timing.highlightTime,
+        cueInTime: timing.cueInTime,
+        musicStartTime: timing.musicStartTime,
+        musicEndTime: timing.musicEndTime,
+        hooks: timing.hooks,
+        peakTime: timing.peakTime,
+        aiDanceBpm: timing.aiDanceBpm,
+        aiPerceivedMeter: timing.aiPerceivedMeter,
+        aiBpmReason: timing.aiBpmReason,
+        // Measured on the re-timed audio: recomputed for the original
+        energyProfile: o ? undefined : t.energyProfile,
+        outroReason: t.outroReason,
+        introSkipReason: t.introSkipReason,
+        key: t.key,
+        keyConfidence: t.keyConfidence,
+        loudnessDb: t.loudnessDb,
+        thumbnail: song.thumbnail ?? t.thumbnail,
+        isDiskCached: true,
+      };
+    }
+    return null;
+  }
+
   /** Loads a song from Previously Played and mixes it in now (after any mix already running). */
   private async playBackNav(song: PlayLogEntry) {
     const item: QueuedTrack = {
@@ -3902,6 +4007,9 @@ export class AudioEngine {
       queuedAt: Date.now(),
     };
     const stillWanted = () => this.backNav?.songs[this.backNav.index] === song;
+    // Usually still on the other deck (it just mixed out) or decoded in memory: reuse it, so one
+    // press switches at once. Loading it again took 10+ s, the song on air playing on meanwhile.
+    Object.assign(item, this.decodedSong(song) ?? {});
     const buffer = await this.ensureTrackBuffer(item);
     if (!stillWanted()) return; // a later press moved on
     if (!buffer) {
@@ -4076,6 +4184,8 @@ export class AudioEngine {
     const buffer = await this.hydrateTrackBuffer(track);
     if (deck.getTrack() !== track) return; // another song was loaded meanwhile
     if (!buffer) {
+      // The server refused the song: the stream asked it for the same thing, so nothing is playing
+      if (this.loadRefusals.has(track)) return this.reportUnplayable(track);
       this.acquisitionStatus = `"${track.title}" keeps streaming, but couldn't be fully loaded: no beat sync for this song.`;
       this.notify();
       return;
@@ -4793,6 +4903,12 @@ export class AudioEngine {
     // Resolve effective style from config.style, config.exitFx, or musical heuristics.
     // Boring flat crossfades are never the default.
     let effectiveStyle: TransitionConfig['style'] = config.style ?? 'filter_bass_swap';
+    // Any other route into a mix of songs that can't be beatmatched (a mix that had no plan, an AI
+    // command) gets a DJ move too. What the listener asked for by hand is left alone.
+    const plainStyle = effectiveStyle === 'filter_bass_swap' || effectiveStyle === 'smooth_crossfade';
+    if (plainStyle && !match.matched && sourceState.isPlaying && !config.exitFx && !config.showcase && !config.gapCut && !config.instant && !config.manualStyle) {
+      config = { ...config, exitFx: pickSignatureFx({ mood: this.mood, inLowPart: false, recent: this.recentExitFx }) };
+    }
     let appliedFx: ExitFx | undefined = config.exitFx;
 
     if (config.exitFx === 'roll' || effectiveStyle === 'loop_roll_riser') {
@@ -4811,11 +4927,10 @@ export class AudioEngine {
       effectiveStyle = 'showcase_3band_handoff';
     } else if (effectiveStyle === 'drop_cut') {
       effectiveStyle = 'drop_cut';
-    } else if (effectiveStyle === 'smooth_crossfade') {
-      effectiveStyle = 'smooth_crossfade';
     } else {
-      effectiveStyle = 'filter_bass_swap';
+      effectiveStyle = 'filter_bass_swap'; // a plain crossfade is never played
     }
+    if (appliedFx) this.recentExitFx = [appliedFx, ...this.recentExitFx].slice(0, 4);
 
     const blendSeconds = (this.blendBars() * 4 * 60) / sourceBpm;
     let durationSeconds = config.durationSeconds ?? (!matched.matched ? UNMATCHED_TRANSITION_SECONDS : Math.max(4, Math.min(40, blendSeconds)));
@@ -4825,7 +4940,7 @@ export class AudioEngine {
       durationSeconds = 0.25;
     } else if (effectiveStyle === 'loop_roll_riser' || effectiveStyle === 'vinyl_brake_drop') {
       durationSeconds = 0.25;
-    } else if (effectiveStyle === 'echo_freeze_throw' || effectiveStyle === 'reverb_wash_drop') {
+    } else if ((effectiveStyle === 'echo_freeze_throw' || effectiveStyle === 'reverb_wash_drop') && !config.lowFade) {
       durationSeconds = 0.35;
     }
 
@@ -4903,6 +5018,8 @@ export class AudioEngine {
         }
       }
 
+      // Over a fade the old song is thrown into the echo / reverb partway through, as the new one rises
+      const throwAt = config.lowFade ? startTime + durationSeconds * 0.6 : startTime;
       if (appliedFx === 'roll' || effectiveStyle === 'loop_roll_riser') {
         // 8-beat stutter loop roll (1 beat -> 1/2 -> 1/4 -> 1/8) + resonant HPF sweep + white-noise riser
         const rollSeconds = sourceDeck.scheduleLoopRoll(startTime, beat);
@@ -4924,12 +5041,12 @@ export class AudioEngine {
         }
       } else if (appliedFx === 'echo' || effectiveStyle === 'echo_freeze_throw') {
         // Dotted-8th stereo echo trails off into high-pass space on beat 4
-        sourceDeck.scheduleEchoOut(startTime, beat);
-        durationSeconds = 0.3;
+        sourceDeck.scheduleEchoOut(throwAt, beat);
+        if (!config.lowFade) durationSeconds = 0.3;
       } else if (appliedFx === 'reverb' || effectiveStyle === 'reverb_wash_drop') {
         // Large space convolution reverb wash over 4 beats
-        sourceDeck.scheduleReverbWash(startTime, beat);
-        durationSeconds = 0.35;
+        sourceDeck.scheduleReverbWash(throwAt, beat);
+        if (!config.lowFade) durationSeconds = 0.35;
       }
 
       targetDeck.play(cuePoint, startTime);
@@ -4948,11 +5065,9 @@ export class AudioEngine {
         startTime,
         durationSeconds,
         linearFadeSeconds:
-          effectiveStyle === 'smooth_crossfade'
-            ? Math.min(config.xfadeSeconds ?? durationSeconds, durationSeconds)
-            : effectiveStyle === 'loop_roll_riser' || effectiveStyle === 'vinyl_brake_drop' || effectiveStyle === 'drop_cut'
-              ? 0.1
-              : undefined,
+          effectiveStyle === 'loop_roll_riser' || effectiveStyle === 'vinyl_brake_drop' || effectiveStyle === 'drop_cut'
+            ? 0.1
+            : undefined,
       },
       {
         onTick: (_progress, onAirDeck) => {
@@ -5000,8 +5115,12 @@ export class AudioEngine {
         targetDeck.scheduleLowRamp(-24, 0, midTime, startTime + durationSeconds);
       }
       this.acquisitionStatus = `🎚️ AI DJ: Resonant Filter Sweep with instantaneous low-bass kill & punch for "${targetTrack.title}"!`;
-    } else if (effectiveStyle === 'smooth_crossfade') {
-      this.acquisitionStatus = `Harmonic blend over ${Math.round(durationSeconds)} s into "${targetTrack.title}".`;
+    }
+    // A move over a fade: the old song thins out and loses its bass first, so the throw lands clean
+    if (config.lowFade && isSourcePlaying && (appliedFx === 'echo' || appliedFx === 'reverb')) {
+      sourceDeck.scheduleFilterSweepOut(startTime, at(0.8), 2400);
+      sourceDeck.scheduleLowRamp(sourceState.lowGain, -24, startTime, at(0.5));
+      targetDeck.scheduleLowRamp(-24, 0, at(0.5), startTime + durationSeconds);
     }
     if (config.showcase === 'wash' && isSourcePlaying) {
       // The old song thins out through a rising filter and dissolves into a reverb tail
@@ -5435,6 +5554,11 @@ export class AudioEngine {
     const targetId = deckId || this.activeDeck;
     const deck = targetId === 'A' ? this.deckA : this.deckB;
     const hook = deck.jumpToHighlight();
+    const track = deck.getTrack();
+    if (track && hook) {
+      this.playStart = { trackId: track.id, pos: hook.time };
+      this.extendedBestPartsTrackId = null;
+    }
     this.afterSeek();
     if (hook && hook.count > 1) {
       const at = `${Math.floor(hook.time / 60)}:${String(Math.round(hook.time % 60)).padStart(2, '0')}`;

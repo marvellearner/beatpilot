@@ -70,6 +70,26 @@ describe('NLP Search Query Parser', () => {
     expect(res.badgeLabel).toContain('Only Diljit Dosanjh');
   });
 
+  it('parses EDM, house, and techno queries as high-energy dance vibe filters', () => {
+    const res1 = parseNlpSearchQuery('Play edm songs');
+    expect(res1.isNlp).toBe(true);
+    expect(res1.intentType).toBe('vibe_filter');
+    expect(res1.vibe).toBe('dance');
+    expect(res1.badgeLabel).toContain('EDM');
+    expect(res1.badgeLabel).toContain('Dance');
+    expect(res1.searchTerms.some((t) => /edm.*dance/i.test(t))).toBe(true);
+
+    const res2 = parseNlpSearchQuery('play edm');
+    expect(res2.isNlp).toBe(true);
+    expect(res2.intentType).toBe('vibe_filter');
+    expect(res2.vibe).toBe('dance');
+
+    const res3 = parseNlpSearchQuery('house music');
+    expect(res3.isNlp).toBe(true);
+    expect(res3.intentType).toBe('vibe_filter');
+    expect(res3.vibe).toBe('dance');
+  });
+
   it('preserves direct literal searches without false NLP positives', () => {
     const res = parseNlpSearchQuery('kesariya');
     expect(res.isNlp).toBe(false);
@@ -97,6 +117,13 @@ describe('AI DJ Command Integration with NLP', () => {
     expect(plan).not.toBeNull();
     expect(plan?.action).toBe('queue_control');
     expect(plan?.queue?.play_song?.toLowerCase()).toContain('brown munde');
+  });
+
+  it('understands "play edm songs" in AI chat as dance vibe control', () => {
+    const plan = parseSongCommand('play edm songs');
+    expect(plan).not.toBeNull();
+    expect(plan?.action).toBe('queue_control');
+    expect(plan?.queue?.vibe).toBe('dance');
   });
 });
 

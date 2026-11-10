@@ -116,7 +116,7 @@ export interface TransitionConfig {
   lowFade?: boolean; // tempos can't be beatmatched: fade over a low part for durationSeconds instead of a quick cut
   naturalTempo?: boolean; // a cut with no overlap: start the new song at its own speed, not beatmatched
   instant?: boolean; // the listener asked for this song now (Previous): a direct switch, exempt from the no-abrupt rule
-  xfadeSeconds?: number; // linear cross-fade length for the smooth_crossfade style (default: the whole mix)
+  manualStyle?: boolean; // the listener picked this style by hand: played as chosen
 }
 
 /**

@@ -808,7 +808,7 @@ Output ONLY the JSON object. Do not include markdown code blocks or explanations
           sourceDeck,
           targetDeck: plan.transition.target_deck,
           durationSeconds: plan.transition.duration_seconds,
-          style: plan.transition.style === 'drop_cut' ? 'smooth_crossfade' : plan.transition.style,
+          style: plan.transition.style === 'drop_cut' ? 'filter_bass_swap' : plan.transition.style,
         });
       }
     }

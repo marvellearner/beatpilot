@@ -48,8 +48,14 @@ describe('Gemini Token Budget & Daily Spending Limiter', () => {
     }
   });
 
-  it('defaults to a ₹100 INR daily limit when not configured in env', () => {
-    expect(getDailyLimitInr()).toBe(100);
+  it('is uncapped (0) by default when not configured in env', () => {
+    delete process.env.GEMINI_DAILY_LIMIT_INR;
+    expect(getDailyLimitInr()).toBe(0);
+  });
+
+  it('honors an explicit daily limit if configured in env', () => {
+    process.env.GEMINI_DAILY_LIMIT_INR = '150';
+    expect(getDailyLimitInr()).toBe(150);
   });
 
   it('accurately estimates cost in INR with tax buffer', () => {

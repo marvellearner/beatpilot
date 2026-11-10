@@ -561,8 +561,9 @@ export class VirtualDeck {
     this.notifyUpdate();
   }
 
-  /** Stops and disconnects the current stream, if any. */
-  private releaseStream() {
+  /** Stops and disconnects the current stream, if any (also clears a failed one so it can be retried). */
+  public releaseStream() {
+    this.streamError = null;
     if (!this.mediaEl) return;
     VirtualDeck.disposeStream({ el: this.mediaEl, source: this.mediaSource, gain: this.mediaGain });
     this.mediaEl = null;

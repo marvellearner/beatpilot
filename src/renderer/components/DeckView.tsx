@@ -251,7 +251,7 @@ export const DeckView: React.FC<DeckViewProps> = ({ deck, deckId, engine }) => {
         <button
           id={`deck-${d}-play-pause-button`}
           type="button"
-          onClick={() => deck.togglePlay()}
+          onClick={() => engine.toggleDeckPlay(deckId)}
           disabled={!track}
           className="w-24 h-12 rounded-lg flex items-center justify-center gap-2 text-xs font-bold tracking-wide transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
           style={
