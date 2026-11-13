@@ -30,6 +30,7 @@ export interface FlowContext {
   danceFloor: boolean; // Party / Bhangra mood: keep the energy up
   peakRun?: number; // songs on air in a row (incl. the current) with no step down in energy
   prevailingVibe?: Vibe | null; // detected prevailing vibe from previous 3-5 songs
+  minutesSinceBigJump?: number; // since the last tempo jump over BIG_JUMP (none yet: undefined)
 }
 
 const LOOK_AHEAD = 3; // only the next 3 ready songs are considered
@@ -38,6 +39,12 @@ const QUIET_DROP_DB = 3; // this much quieter than the song on air deflates a da
 const BREATHER_AFTER = 5; // peak songs in a row before a breather is welcome on a dance floor
 const BREATHER_MIN_DB = 1.5; // a breather: this much quieter than the song on air…
 const BREATHER_MAX_DB = 6; // …but not so much quieter that the floor empties
+/** A tempo change bigger than this (16 %, half / double time allowed) is a jump the crowd hears. */
+export const BIG_JUMP = 0.16;
+/** Minutes between two deliberate tempo jumps: in between, neighbouring songs stay close in tempo. */
+export const BIG_JUMP_EVERY_MINUTES = 20;
+/** Songs ranked when Up Next is arranged for the song on air (rankForFlow). */
+export const ARRANGE_LOOK_AHEAD = 10;
 
 const norm = (s: string) => s.toLowerCase().replace(/vevo$/, '').replace(/[^\p{L}\p{N}]/gu, '');
 const sameArtist = (a: string, b: string) => {
@@ -53,10 +60,10 @@ export function tempoStep(a?: number, b?: number): number | null {
 }
 
 /** A candidate's score and the reasons (shown when it isn't simply the next in line). */
-export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext): { score: number; good: string[]; bad: string[] } {
+export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext, indexWeight = 0.6): { score: number; good: string[]; bad: string[] } {
   const good: string[] = [];
   const bad: string[] = [];
-  let score = -0.6 * index; // the queue order still counts
+  let score = -indexWeight * index; // the queue order still counts
 
   if (sameArtist(c.artist, ctx.current.artist) || ctx.recentArtists.slice(0, 1).some((a) => sameArtist(c.artist, a))) {
     score -= 3;
@@ -71,15 +78,24 @@ export function scoreCandidate(c: FlowCandidate, index: number, ctx: FlowContext
     bad.push('its key clashes');
   }
 
+  // An expert keeps neighbouring songs within a few percent and changes tempo on purpose, now and
+  // then: a big jump is fine again once BIG_JUMP_EVERY_MINUTES have passed since the last one
   const step = tempoStep(ctx.current.bpm, c.bpm);
   if (step !== null) {
-    if (step > 0.16) {
-      score -= 2;
-      bad.push('a big tempo jump');
-    } else if (step > 0.08) {
-      score -= 1;
+    if (step > BIG_JUMP) {
+      const jumpDue = ctx.minutesSinceBigJump === undefined || ctx.minutesSinceBigJump >= BIG_JUMP_EVERY_MINUTES;
+      score -= jumpDue ? 1 : 3;
+      bad.push(jumpDue ? 'a tempo change (one is due)' : 'a big tempo jump');
+    } else if (step > 0.1) {
+      score -= 1.5;
       bad.push('a large tempo change');
-    } else if (step <= 0.04) {
+    } else if (step > 0.06) {
+      score -= 0.5;
+      bad.push('a noticeable tempo change');
+    } else if (step <= 0.03) {
+      score += 1;
+      good.push('a seamless tempo step');
+    } else {
       score += 0.5;
       good.push('a smooth tempo step');
     }
@@ -136,4 +152,28 @@ export function chooseNext<T extends FlowCandidate>(ready: T[], ctx: FlowContext
   const firstScore = scored[0];
   const why = [...best.good.slice(0, 2), ...firstScore.bad.slice(0, 1).map((b) => `"${first.title}" would be ${b}`)];
   return { pick: best.c, reason: why.join('; ') };
+}
+
+/**
+ * Up Next arranged for the song on air: the next ARRANGE_LOOK_AHEAD songs ranked by how well each
+ * follows it (tempo step, key, artist, language, energy), the queue order counting only a little.
+ * The caller moves the best few to the top. Guest requests aren't ranked: they keep their place.
+ * @returns the candidates best first, with why the first one fits
+ */
+export function rankForFlow<T extends FlowCandidate>(candidates: T[], ctx: FlowContext): { ranked: T[]; reason: string } {
+  const options = candidates.slice(0, ARRANGE_LOOK_AHEAD).filter((c) => !c.requested);
+  const scored = options.map((c, i) => ({ c, ...scoreCandidate(c, i, ctx, 0.15) }));
+  scored.sort((a, b) => b.score - a.score);
+  return { ranked: scored.map((s) => s.c), reason: scored[0]?.good.slice(0, 2).join(', ') ?? '' };
+}
+
+/**
+ * Puts `top` (best first) at the front of `queue`, keeping every pinned song (a guest request, a
+ * song picked to follow one) at its own position. Songs not in `top` keep their order.
+ */
+export function arrangeHead<T>(queue: T[], top: T[], pinned: (q: T) => boolean): T[] {
+  const moving = top.filter((q) => queue.includes(q) && !pinned(q));
+  const rest = queue.filter((q) => !moving.includes(q) && !pinned(q));
+  const order = [...moving, ...rest];
+  return queue.map((q) => (pinned(q) ? q : order.shift()!));
 }

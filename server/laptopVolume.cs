@@ -39,7 +39,8 @@ namespace LaptopVolumeControl {
     [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
     class MMDeviceEnumeratorComObject { }
 
-    class Program {
+    // Public: server/laptopAudio.ts compiles this file inside PowerShell and calls Main directly
+    public class Program {
         static IAudioEndpointVolume GetMasterAudio() {
             var enumerator = new MMDeviceEnumeratorComObject() as IMMDeviceEnumerator;
             IMMDevice dev = null;
@@ -59,7 +60,7 @@ namespace LaptopVolumeControl {
             Console.WriteLine(string.Format("{{\"volume\":{0},\"muted\":{1}}}", volStr, muteStr));
         }
 
-        static int Main(string[] args) {
+        public static int Main(string[] args) {
             try {
                 var audio = GetMasterAudio();
                 if (audio == null) {

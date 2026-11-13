@@ -159,23 +159,24 @@ describe('Advanced AI Transitions Suite', () => {
   it('selects advanced exit FX intelligently based on tempo, mood, and energy', () => {
     const engine = new AudioEngine();
 
-    // 1. Large tempo gap (> 5% BPM diff) -> Turntable Vinyl Brake
+    // 1. Large tempo gap (> 5% BPM diff) -> one of the rotating DJ moves, never a plain fade
+    engine.mood = 'party';
     const fastSong: any = { bpm: 140, bpmConfidence: 0.9, title: 'Speedy Track' };
     const slowSong: any = { bpm: 100, bpmConfidence: 0.9, title: 'Slow Groove' };
-    const fxBrake = (engine as any).chooseExitFx(fastSong, slowSong, false);
-    expect(fxBrake).toBe('brake');
+    const fxUnmatched = (engine as any).chooseExitFx(fastSong, slowSong, false);
+    expect(['echo', 'filter', 'roll', 'reverb', 'brake']).toContain(fxUnmatched);
 
-    // 2. High energy party mood with beatmatch -> Alternates Loop Roll Riser & Echo Freeze
-    engine.mood = 'party';
+    // 2. Beatmatched on a dance floor -> a filter sweep blend first, then roll / echo now and then
     const trackA: any = { bpm: 128, bpmConfidence: 0.9, title: 'House Anthem A' };
     const trackB: any = { bpm: 128, bpmConfidence: 0.9, title: 'House Anthem B' };
-    const fxRollOrEcho = (engine as any).chooseExitFx(trackA, trackB, false);
-    expect(['roll', 'echo']).toContain(fxRollOrEcho);
+    expect((engine as any).chooseExitFx(trackA, trackB, false)).toBe('filter');
+    (engine as any).recentExitFx = ['filter'];
+    expect(['roll', 'echo']).toContain((engine as any).chooseExitFx(trackA, trackB, false));
 
-    // 3. Chill / Romantic mood -> Stadium Reverb Wash
+    // 3. Chill / Romantic mood, beatmatched -> filter sweep or echo, never a roll
     engine.mood = 'chill';
-    const fxChill = (engine as any).chooseExitFx(trackA, trackB, false);
-    expect(fxChill).toBe('reverb');
+    (engine as any).recentExitFx = [];
+    expect((engine as any).chooseExitFx(trackA, trackB, false)).toBe('filter');
   });
 
   it('AudioEngine executes startTransition with advanced styles without degrading to flat crossfade', () => {
@@ -195,6 +196,18 @@ describe('Advanced AI Transitions Suite', () => {
     });
     expect(engine.isTransitioning).toBe(true);
     expect(engine.acquisitionStatus).toContain('Resonant Filter Sweep');
+    engine.cancelTransition();
+
+    // 1b. The 'filter' move chosen by a planned mix plays as the filter sweep and joins the rotation
+    engine.startTransition({
+      sourceDeck: 'A',
+      targetDeck: 'B',
+      style: 'filter_bass_swap',
+      exitFx: 'filter',
+      durationSeconds: 8,
+    });
+    expect(engine.acquisitionStatus).toContain('Resonant Filter Sweep');
+    expect((engine as any).recentExitFx[0]).toBe('filter');
     engine.cancelTransition();
 
     // 2. Test Stutter Loop Roll Riser
@@ -245,5 +258,75 @@ describe('Advanced AI Transitions Suite', () => {
     expect(analytics.totalTransitions).toBeGreaterThanOrEqual(5);
     expect(analytics.styleCounts['showcase_3band_handoff']).toBeGreaterThanOrEqual(1);
     expect(analytics.styleCounts['loop_roll_riser']).toBeGreaterThanOrEqual(1);
+  });
+
+  it('guarantees ONLY advance level DJ transitions via resolveAdvancedTransition', () => {
+    const engine = new AudioEngine();
+    const trackFast: any = { id: 'fast', title: 'Fast Track', bpm: 140, bpmConfidence: 0.9, key: '8A', keyConfidence: 0.9 };
+    const trackSlow: any = { id: 'slow', title: 'Slow Track', bpm: 95, bpmConfidence: 0.9, key: '8A', keyConfidence: 0.9 };
+    const trackMatchA: any = { id: 'a', title: 'Track A', bpm: 128, bpmConfidence: 0.9, key: '8A', keyConfidence: 0.9 };
+    const trackMatchB: any = { id: 'b', title: 'Track B', bpm: 128, bpmConfidence: 0.9, key: '8A', keyConfidence: 0.9 };
+
+    // 1. Large tempo gap (> 5% BPM difference) resolves to vinyl brake drop, loop roll or echo throw
+    const advGap = engine.resolveAdvancedTransition(trackFast, trackSlow);
+    expect(['vinyl_brake_drop', 'loop_roll_riser', 'echo_freeze_throw', 'reverb_wash_drop']).toContain(advGap.style);
+
+    // 2. Chill mood tempo gap resolves to stadium reverb wash drop
+    engine.mood = 'chill';
+    const advChill = engine.resolveAdvancedTransition(trackFast, trackSlow);
+    expect(advChill.style).toBe('reverb_wash_drop');
+    expect(advChill.exitFx).toBe('reverb');
+
+    // 3. Beatmatched tracks with harmonic compatibility resolve to 3-band stem handoff, loop roll, or filter bass swap
+    engine.mood = 'normal';
+    const advMatch = engine.resolveAdvancedTransition(trackMatchA, trackMatchB);
+    expect(['showcase_3band_handoff', 'loop_roll_riser', 'filter_bass_swap']).toContain(advMatch.style);
+
+    // 4. Gap cut resolves to drop_cut
+    const advCut = engine.resolveAdvancedTransition(trackMatchA, trackMatchB, { gapCut: true });
+    expect(advCut.style).toBe('drop_cut');
+  });
+});
+
+describe('Special mixes: drop mix and vocal overlay', () => {
+  function setup() {
+    const engine = new AudioEngine();
+    const a: any = { id: 'a', title: 'Song A', bpm: 120, bpmConfidence: 0.9, duration: 240, musicStartTime: 0 };
+    const b: any = { id: 'b', title: 'Song B', bpm: 120, bpmConfidence: 0.9, duration: 240, musicStartTime: 0 };
+    engine.deckA.loadTrack(a);
+    engine.deckB.loadTrack(b);
+    // Song A on air and playing
+    const real = engine.deckA.getPlaybackState.bind(engine.deckA);
+    vi.spyOn(engine.deckA, 'getPlaybackState').mockImplementation(() => ({ ...real(), isPlaying: true, track: a }));
+    const logged: any[] = [];
+    vi.spyOn((engine as any).transitionLogger, 'logTransition').mockImplementation(async (r: any) => { logged.push(r); });
+    const play = vi.spyOn(engine.deckB, 'play');
+    return { engine, logged, play };
+  }
+
+  it('drop mix: logs drop_mix and starts song B on its drop', () => {
+    const { engine, logged, play } = setup();
+    engine.startTransition({ sourceDeck: 'A', targetDeck: 'B', style: 'drop_mix', dropMix: true, targetEntryTime: 64 });
+    expect(logged[0].style).toBe('drop_mix');
+    expect(play.mock.calls[0][0]).toBe(64);
+    expect(engine.acquisitionStatus).toContain('Drop mix');
+    engine.cancelTransition();
+  });
+
+  it('vocal overlay: song B vocals only, its music back at the reveal, given back if the mix is cancelled', () => {
+    const { engine, logged, play } = setup();
+    const music = vi.spyOn(engine.deckB, 'scheduleMusicLevel');
+    engine.startTransition({ sourceDeck: 'A', targetDeck: 'B', style: 'vocal_overlay', vocalOverlay: { revealSeconds: 16 }, targetEntryTime: 40, durationSeconds: 16.3 });
+    expect(logged[0].style).toBe('vocal_overlay');
+    expect(music.mock.calls[0][0]).toBe(0); // vocals only first
+    expect(music.mock.calls[1][0]).toBe(1); // full music at the reveal...
+    const startAt = play.mock.calls[0][1] as number;
+    expect(music.mock.calls[1][1]).toBeCloseTo(startAt + 16, 5); // ...16 s after song B starts
+    expect(play.mock.calls[0][0]).toBeGreaterThanOrEqual(40);
+    expect(engine.acquisitionStatus).toContain('Vocal overlay');
+
+    const restore = vi.spyOn(engine.deckB, 'setMusicLevel');
+    engine.cancelTransition();
+    expect(restore).toHaveBeenCalledWith(1);
   });
 });

@@ -122,6 +122,42 @@ export interface MoodReadingResult {
   source: 'ai' | 'heuristic';
 }
 
+export interface PartyStarterDecision {
+  title: string;
+  artist: string;
+  query: string;
+  vibe: Vibe;
+  energyLevel: 'high' | 'peak';
+  reason: string;
+  source: 'gemini' | 'ollama' | 'curated_library' | 'curated_banger';
+}
+
+export const CURATED_PARTY_STARTERS: Record<Vibe, Array<{ title: string; artist: string; query: string; reason: string }>> = {
+  dance: [
+    { title: 'Levels', artist: 'Avicii', query: 'Avicii Levels', reason: 'Iconic melodic hook and massive buildup guaranteed to ignite the crowd' },
+    { title: 'Titanium', artist: 'David Guetta ft. Sia', query: 'David Guetta Titanium', reason: 'Universal singalong anthem with massive festival energy' },
+    { title: 'Pepas', artist: 'Farruko', query: 'Farruko Pepas', reason: 'High-octane tribal synth drops that ignite immediate dancing' },
+    { title: 'Party Rock Anthem', artist: 'LMFAO', query: 'LMFAO Party Rock Anthem', reason: 'Ultimate crowd-pleaser that gets everyone on their feet' },
+    { title: 'Lean On', artist: 'Major Lazer & DJ Snake', query: 'Major Lazer DJ Snake Lean On', reason: 'Infectious rhythmic bounce with global festival appeal' },
+  ],
+  bhangra: [
+    { title: 'Mundian To Bach Ke', artist: 'Panjabi MC', query: 'Panjabi MC Mundian To Bach Ke', reason: 'Timeless Punjabi dhol beat recognized and loved worldwide' },
+    { title: 'Gallan Goodiyaan', artist: 'Dil Dhadakne Do', query: 'Gallan Goodiyaan Dil Dhadakne Do', reason: 'Peak celebratory Bollywood family-and-friends dance banger' },
+    { title: 'Born to Shine', artist: 'Diljit Dosanjh', query: 'Diljit Dosanjh Born to Shine', reason: 'High-swagger modern Punjabi anthem with driving dancefloor bass' },
+    { title: 'Kar Gayi Chull', artist: 'Badshah & Neha Kakkar', query: 'Kar Gayi Chull Badshah', reason: 'Fast, contagious house-beat party starter' },
+    { title: '295', artist: 'Sidhu Moose Wala', query: 'Sidhu Moose Wala 295', reason: 'Unstoppable Punjabi powerhouse beat with immense room presence' },
+  ],
+  romantic: [
+    { title: 'Perfect', artist: 'Ed Sheeran', query: 'Ed Sheeran Perfect', reason: 'Classic slow-dance romance to set an intimate atmosphere' },
+    { title: 'Tum Hi Ho', artist: 'Arijit Singh', query: 'Arijit Singh Tum Hi Ho', reason: 'Legendary Bollywood love ballad for couples' },
+  ],
+  chill: [
+    { title: 'One More Time', artist: 'Daft Punk', query: 'Daft Punk One More Time', reason: 'Uplifting French house classic that establishes an infectious good vibe' },
+    { title: 'Sun Came Up', artist: 'Sofi Tukker & John Summit', query: 'Sofi Tukker John Summit Sun Came Up', reason: 'Lush, hypnotic deep house groove' },
+    { title: 'Music Sounds Better With You', artist: 'Stardust', query: 'Stardust Music Sounds Better With You', reason: 'Timeless funky house warmth to ease guests into the evening' },
+  ],
+};
+
 export interface DanceBpmDecision {
   effectiveDanceBpm: number;
   targetPartyBpm: number;
@@ -513,6 +549,70 @@ Reply ONLY with valid JSON in this exact structure:
       ],
       reason: 'Delivered universally loved high-energy anthems to match current vibe',
       source: 'heuristic',
+    };
+  }
+
+  /**
+   * Selects the single best party-starting opener anthem when the host launches Party Mode.
+   * Leverages Gemini or local LLM when online, backed by proven dancefloor banger presets.
+   */
+  public async decidePartyStarter(
+    vibe: Vibe | 'auto' = 'auto',
+    candidates?: Array<{ title: string; artist?: string }>
+  ): Promise<PartyStarterDecision> {
+    const targetVibe: Vibe = vibe === 'auto' ? 'dance' : vibe;
+    const candidatesList = (candidates || [])
+      .filter((c) => c.title && !/^https?:/i.test(c.title))
+      .slice(0, 15);
+
+    const prompt = `You are an elite festival DJ headlining a packed party. The host just hit "START PARTY".
+We need the SINGLE BEST OPENING ANTHEM to kick off the night and immediately ignite the room with hype and dancing.
+TARGET VIBE: ${VIBE_DESCRIPTION[targetVibe]}.
+${
+  candidatesList.length > 0
+    ? `Host's playlist has these candidate songs:\n${candidatesList
+        .map((c, i) => `${i + 1}) "${c.title}"${c.artist ? ` by ${c.artist}` : ''}`)
+        .join('\n')}\nYou may pick the best opener from these, or pick a world-famous party starter.`
+    : ''
+}
+
+Pick exactly 1 iconic, high-energy party opener. Original tracks only (no mashups, no 8D, no acoustic/slow tracks).
+Reply ONLY with JSON:
+{
+  "title": "<exact song title>",
+  "artist": "<artist name>",
+  "query": "<search query for youtube>",
+  "reason": "<short 1-sentence explanation of why this song launches the party perfectly>"
+}`;
+
+    try {
+      const res = await this.askJson(prompt, 200, 5000);
+      const data = res?.data as { title?: string; artist?: string; query?: string; reason?: string } | undefined;
+      if (data && data.title && data.title.length > 1) {
+        return {
+          title: data.title,
+          artist: data.artist || '',
+          query: data.query || `${data.title} ${data.artist || ''}`.trim(),
+          vibe: targetVibe,
+          energyLevel: 'peak',
+          reason: data.reason || 'AI selected opening party anthem',
+          source: res?.provider === 'gemini' ? 'gemini' : 'ollama',
+        };
+      }
+    } catch {
+      // Fall through to curated fallback
+    }
+
+    const list = CURATED_PARTY_STARTERS[targetVibe] || CURATED_PARTY_STARTERS.dance;
+    const picked = list[Math.floor(Math.random() * list.length)];
+    return {
+      title: picked.title,
+      artist: picked.artist,
+      query: picked.query,
+      vibe: targetVibe,
+      energyLevel: 'peak',
+      reason: picked.reason,
+      source: 'curated_banger',
     };
   }
 

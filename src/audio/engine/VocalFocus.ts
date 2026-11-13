@@ -2,20 +2,19 @@
  * VocalFocus: the "Music" fader. Lowers the music and keeps the vocals, in real time, with no
  * processing ahead of time.
  *
- * How: a lead vocal is almost always in the centre of the stereo mix and between ~180 Hz and
- * ~5.5 kHz. Next to the untouched song ("dry") runs a vocal path: the song's centre (L+R, which
- * drops everything panned to the sides), band-limited to the voice range (drops the bass, kick
- * and cymbals) with a little presence. The fader turns the dry song down and the vocal path up:
+ * How: next to the untouched song ("dry") runs a vocal path, and the fader turns the dry song down
+ * and the vocal path up. The vocal path is the vocalIsolator on the audio thread: frequency by
+ * frequency it keeps what is centred, not a hit and not held steady. Where the audio thread isn't
+ * available, the song's centre band-limited to the voice range is used instead.
  *
  *   music 100 %: the song as it is
  *   music  50 %: the song at half level + the vocal path: music clearly lower, voice in front
- *   music   0 %: the vocal path only: mostly voice, centred instruments in its range stay faint
+ *   music   0 %: the vocal path only: mostly voice, instruments much lower but still faintly there
  *
- * It isn't true separation (an AI stem model is: when a song has stems, they replace this path).
- *
- * Signal flow:  input ─┬─ dry ──────────────────────────────────────────┬─ output
- *                      └─ mono centre → HPF 180 → LPF 5.5k → presence ─┘
+ * Signal flow:  input ─┬─ dry (delayed to match the isolator while the fader is down) ─┬─ output
+ *                      └─ vocalIsolator (worklet) ─────────────────────────────────────┘
  */
+import { createVocalIsolator, VOCAL_ISOLATOR_LATENCY } from './vocalIsolator';
 
 /** Voice range kept by the vocal path. */
 export const VOCAL_LOW_HZ = 180;
@@ -35,12 +34,46 @@ export function vocalFocusGains(musicLevel: number): { dry: number; vocal: numbe
   return { dry: m, vocal: (1 - m) * VOCAL_MAKEUP };
 }
 
+const WORKLET = `
+const createVocalIsolator = ${createVocalIsolator.toString()};
+class VocalIsolatorProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.isolator = null;
+    // Off at 100 %: no work, and each time it is switched on it starts clean
+    this.port.onmessage = (e) => { this.isolator = e.data.active ? createVocalIsolator(sampleRate) : null; };
+  }
+  process(inputs, outputs) {
+    const input = inputs[0];
+    if (this.isolator && input.length) this.isolator.process(input[0], input[1] || input[0], outputs[0][0]);
+    return true;
+  }
+}
+registerProcessor('vocal-isolator', VocalIsolatorProcessor);
+`;
+
+/** The worklet code, added once per audio context (both decks share it). */
+const workletLoaded = new WeakMap<BaseAudioContext, Promise<void>>();
+function loadWorklet(ctx: BaseAudioContext): Promise<void> {
+  let loaded = workletLoaded.get(ctx);
+  if (!loaded) {
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+    loaded = ctx.audioWorklet.addModule(url);
+    workletLoaded.set(ctx, loaded);
+  }
+  return loaded;
+}
+
 export class VocalFocus {
   public readonly input: GainNode;
   public readonly output: GainNode;
   private readonly dry: GainNode;
   private readonly vocal: GainNode;
   private level = 1;
+  // Once the isolator is running: the dry song's delayed route, and the worklet itself
+  private dryAligned: GainNode | null = null;
+  private isolator: AudioWorkletNode | null = null;
+  private isolatorOn = false;
 
   constructor(private readonly ctx: BaseAudioContext) {
     this.input = ctx.createGain();
@@ -75,7 +108,7 @@ export class VocalFocus {
 
     this.input.connect(this.dry);
     this.dry.connect(this.output);
-    this.input.connect(centre);
+    this.input.connect(centre); // replaced by the isolator as soon as it has loaded
     centre.connect(highPass1);
     highPass1.connect(highPass2);
     highPass2.connect(lowPass1);
@@ -87,6 +120,35 @@ export class VocalFocus {
     const g = vocalFocusGains(1);
     this.dry.gain.value = g.dry;
     this.vocal.gain.value = g.vocal;
+
+    if (ctx.audioWorklet) {
+      void loadWorklet(ctx)
+        .then(() => this.useIsolator(centre))
+        .catch((err) => console.warn('[VocalFocus] no audio thread: using the centre and band filters', err));
+    }
+  }
+
+  /** Swaps the filter path for the isolator, and adds the delayed dry route that lines up with it. */
+  private useIsolator(centre: GainNode): void {
+    const node = new AudioWorkletNode(this.ctx, 'vocal-isolator', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 2,
+      channelCountMode: 'explicit',
+    });
+    const delay = this.ctx.createDelay(0.1);
+    delay.delayTime.value = VOCAL_ISOLATOR_LATENCY / this.ctx.sampleRate;
+    this.dryAligned = this.ctx.createGain();
+    this.dryAligned.gain.value = 0;
+    this.input.connect(delay);
+    delay.connect(this.dryAligned);
+    this.dryAligned.connect(this.output);
+    this.input.connect(node);
+    node.connect(this.vocal);
+    this.input.disconnect(centre);
+    this.isolator = node;
+    this.setMusicLevel(this.level);
   }
 
   /** Music level 0…1 (1 = the song as it is, 0 = vocals only). */
@@ -94,11 +156,50 @@ export class VocalFocus {
     return this.level;
   }
 
+  /** How late the output is while the isolator runs (0 on the filter fallback). */
+  public get latencySeconds(): number {
+    return this.isolator ? VOCAL_ISOLATOR_LATENCY / this.ctx.sampleRate : 0;
+  }
+
+  /**
+   * Sets the music level at an exact audio-clock time (a vocal overlay revealing the full song on
+   * its chorus downbeat). The song stays on the isolator-delayed route even at 100 %, so its timing
+   * doesn't jump mid-song; `settle` moves it back to the direct route when the deck is silent.
+   */
+  public scheduleMusicLevel(level: number, at: number): void {
+    this.level = Math.max(0, Math.min(1, level));
+    const g = vocalFocusGains(this.level);
+    if (this.isolator && this.dryAligned) {
+      if (!this.isolatorOn) {
+        this.isolatorOn = true;
+        this.isolator.port.postMessage({ active: true });
+      }
+      this.dry.gain.setTargetAtTime(0, this.ctx.currentTime, RAMP_SECONDS);
+      this.dryAligned.gain.setTargetAtTime(g.dry, at, 0.01);
+    } else {
+      this.dry.gain.setTargetAtTime(g.dry, at, 0.01);
+    }
+    this.vocal.gain.setTargetAtTime(g.vocal, at, 0.01);
+  }
+
+  /** Back to the routing for the current level right away (call while the deck is silent). */
+  public settle(): void {
+    this.setMusicLevel(this.level);
+  }
+
   public setMusicLevel(level: number): void {
     this.level = Math.max(0, Math.min(1, level));
     const g = vocalFocusGains(this.level);
     const now = this.ctx.currentTime;
-    this.dry.gain.setTargetAtTime(g.dry, now, RAMP_SECONDS);
+    // While the isolator runs its output is a little late: the dry song waits for it. At 100 % the
+    // song plays with no delay at all
+    const on = !!this.isolator && this.level < 1;
+    this.dry.gain.setTargetAtTime(on ? 0 : g.dry, now, RAMP_SECONDS);
+    if (this.dryAligned) this.dryAligned.gain.setTargetAtTime(on ? g.dry : 0, now, RAMP_SECONDS);
     this.vocal.gain.setTargetAtTime(g.vocal, now, RAMP_SECONDS);
+    if (this.isolator && on !== this.isolatorOn) {
+      this.isolatorOn = on;
+      this.isolator.port.postMessage({ active: on });
+    }
   }
 }

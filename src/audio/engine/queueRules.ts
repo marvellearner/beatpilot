@@ -196,7 +196,7 @@ export function staleSongs(queue: QueuedTrack[], now: number, keepTop = KEEP_AT_
 
 // --- Vibe Alignment for Up Next Top 10 ---
 
-export const SLOW_ROMANTIC_TITLE = /\b(sad|unplugged|lo-?fi|slowed|acoustic|piano|lullaby|reprise|emotional|heart ?break|bewafa|dard|judai|ishq|mohabbat|tum hi ho|khairiyat|humsafar|raataan lambiyan|pehli nazar|shayad|kasoor|baarishein|tune jo na|gehra hua|channa mereya|kabira|agar tum saath ho|jeena jeena|samjhawan|hamari adhuri|tera chehra|kaun tujhe|enrique|hero|perfect|ed sheeran)\b/i;
+export const SLOW_ROMANTIC_TITLE = /\b(sad|unplugged|lo-?fi|slowed|acoustic|piano|lullaby|reprise|emotional|heart ?break|bewafa|dard|judai|ishq|mohabbat|tum hi ho|khairiyat|humsafar|raataan lambiyan|pehli nazar|shayad|kasoor|baarishein|tune jo na|gehra hua|channa mereya|kabira|agar tum saath ho|jeena jeena|samjhawan|hamari adhuri|tera chehra|kaun tujhe|kesariya|brahmāstra|brahmastra|apna bana le|rasiya|tere hawaale|heeriye|gehraiyaan|manike|chaleya|saibo|zaalima|ve kamleya|o bedardeya|saiyaara|hawayein|agar tum|tum mile|mitwa|ishq wala love|tera ban jaunga|hasi|bekhayali|pal pal dil|kalank|raabta|enrique|hero|perfect|ed sheeran)\b/i;
 
 export const ROMANTIC_BALLAD_ARTISTS = /\b(mohit chauhan|prateek kuhad|anuv jain|lucky ali|arijit singh|atif aslam|shreya ghoshal|armaan malik|jubin nautiyal|jasleen royal|papon|rahat fateh ali khan|ali sethi|mitraz)\b/i;
 
@@ -233,8 +233,8 @@ export function inferSongVibe(song: { title?: string; artist?: string; bpm?: num
     return 'dance';
   }
 
-  // 5. Known romantic ballad artists
-  if (ROMANTIC_BALLAD_ARTISTS.test(artist)) {
+  // 5. Known romantic ballad artists (checked on artist and title since YouTube videos put singer in title)
+  if (ROMANTIC_BALLAD_ARTISTS.test(artist) || ROMANTIC_BALLAD_ARTISTS.test(title)) {
     return 'romantic';
   }
 
@@ -264,7 +264,7 @@ export function isSongVibeCompatible(
     // Clashes if romantic or slow acoustic
     if (inferred === 'romantic' || inferred === 'chill') return false;
     if (SLOW_ROMANTIC_TITLE.test(title) && !DANCE_PARTY_TITLE.test(title)) return false;
-    if (ROMANTIC_BALLAD_ARTISTS.test(artist) && !DANCE_PARTY_TITLE.test(title) && (!song.bpm || song.bpm < 110)) return false;
+    if ((ROMANTIC_BALLAD_ARTISTS.test(artist) || ROMANTIC_BALLAD_ARTISTS.test(title)) && !DANCE_PARTY_TITLE.test(title) && (!song.bpm || song.bpm < 115)) return false;
     if (song.bpm && (song.bpmConfidence ?? 0) >= 0.6 && song.bpm < 88) return false;
     return true;
   }

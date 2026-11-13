@@ -45,6 +45,8 @@ export interface MixRequest {
   durationSeconds: number;
   /** A straight linear fade over this many seconds instead of the smooth equal-power curve. */
   linearFadeSeconds?: number;
+  /** A custom fader path: position (-1 A … 1 B) for 0…1 of the mix, instead of the smooth fade. */
+  crossfaderAt?: (progress: number) => number;
 }
 
 export class MixCoordinator {
@@ -71,15 +73,12 @@ export class MixCoordinator {
     const targetDeck = this.deck(req.targetDeckId);
     const startCrossfader = graph.crossfaderPosition;
     const targetCrossfader = req.targetDeckId === 'B' ? 1 : -1;
+    const positionAt = req.crossfaderAt ?? ((p: number) => interpolateCrossfader(startCrossfader, targetCrossfader, p));
 
     if (req.linearFadeSeconds !== undefined) {
       graph.scheduleLinearCrossfade(req.sourceDeckId, req.startTime, req.linearFadeSeconds);
     } else {
-      graph.scheduleCrossfadeCurve(
-        (p) => interpolateCrossfader(startCrossfader, targetCrossfader, p),
-        req.startTime,
-        req.durationSeconds
-      );
+      graph.scheduleCrossfadeCurve(positionAt, req.startTime, req.durationSeconds);
     }
 
     this.isTransitioning = true;
@@ -92,7 +91,7 @@ export class MixCoordinator {
       this.transitionProgress = progress;
       // Bookkeeping only: the gains follow the schedule set above. Setting them here would cancel
       // it. The position is kept so a cancelled mix freezes where it is.
-      graph.crossfaderPosition = interpolateCrossfader(startCrossfader, targetCrossfader, progress);
+      graph.crossfaderPosition = positionAt(progress);
 
       if (progress < 1) {
         callbacks.onTick(progress, graph.crossfaderPosition < 0 ? 'A' : 'B');

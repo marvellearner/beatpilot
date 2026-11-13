@@ -219,3 +219,123 @@ describe('Pending Mix Queue Retention', () => {
     expect((engine as any).queue.some((q: QueuedTrack) => q.id === song2.id)).toBe(false);
   });
 });
+
+describe('Reloading the next song for its mix', () => {
+  beforeEach(() => {
+    (globalThis as any).window = globalThis;
+    (globalThis as any).window.addEventListener = vi.fn();
+    (globalThis as any).window.removeEventListener = vi.fn();
+    (globalThis as any).window.AudioContext = MockAudioContext;
+    (globalThis as any).window.webkitAudioContext = MockAudioContext;
+    (globalThis as any).window.localStorage = { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn() };
+  });
+
+  const unloaded = (id: string): QueuedTrack => ({
+    id,
+    title: `Song ${id}`,
+    artist: 'Artist',
+    duration: 180,
+    url: `http://test.com/${id}`,
+    status: 'ready',
+  } as QueuedTrack);
+
+  it('downloads once while asked every second, and drops a song the source refuses so the next one mixes in', async () => {
+    let calls = 0;
+    let refuse!: () => void;
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (!String(url).startsWith('/api/stream')) return Promise.resolve({ ok: true, json: async () => ({ songs: [] }) });
+      calls++;
+      return new Promise((resolve) => {
+        refuse = () => resolve({ ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({ details: 'Error: HTTP 403' }), text: async () => '' });
+      });
+    }));
+    const engine = new AudioEngine();
+    const first = unloaded('a');
+    const second = unloaded('b');
+    (engine as any).queue = [first, second];
+
+    // Three engine ticks while the download is still running
+    const reloads = [0, 1, 2].map(() => (engine as any).reloadNextReady(first));
+    expect(calls).toBe(1);
+
+    refuse();
+    await Promise.all(reloads);
+    expect(first.status).toBe('failed');
+    expect((engine as any).queue.find((q: QueuedTrack) => q.status === 'ready')).toBe(second);
+  });
+});
+
+describe('Up Next arranged for the flow of the song on air', () => {
+  beforeEach(() => {
+    (globalThis as any).window = globalThis;
+    (globalThis as any).window.addEventListener = vi.fn();
+    (globalThis as any).window.removeEventListener = vi.fn();
+    (globalThis as any).window.AudioContext = MockAudioContext;
+    (globalThis as any).window.webkitAudioContext = MockAudioContext;
+    (globalThis as any).window.localStorage = { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn() };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ songs: [] }) }));
+  });
+
+  const item = (id: string, bpm: number, extra: Partial<QueuedTrack> = {}): QueuedTrack =>
+    ({ id, title: `Song ${id}`, artist: `Artist ${id}`, duration: 200, url: `http://test.com/${id}`, status: 'ready', bpm, ...extra }) as QueuedTrack;
+  const onAir: any = { id: 'now', title: 'On Air', artist: 'Someone', bpm: 104, duration: 220 };
+
+  it('brings the song closest in tempo to the top', () => {
+    const engine = new AudioEngine();
+    engine.autoCurationEnabled = true;
+    (engine as any).queue = [item('fast', 168), item('mid', 112), item('close', 106)];
+    (engine as any).arrangeUpNextForFlow(onAir);
+    expect((engine as any).queue.map((q: QueuedTrack) => q.id)).toEqual(['close', 'mid', 'fast']);
+    expect((engine as any).queue[0].pickReason).toContain('flow');
+  });
+
+  it('leaves Up Next alone when a requested song is next, or auto-curation is off', () => {
+    const engine = new AudioEngine();
+    engine.autoCurationEnabled = true;
+    (engine as any).queue = [item('asked', 168, { source: 'request' }), item('close', 106)];
+    (engine as any).arrangeUpNextForFlow(onAir);
+    expect((engine as any).queue[0].id).toBe('asked');
+
+    engine.autoCurationEnabled = false;
+    (engine as any).queue = [item('fast', 168), item('close', 106)];
+    (engine as any).arrangeUpNextForFlow(onAir);
+    expect((engine as any).queue[0].id).toBe('fast');
+  });
+});
+
+describe('A song that came in late still mixes out (Tauba Tauba looped twice)', () => {
+  beforeEach(() => {
+    (globalThis as any).window = globalThis;
+    (globalThis as any).window.addEventListener = vi.fn();
+    (globalThis as any).window.removeEventListener = vi.fn();
+    (globalThis as any).window.AudioContext = MockAudioContext;
+    (globalThis as any).window.webkitAudioContext = MockAudioContext;
+    (globalThis as any).window.localStorage = { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn() };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ songs: [] }) }));
+  });
+
+  it('does not enter before a hook that leaves no room to play it', () => {
+    const engine = new AudioEngine();
+    engine.bestPartsMode = true;
+    // Tauba Tauba: hook found at 2:52, music ends 3:10
+    const tauba: any = { id: 't', title: 'Tauba Tauba', bpm: 104.5, duration: 206, musicStartTime: 0, musicEndTime: 190, highlightTime: 172 };
+    expect((engine as any).bestPartEntryRange(tauba)).toBeUndefined();
+    const roomy: any = { ...tauba, highlightTime: 60 };
+    expect((engine as any).bestPartEntryRange(roomy)).toBeDefined();
+  });
+
+  it('mixes now when no mix point fits and the song is about to end', async () => {
+    const engine = new AudioEngine();
+    const next = { id: 'n', title: 'Next', artist: 'X', duration: 200, url: 'http://test.com/n', status: 'ready', audioBuffer: new MockAudioContext().createBuffer(2, 44100, 44100) } as any;
+    (engine as any).queue = [next];
+    (engine as any).aiStatus = 'offline';
+    const current: any = { id: 'c', title: 'Current', artist: 'Y', bpm: 104, duration: 206 };
+    vi.spyOn(engine.deckA, 'getPlaybackState').mockReturnValue({ isPlaying: true, track: current, currentTime: 185, duration: 206, playbackRate: 1, effectiveBpm: 104 } as any);
+    vi.spyOn(engine as any, 'mixOutWindow').mockReturnValue({ endsAt: 190 });
+    const plan = vi.spyOn(engine as any, 'planMixInto').mockReturnValue(false);
+    const now = vi.spyOn(engine, 'startQueuedMixNow').mockReturnValue(true);
+    await (engine as any).planOutroMix(current);
+    expect(plan).toHaveBeenCalledTimes(2); // the window, then any point
+    expect(now).toHaveBeenCalledWith(next);
+  });
+});

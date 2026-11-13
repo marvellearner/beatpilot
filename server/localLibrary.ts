@@ -384,7 +384,23 @@ export function backfillMostPlayed() {
 // --- Offline sync: liked and most played songs saved in the background ---
 
 type SyncSong = { url?: string; title?: string; artist?: string; playCount?: number };
-const syncFailedAt = new Map<string, number>(); // song key -> when it last failed
+// Song key or video id -> when it last failed. Kept on disk: the server restarts often (every save
+// of a server file), and starting from an empty list retried every failed song each time.
+const SYNC_FAILURES_FILE = path.join(DATA_DIR, 'offline_sync_failures.json');
+const syncFailedAt = new Map<string, number>(Object.entries(readJson<Record<string, number>>(SYNC_FAILURES_FILE, {})));
+
+function markSyncFailed(keys: string[]) {
+  const now = Date.now();
+  for (const k of keys) syncFailedAt.set(k, now);
+  for (const [k, t] of syncFailedAt) if (t <= now - SYNC_RETRY_MS) syncFailedAt.delete(k);
+  try {
+    writeJsonAtomic(SYNC_FAILURES_FILE, Object.fromEntries(syncFailedAt));
+  } catch (err) {
+    logError('offline-sync', err);
+  }
+}
+
+const failedRecently = (key: string) => (syncFailedAt.get(key) ?? 0) > Date.now() - SYNC_RETRY_MS;
 const syncVideoIds = new Map<string, string>(); // song key -> video id found by search (liked songs saved without a link)
 let syncing = false;
 let syncAgain = false;
@@ -435,7 +451,10 @@ function syncSummary() {
     const id = (s.url && extractYouTubeVideoId(s.url)) || syncVideoIds.get(songKey(s));
     return id && localByVideoId(id);
   }).length;
-  const failed = [...syncFailedAt.values()].filter((t) => t > Date.now() - SYNC_RETRY_MS).length;
+  const failed = songs.filter((s) => {
+    const id = (s.url && extractYouTubeVideoId(s.url)) || syncVideoIds.get(songKey(s));
+    return failedRecently(songKey(s)) || (!!id && failedRecently(id));
+  }).length;
   return { wanted: songs.length, saved, failed, current: syncState.current, running: syncing };
 }
 
@@ -454,13 +473,15 @@ export async function runOfflineSync(): Promise<void> {
       syncState.lastRunAt = Date.now();
       for (const song of songs) {
         const key = songKey(song);
-        if ((syncFailedAt.get(key) ?? 0) > Date.now() - SYNC_RETRY_MS) continue;
+        if (failedRecently(key)) continue;
         if (!(await isOnline())) break;
         let videoId: string | null = null;
         try {
           videoId = await videoIdFor(song);
           if (!videoId) throw new Error('not found by search');
           if (localByVideoId(videoId)) continue;
+          // The same song saved twice (liked without a link, and played with one) is tried once
+          if (videoId !== key && failedRecently(videoId)) continue;
           if (saveQueue.some((s) => s.videoId === videoId)) continue;
           const cacheFile = cachedAudioPath(videoId);
           if (!fs.existsSync(cacheFile)) {
@@ -471,7 +492,7 @@ export async function runOfflineSync(): Promise<void> {
           saveQueue.push({ videoId, title: song.title || 'Unknown Track', artist: song.artist || 'Unknown Artist' });
           await processSaveQueue();
         } catch (err) {
-          syncFailedAt.set(key, Date.now());
+          markSyncFailed(videoId && videoId !== key ? [key, videoId] : [key]);
           logError('offline-sync', `${song.artist ?? ''} - ${song.title ?? ''} (${videoId ?? 'no id'}): ${(err as Error)?.message ?? err}`);
         } finally {
           syncState.current = '';

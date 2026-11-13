@@ -151,6 +151,18 @@ export async function handleHistory(req: IncomingMessage, res: ServerResponse, u
     }
     return true;
   }
+
+  if (req.method === 'DELETE') {
+    try {
+      writeJsonAtomic(PLAY_HISTORY_FILE, []);
+      res.end(JSON.stringify({ success: true, history: [] }));
+    } catch (err) {
+      logError('history_delete', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Failed to clear history' }));
+    }
+    return true;
+  }
   return false;
 }
 
@@ -341,7 +353,7 @@ export async function handleTransitions(req: IncomingMessage, res: ServerRespons
 
   if (req.method === 'POST') {
     try {
-      const body = await parseJsonBody<any>(req);
+      const body = (await parseJsonBody(req)) as any;
       if (!body || !body.outgoing || !body.incoming) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'Invalid transition payload' }));

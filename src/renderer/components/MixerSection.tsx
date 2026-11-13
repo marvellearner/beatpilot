@@ -15,6 +15,8 @@ const STYLES = [
   { id: 'vinyl_brake_drop' as const, label: 'Vinyl brake', hint: 'Turntable motor stop deceleration into drop' },
   { id: 'echo_freeze_throw' as const, label: 'Echo freeze', hint: 'Dotted-8th dub delay trailing into space' },
   { id: 'showcase_3band_handoff' as const, label: '3-band stem', hint: 'Pro 3-band stem frequency isolation handover' },
+  { id: 'reverb_wash_drop' as const, label: 'Reverb wash', hint: 'Stadium convolution reverb wash dissolving into drop' },
+  { id: 'drop_cut' as const, label: 'Drop cut', hint: 'Downbeat precision drop cut / drop swap' },
 ];
 
 export const MixerSection: React.FC<MixerSectionProps> = ({ engine }) => {

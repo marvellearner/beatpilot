@@ -12,7 +12,8 @@
  * Gap: when the outgoing song stops dead after a high point (a fraction of a second to a few
  * seconds of silence before it comes back), that silence is an exit of its own: the old song
  * plays into its stop and the new song comes in on the beat where the old one would have come
- * back, with no overlap at all. It works whatever the tempos and keys.
+ * back. The mixer decides how: a bare cut only when the new song fits (AudioEngine, gapCutFits),
+ * otherwise the old song is thrown into an echo or reverb at the start of its pause.
  *
  * Pair: the exit and the entry are chosen together, so the stretches that overlap in the blend
  * don't both carry vocals (two singers at once is the clearest sign of a bad mix). When every
@@ -52,6 +53,7 @@ export interface MixOption {
   score: number;
   vocals?: number; // 0 = instrumental, 1 = vocal-heavy, over the blend window (see vocalActivity)
   gap?: boolean; // an exit into the silence after a high point: a cut, no blend
+  gapStart?: number; // ...and where that silence begins
   low?: boolean; // the song is in a low part (verse, breakdown, intro, outro) at this point, not a high one
 }
 
@@ -343,7 +345,7 @@ export function planMix(params: {
     const why = long
       ? `current song stops after a high point: the new song drops in the moment it stops (no ${(gap.end - gap.start).toFixed(1)} s of silence)`
       : `current song stops after a high point (${(gap.end - gap.start).toFixed(1)} s of silence): the new song comes in where it would come back`;
-    exitOptions.push({ time: t, why, score, vocals: 0, gap: true, low: true });
+    exitOptions.push({ time: t, why, score, vocals: 0, gap: true, gapStart: gap.start, low: true });
   }
   if (exitOptions.length === 0) return null;
 

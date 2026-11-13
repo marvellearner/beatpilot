@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chooseNext, tempoStep, type FlowCandidate, type FlowContext } from '../src/audio/engine/setFlow';
+import { arrangeHead, BIG_JUMP_EVERY_MINUTES, chooseNext, rankForFlow, tempoStep, type FlowCandidate, type FlowContext } from '../src/audio/engine/setFlow';
 
 const song = (title: string, artist: string, extra: Partial<FlowCandidate> = {}): FlowCandidate => ({
   title, artist, bpm: 120, loudnessDb: -9, language: 'punjabi', requested: false, keyFit: 'unknown', ...extra,
@@ -83,5 +83,39 @@ describe('set flow: English songs in a Hindi / Punjabi run', () => {
   it('keeps the queue order before the run is long enough', () => {
     const ready = [song('Perfect', 'Ed Sheeran', { language: undefined, family: 'western' }), song('Softly', 'Karan Aujla', { family: 'desi' })];
     expect(chooseNext(ready, ctx({ current: { ...ctx().current, family: 'desi' }, desiRun: 1 })).pick.title).toBe('Perfect');
+  });
+});
+
+describe('Up Next arranged for the flow', () => {
+  // Last party: 104 -> 168 BPM jumps between neighbours. Now the close tempo wins.
+  const far = song('Far', 'A', { bpm: 168 });
+  const near = song('Near', 'B', { bpm: 123 });
+  const mid = song('Mid', 'C', { bpm: 134 });
+
+  it('ranks the song closest in tempo first, even from further down Up Next', () => {
+    const { ranked, reason } = rankForFlow([far, mid, near], ctx({ minutesSinceBigJump: 5 }));
+    expect(ranked.map((s) => s.title)).toEqual(['Near', 'Mid', 'Far']);
+    expect(reason).toContain('tempo');
+  });
+
+  it('allows a deliberate tempo change once the last big jump is long enough ago', () => {
+    const plain = song('Plain', 'D', { bpm: 168, keyFit: 'good' });
+    const clash = song('Close but clashing', 'G', { bpm: 121, keyFit: 'clash' });
+    expect(rankForFlow([clash, plain], ctx({ minutesSinceBigJump: 2 })).ranked[0]).toBe(clash);
+    expect(rankForFlow([clash, plain], ctx({ minutesSinceBigJump: BIG_JUMP_EVERY_MINUTES })).ranked[0]).toBe(plain);
+  });
+
+  it('half and double time count as close', () => {
+    expect(rankForFlow([far, song('Double', 'E', { bpm: 242 })], ctx({ minutesSinceBigJump: 5 })).ranked[0].title).toBe('Double');
+  });
+
+  it('never ranks a guest request: it keeps its place', () => {
+    const asked = song('Asked', 'F', { bpm: 170, requested: true });
+    expect(rankForFlow([asked, far, near], ctx()).ranked).not.toContain(asked);
+  });
+
+  it('moves the best songs to the top and keeps pinned songs where they are', () => {
+    const q = ['a', 'REQ', 'b', 'c', 'd'];
+    expect(arrangeHead(q, ['d', 'c'], (x) => x === 'REQ')).toEqual(['d', 'REQ', 'c', 'a', 'b']);
   });
 });

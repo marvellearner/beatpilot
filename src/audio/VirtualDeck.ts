@@ -351,6 +351,7 @@ export class VirtualDeck {
     }
     this.releaseStream();
     this.resetFilterSweep();
+    this.vocalFocus.settle(); // a vocal overlay left the song on the isolator's delayed route
     this.track = metadata;
     const isStrict = isStrictStartSong(metadata);
     if (isStrict) {
@@ -652,6 +653,17 @@ export class VirtualDeck {
 
   public getMusicLevel(): number {
     return this.vocalFocus.musicLevel;
+  }
+
+  /** The "Music" fader moved at an exact audio-clock time (vocal overlay; see VocalFocus). */
+  public scheduleMusicLevel(level: number, at: number) {
+    this.vocalFocus.scheduleMusicLevel(level, at);
+    this.notifyUpdate();
+  }
+
+  /** How late the song comes out while its vocal isolator runs (seconds). */
+  public get vocalLatencySeconds(): number {
+    return this.vocalFocus.latencySeconds;
   }
 
   public setVolume(vol: number) {

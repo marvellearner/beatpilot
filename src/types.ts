@@ -2,7 +2,7 @@ import type { EnergyProfile } from './audio/MixPointPlanner';
 import type { EqBandId, EqGains, MoodId } from './audio/Moods';
 import type { IntroAnalysisResult } from './audio/IntroSkitDetector';
 import type { RhythmState, RhythmCommand } from './audio/rhythm/RhythmEnhancer';
-import type { SongFilter } from '../shared/songFilter';
+import type { SongFilter, Vibe } from '../shared/songFilter';
 
 export type DeckId = 'A' | 'B';
 
@@ -100,7 +100,9 @@ export type TransitionStyle =
   | 'drop_cut'
   | 'bass_swap'
   | 'smooth_crossfade'
-  | 'tempo_ramp';
+  | 'tempo_ramp'
+  | 'drop_mix' // song A builds up (loop roll riser), song B lands on its drop (specialMixes.ts)
+  | 'vocal_overlay'; // song B's vocals over song A's beat, then B's chorus comes in (specialMixes.ts)
 
 export interface TransitionConfig {
   sourceDeck: DeckId;
@@ -110,7 +112,10 @@ export interface TransitionConfig {
   sourceExitTime?: number; // planned outgoing position to start the blend at (otherwise the next beat)
   targetEntryTime?: number; // planned incoming start position (otherwise hook cue / first beat)
   filterSweep?: boolean; // keys clash: the outgoing song leaves through a rising high-pass
+  dropMix?: boolean; // build up on the old song, land the new one on its drop (targetEntryTime is the drop)
+  vocalOverlay?: { revealSeconds: number }; // the new song's vocals only for this long (real seconds), then its full music and the old song out
   gapCut?: boolean; // the old song stopped after a high point: cut in on the beat, no blend, no echo
+  gapThrowLead?: number; // the new song doesn't suit a bare cut: seconds before it lands to throw the old song into its echo / reverb
   exitFx?: ExitFx; // how the old song leaves on a cut (see AudioEngine.chooseExitFx)
   showcase?: 'eq_blend' | 'wash'; // a showcase transition (see AudioEngine SHOWCASE_BARS / WASH_FADE_SECONDS)
   lowFade?: boolean; // tempos can't be beatmatched: fade over a low part for durationSeconds instead of a quick cut
@@ -124,7 +129,7 @@ export interface TransitionConfig {
  * roll = a loop roll build that the new song lands on, brake = a vinyl stop,
  * reverb = a reverb wash, echo = a beat-timed echo-out.
  */
-export type ExitFx = 'roll' | 'brake' | 'reverb' | 'echo';
+export type ExitFx = 'roll' | 'brake' | 'reverb' | 'echo' | 'filter'; // filter: resonant high-pass sweep out with a bass swap (filter_bass_swap)
 
 /** Record of an executed transition for historical analysis and review. */
 export interface TransitionLogEntry {
@@ -389,4 +394,12 @@ export type MobileAction =
   | { type: 'CMD_SORT_QUEUE_HARMONICALLY' }
   | { type: 'CMD_MOVE_QUEUED'; itemId: string; direction: 'up' | 'down' | 'top' }
   | { type: 'CMD_SET_SONG_FILTER'; filter: SongFilter }
-  | { type: 'CMD_CLEAR_FOCUS' };
+  | { type: 'CMD_CLEAR_FOCUS' }
+  | {
+      type: 'CMD_START_PARTY';
+      clearHistory?: boolean;
+      clearQueue?: boolean;
+      clearTransitions?: boolean;
+      vibe?: Vibe | 'auto';
+      customQuery?: string;
+    };

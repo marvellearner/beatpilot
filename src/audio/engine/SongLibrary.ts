@@ -94,6 +94,28 @@ export class SongLibrary {
     this.savePlayLog();
   }
 
+  /** Clears the local play log (Previously Played) and its localStorage persistence. */
+  public clearPlayLog() {
+    this.playLog = [];
+    try {
+      window.localStorage.removeItem(PLAY_LOG_KEY);
+    } catch {
+      // Storage unavailable
+    }
+    this.onChange();
+  }
+
+  /** Clears the server play history counts. */
+  public async clearHistory(): Promise<void> {
+    try {
+      await fetch('/api/history', { method: 'DELETE' });
+      this.history = [];
+      this.onChange();
+    } catch (err) {
+      console.error('Failed to clear server history:', err);
+    }
+  }
+
   // --- Play history (server, Most Played) ---
 
   public async fetchHistory(): Promise<SongHistoryItem[]> {

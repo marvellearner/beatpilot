@@ -138,27 +138,25 @@ The best transition is the one that sounds musically intentional, not necessaril
 - Apply effects only when they improve the transition.
 - Prioritize musical timing and intentionality.
 
-# Ways to Mix (What the App Chooses, and When)
+# Ways to Mix (The Advance DJ Transition Suite)
 
-The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of these for every pair. Both use the same rule for "can these two be beatmatched" (`computeBeatmatchRate`, at the outgoing song's actual playing tempo), so a planned blend never turns into a cut at the last moment.
+The planner (`MixPointPlanner.ts`), the mixer (`startTransition`), and the advanced transition router (`resolveAdvancedTransition`) execute **only advance-level pro DJ transitions**. Boring flat crossfades and plain volume dips are permanently eliminated. Every transition delivers an unmistakable pro club/festival experience.
 
-| Way | When | What you hear |
+| Advance DJ Style | Technique & Routing | Musical Context & What You Hear |
 |---|---|---|
-| **Long blend with bass swap** | Tempos match, keys fit | The mood's length (8 bars Normal / Party, 16 Chill / Romantic, 4 Bhangra). The new song's bass comes in as the old one's goes out. |
-| **Blend with filter sweep** | Tempos match, keys clash | Up to 8 bars. The old song's bass and chords thin out (rising high-pass) while the new song comes in. |
-| **Cut into the silence** | The old song stops dead after a high point | No overlap. The old song plays into its stop, and the new song comes in on the beat where the old one would have come back. Works whatever the tempos and keys. |
-| **Loop roll build** | Tempos match, in Normal, Party or Bhangra mood, the new song is bigger (≥ 1.5 dB louder, or a favourite) and the keys aren't a perfect fit. At most once every 4 mixes. | The bar at the exit repeats in slices of 1, ½ and ¼ beat (8 beats in all) under a rising filter (to 400 Hz) and a white-noise riser, then the new song lands on the 1. |
-| **Low-part fade** | Tempos can't be beatmatched (too far apart, or a beat that isn't clear) and either song is in a low part at the mix point | 4 bars (about 8 s, at most 9) when both songs are in a low part, 2 bars (at least 4 s) when one is, with the bass swap. The two beats aren't synced, so they only overlap where one side is quiet. Calm moods add a reverb wash. Both songs play at their natural speed. |
-| **Showcase blend** | Now and then (at most once every 4 mixes): tempos match and the keys don't clash | 16 bars (about 30–40 s), the bands handed over one at a time: the new song's highs come in first, then its mids (25–50%), the bass swaps at the half, and the old song's mids and highs fade out last. Planned with room for all 16 bars. |
-| **Slow wash fade** | Now and then (at most once every 4 mixes): tempos can't be beatmatched and both songs are in a low part | 12 s. The old song thins out through a rising filter and dissolves into a reverb tail as the new song rises. |
-| **Reverb wash** | Tempos too far apart, in a calm mood (Chill / Romantic), and neither song in a low part | About 2 s. The old song's last 4 beats feed a 3.5 s reverb, which washes on under the new song. A rhythmic echo would fight the new beat; a reverb tail has no rhythm. |
-| **Brake (vinyl stop)** | Tempos too far apart, on a dance floor, neither song in a low part. At most once every 4 mixes. | The old song slows to a halt over its last beat, pitch falling with it, and the new song hits on the 1. |
-| **Echo-out cut** | Tempos too far apart, neither song in a low part, otherwise | About 2 s. The old song's last beat echoes away under the new one. |
+| **3-Band Frequency Stem Isolation Handoff** (`showcase_3band_handoff`) | Frequency stem separation: incoming highs ramp in (0–30%), mids blend (25–50%), instant hard low-bass swap at 50%, outgoing mids/highs thin out (60–100%). | Beatmatched pairs with compatible Camelot keys (Exact, Energy +1, Deep -1). Crystal clear frequency separation with zero mud or colliding basslines. |
+| **Stutter Loop Roll Riser** (`loop_roll_riser`) | 8-beat stutter loop roll (1 beat → ½ → ¼ → ⅛ beat slices) under a rising resonant high-pass filter (to 400+ Hz) and white-noise riser sweep, landing with a punch on the 1. | Beatmatched tracks building into a drop, party/bhangra dance floor sets, or quick vocal-clash cuts. Builds massive anticipation into the incoming downbeat. |
+| **Turntable Vinyl Brake Drop** (`vinyl_brake_drop`) | Motor brake deceleration: pitch and tempo glide smoothly to a dead stop over the final 1.5 beats right before the incoming drop lands on beat 1. | Large tempo gaps (> 5% BPM ratio), dramatic genre shifts, or high-energy dance floor switches. The gold-standard club DJ move for sudden tempo transitions. |
+| **Echo Freeze Throw** (`echo_freeze_throw`) | Dotted-8th dub delay grab on the outgoing vocal/lead phrase, feeding a 3s decay tail that sweeps through a rising high-pass filter into stereo space. | Vocal clash avoidance, clashing Camelot keys, or tempo transitions where a rhythmic echo naturally carries energy over the mix. |
+| **Stadium Reverb Wash Dissolve** (`reverb_wash_drop`) | Large-space convolution reverb diffusion wash over 4 beats, dissolving the outgoing track into atmospheric space as the new song takes the floor. | Chill, romantic, acoustic, or ballad transitions, and low-part ambient breakdowns where rhythmic delay would clash. |
+| **Resonant Filter Bass Swap** (`filter_bass_swap`) | High-Q resonant HPF sweep thinning outgoing lows and mids up to 2.4 kHz with an instantaneous sub-bass kill and punch on the incoming downbeat. | Beatmatched blends, Camelot key clashes, or rapid phrase transitions. Clean tonal handoff preventing any harmonic clash. |
+| **Precision Drop Cut** (`drop_cut`) | Downbeat precision drop cut: instantaneous deck handoff on beat 1 timed to a breakdown pause, gap exit, or climax drop. | Gaps after high points, breakdown stops, or immediate impact cuts. |
 
 **Cut into the silence (a gap exit):**
 - **What counts as a gap:** 0.3–4 s quieter than 15% of the song's average level, right after 2 bars at least as loud as its average (a high point), with the music coming back afterwards (`findGaps`).
 - **Score:** a gap is worth 2.5, more than an 8-bar phrase start (1) plus a drop into a calmer section, so it wins when there is one in the window.
 - **Never before a chorus:** a stop that comes right before a chorus is the build-up to it, so it isn't used. The crowd is waiting for that chorus.
+- **Only when the new song can land on it:** a bare cut needs tempos within 8 %, keys that don't clash, and an entry at the start of a 4-bar phrase (`gapCutFits`). Otherwise the old song is thrown into an echo or reverb as its pause begins, and the tail fills the silence up to the new song.
 - **Shown:** the status line says "Cut into the silence after the old song's high point".
 
 **Why these, and when (research):**
@@ -173,7 +171,11 @@ The planner (`MixPointPlanner.ts`) and the mixer (`startTransition`) pick one of
 
 **No abrupt transitions (STRICT):** a song may change abruptly **only where the old song itself pauses** (a gap cut into its own silence). Everywhere else every transition overlaps for at least 4 s (`SMOOTH_MIN_SECONDS`), whoever asked for it: the AI DJ's "cut", the vocal-clash cut (now a 2-bar blend), Mix now, a disliked-song skip, a length picked by hand. So:
 - Loop roll and brake are the exception: hard landings, used only on a dance floor with no low part at the mix point, and never two close together.
-- Tempos that can't be beatmatched never get a plain fade. The move comes from `pickSignatureFx`, in rotation: echo-out, loop roll, reverb wash, brake (calm moods and quiet parts: reverb or echo only, thrown 60 % into a filtered, bass-swapped fade). Two soft beatless songs get the long wash fade.
+- Tempos that can't be beatmatched never get a plain fade. The move comes from `pickSignatureFx`, in rotation: echo-out, filter sweep, loop roll, reverb wash, brake (calm moods and quiet parts: reverb, echo or filter sweep only; echo and reverb are thrown 60 % into a filtered, bass-swapped fade). The filter sweep removes the old song's kick and bass first, so the two beats barely clash while they overlap. Two soft beatless songs get the long wash fade.
+- **Special mixes** (`specialMixes.ts`), at most one in every 4 mixes, taking turns:
+  - **Drop mix** (`drop_mix`): the old song builds up (loop roll riser: the loop speeds up from 1 beat to 1/8, a filter rises, a noise riser), then the new song lands on beat 1 of its **drop** (its detected drop, else its first chorus, else its hook; not in its intro, and with a minute of song left). Any tempos, since there's no blend. Never in a calm mood.
+  - **Vocal overlay** (`vocal_overlay`): the new song starts 8 bars before its first chorus as **vocals only** (its deck's vocal isolator, music down) over the old song's beat, whose mids are cut so its own vocals step back; both sit at the middle of the crossfader. On the chorus downbeat the new song's full music comes in and the old song drops out. Only for beatmatched songs whose keys are known to fit (`good` or `ok`; an unknown key once put Naina in 7A over Never Fold in 1B), and only when the 8 vocal bars start at least 8 bars into the new song's music, past its intro, where there is singing for the isolator to keep.
+- Beatmatched songs get `pickBlendFx`: mostly a **filter sweep blend** over the full blend length (resonant high-pass rising on the old song, bass swapped halfway), with a loop roll or an echo-out now and then on a dance floor (calm moods: filter sweep or echo). Every move skips the one used last, and the move used longest ago comes next.
 - Anything that overlaps stays beatmatched (natural tempo only for gap cuts), so the beats don't flam.
 Code: `smoothOnly` in `startTransition`, `executePendingMix`, `chooseExitFx`, `lowFadeSeconds`.
 
@@ -627,16 +629,17 @@ A DJ doesn't just take the queue in order. When the AI DJ isn't choosing (it's o
 3. **Keys that fit:**
    - a fitting key gains 1 point;
    - a clashing key loses 2.
-4. **Small tempo steps** (half and double time count as the same tempo):
-   - a step of 4% or less gains 0.5;
-   - a step over 8% loses 1;
-   - a step over 16% loses 2.
+4. **Small tempo steps** (half and double time count as the same tempo). An expert keeps neighbours within a few percent and changes tempo on purpose, now and then:
+   - a step of 3% or less gains 1; up to 6% gains 0.5;
+   - a step over 6% loses 0.5; over 10% loses 1.5;
+   - a jump over 16% loses 3, or only 1 once 20 minutes have passed since the last such jump (a deliberate tempo change is due).
 5. **Language runs:** a few songs (3) in one language before switching. An earlier switch loses 0.7. This only counts when the language is known for sure (script, artist or label). After 2 or more Hindi / Punjabi songs in a row, an English song loses 3 more (see "Language at the Top of Up Next").
 6. **No energy drop on a dance floor:** in Party or Bhangra mood, a song more than 3 dB quieter than the one on air loses 1.
 7. **Breathers:** on a dance floor, after 5 songs in a row with no step down in energy (no song at least 1.5 dB quieter than the one before it), a song 1.5–6 dB quieter than the one on air **gains** 0.8 instead of losing points, so people get a breather. A song more than 6 dB quieter still loses 1: a breather, not an empty floor.
 8. **Queue order still counts:** each place further back costs 0.6, so the queue wins unless another song flows clearly better.
-9. **The AI DJ is told the tempo step:** when it picks the next song, each ready song is labelled *"tempo step 3% (can blend)"* or *"tempo jump 25% (forces a cut)"* (8% or less blends; half and double time count), and it is asked to prefer songs that can blend.
-10. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
+9. **Up Next arranged for each song** (`arrangeUpNextForFlow`): a few seconds after a song goes on air, the next 10 ready songs are ranked by these same rules (each place further back costs only 0.15 here) and the best 3 move to the top, so the mix and the AI DJ choose among songs that flow. Requested songs keep their place, and a request first in line isn't jumped. Off when auto-curation is off. The song moved up shows why in Up Next ("Moved up for the flow: …").
+10. **The AI DJ is told the tempo step:** when it picks the next song, each ready song is labelled *"tempo step 3% (can blend)"* or *"tempo jump 25% (forces a cut)"* (8% or less blends; half and double time count), and it is asked to prefer songs that can blend.
+11. **Shown:** the reason appears as the AI DJ decision, e.g. *"Next: Softly — a different artist; its key fits; "G.O.A.T." would be same artist again"*.
 
 **Why:** the craft sources agree that a set is shaped as waves of energy rather than a random order or a flat line. Big tempo jumps need planning, and abrupt changes of genre or energy lose the floor. See [DJ.Studio: anatomy of a great mix](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic), [ZipDJ: how to structure a set](https://zipdj.com/blog/how-to-structure-a-dj-set) and [DJ Will Gill: setlist flow](https://djwillgill.com/pro-tactics-for-flawless-song-selection-for-dj-setlist-flow/).
 

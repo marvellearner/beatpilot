@@ -294,6 +294,11 @@ export const PartyConsoleView: React.FC<PartyConsoleViewProps> = ({ engine, head
             onQueue={queueFromHistory}
             favorites={favorites}
             onFavorite={favoriteFromHistory}
+            onClearHistory={async () => {
+              engine.library.clearPlayLog();
+              await engine.library.clearHistory();
+              showToast('Wiped test play history & reset 3-hour replay prevention!');
+            }}
           />
           <BangersPanel engine={engine} onToast={showToast} />
         </div>

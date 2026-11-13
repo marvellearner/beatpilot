@@ -9,6 +9,7 @@ interface PreviouslyPlayedPanelProps {
   onQueue?: (entry: PlayLogEntry) => void; // add to Up Next queue
   favorites?: { title?: string; url?: string }[]; // to show which songs are already saved
   onFavorite?: (entry: PlayLogEntry) => void; // save to / remove from Favourites
+  onClearHistory?: () => void; // wipe history & reset repeat blocks
   compact?: boolean;
 }
 
@@ -32,7 +33,15 @@ export function timeAgo(timestamp: number, now: number = Date.now()): string {
 }
 
 /** Songs that played recently, newest first. Songs from the last 3 hours won't be auto-queued again. */
-const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entries, onMix, onQueue, favorites = [], onFavorite, compact }) => {
+const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({
+  entries,
+  onMix,
+  onQueue,
+  favorites = [],
+  onFavorite,
+  onClearHistory,
+  compact,
+}) => {
   const now = Date.now();
 
   // RULE: In previously played no 2 consecutive songs can be same
@@ -66,11 +75,23 @@ const PreviouslyPlayedPanelView: React.FC<PreviouslyPlayedPanelProps> = ({ entri
             {displayEntries.length}
           </span>
         </div>
-        {inNoRepeatWindow > 0 && (
-          <span className="text-[10px] text-slate-400" title="Songs played in the last 3 hours aren't added to Up Next automatically">
-            {inNoRepeatWindow} in the last 3 h · no repeats
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {inNoRepeatWindow > 0 && (
+            <span className="text-[10px] text-slate-400" title="Songs played in the last 3 hours aren't added to Up Next automatically">
+              {inNoRepeatWindow} in 3h
+            </span>
+          )}
+          {onClearHistory && displayEntries.length > 0 && (
+            <button
+              type="button"
+              onClick={onClearHistory}
+              className="text-[10px] font-bold text-rose-300 hover:text-white bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 px-2 py-0.5 rounded-lg transition-colors cursor-pointer"
+              title="Wipe previous plays and reset 3-hour repeat prevention"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {displayEntries.length === 0 ? (

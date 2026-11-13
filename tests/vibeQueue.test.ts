@@ -18,6 +18,7 @@ describe('Vibe Detection & Set Alignment (Previous 3-5 Songs)', () => {
       expect(inferSongVibe({ title: 'Gehra Hua', artist: 'Arijit Singh' })).toBe('romantic');
       expect(inferSongVibe({ title: 'Tum Hi Ho', artist: 'Arijit Singh' })).toBe('romantic');
       expect(inferSongVibe({ title: 'Kasoor (Acoustic)', artist: 'Prateek Kuhad' })).toBe('romantic');
+      expect(inferSongVibe({ title: 'Kesariya - Brahmāstra | Ranbir Kapoor, Alia Bhatt | Pritam | Arijit Singh', artist: 'Sony Music India', bpm: 94 })).toBe('romantic');
 
       expect(inferSongVibe({ title: 'Sadi Gali Full Song Tanu Weds Manu', artist: 'T-Series' })).toBe('dance');
       expect(inferSongVibe({ title: 'Tera Yaar Bolda', artist: 'Surjit Bindrakhia' })).toBe('bhangra');
@@ -38,6 +39,7 @@ describe('Vibe Detection & Set Alignment (Previous 3-5 Songs)', () => {
       expect(isSongVibeCompatible('dance', { title: 'Tune Jo Na Kaha', artist: 'Mohit Chauhan' })).toBe(false);
       expect(isSongVibeCompatible('dance', { title: 'Gehra Hua', artist: 'Arijit Singh' })).toBe(false);
       expect(isSongVibeCompatible('dance', { title: 'Baarishein', artist: 'Anuv Jain' })).toBe(false);
+      expect(isSongVibeCompatible('dance', { title: 'Kesariya - Brahmāstra', artist: 'Sony Music India', bpm: 94 })).toBe(false);
       expect(isSongVibeCompatible('bhangra', { title: 'Tune Jo Na Kaha', artist: 'Mohit Chauhan' })).toBe(false);
 
       expect(isSongVibeCompatible('dance', { title: 'Sadi Gali', artist: 'T-Series' })).toBe(true);

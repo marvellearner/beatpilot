@@ -6,6 +6,7 @@ import { MixerSection } from './components/MixerSection';
 import { PartyConsoleView } from './components/PartyConsoleView';
 import { RamUsageMeter } from './components/RamUsageMeter';
 import { MixToast } from './components/MixToast';
+import { StartPartyModal } from './components/StartPartyModal';
 import { DJAgent, AIResponseResult } from '../ai/DJAgent';
 import { MobileRemoteView } from '../remote/MobileRemoteView';
 import { MobileAction } from '../types';
@@ -28,6 +29,7 @@ import {
   Music,
   ArrowUp,
   X,
+  PartyPopper,
 } from 'lucide-react';
 
 // Phone updates: at most this often (the engine can change many times per frame during a mix)
@@ -70,6 +72,7 @@ export const App: React.FC = () => {
   const [aiResult, setAiResult] = useState<AIResponseResult | null>(null);
   const [showHelp, setShowHelp] = useState<boolean>(false);
   const [showRemoteModal, setShowRemoteModal] = useState<boolean>(false);
+  const [showStartPartyModal, setShowStartPartyModal] = useState<boolean>(false);
 
   // 'remote' previews the phone remote on this laptop (the real phone uses RemoteClient)
   const [viewMode, setViewMode] = useState<'console' | 'remote'>('console');
@@ -201,6 +204,15 @@ export const App: React.FC = () => {
           break;
         case 'CMD_CLEAR_FOCUS':
           engine.clearArtistFocus();
+          break;
+        case 'CMD_START_PARTY':
+          void engine.startParty({
+            clearHistory: action.clearHistory,
+            clearQueue: action.clearQueue,
+            clearTransitions: action.clearTransitions,
+            vibe: action.vibe,
+            customQuery: action.customQuery,
+          });
           break;
       }
     },
@@ -433,6 +445,17 @@ export const App: React.FC = () => {
           {/* The Party console's my_songs.txt buttons are drawn here (see PartyConsoleView) */}
           {consoleMode === 'party' && <div id="app-header-party-slot" ref={onHeaderSlotRef} className="contents" />}
 
+          {/* Start Party Mode Button */}
+          <button
+            id="app-start-party-btn"
+            onClick={() => setShowStartPartyModal(true)}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-amber-400 via-rose-500 to-pink-500 hover:from-amber-300 hover:via-rose-400 hover:to-pink-400 text-slate-950 font-black px-3 py-1.5 rounded-xl text-xs shadow-lg shadow-rose-500/25 transition-all hover:scale-[1.03] active:scale-95 cursor-pointer border border-amber-300/40"
+            title="Done testing? Wipe test plays and let AI kick off the real party!"
+          >
+            <PartyPopper className="w-3.5 h-3.5 text-slate-950 fill-current" />
+            <span>🎉 Start Party</span>
+          </button>
+
           {/* View Switcher: Party Console vs Pro DJ Decks */}
           <div id="app-view-switcher" className="flex items-center bg-black/40 p-1 rounded-xl border border-white/10">
             <button
@@ -563,6 +586,13 @@ export const App: React.FC = () => {
 
       {/* iPhone Remote Modal */}
       <MixToast notice={system.mixNotice} />
+
+      {/* Start Party Mode Modal */}
+      <StartPartyModal
+        isOpen={showStartPartyModal}
+        onClose={() => setShowStartPartyModal(false)}
+        engine={engine}
+      />
 
       {showRemoteModal && (
         <div id="app-remote-modal" className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
